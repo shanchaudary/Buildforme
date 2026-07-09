@@ -151,12 +151,19 @@ const PAGE_META = {
     title: "Approvals",
     desc: "Local-only decisions. These are not GitHub reviews and do not authorize merges.",
   },
+  packets: {
+    kicker: "Handoff",
+    title: "Agent packets",
+    desc: "Generate tool-neutral instructions for Grok, Codex, Claude, or GLM. No live agent execution.",
+  },
   guide: {
     kicker: "Policy",
     title: "Risk policy",
     desc: "How Buildforme classifies work. Prefer blocking uncertain work over silent approval.",
   },
 };
+
+let lastGeneratedPacket = null;
 
 let lastPacket = null;
 let lastClassification = null;
@@ -444,6 +451,8 @@ async function checkServer() {
     node.textContent = `Online · ${payload.service}`;
     document.querySelector("#save-task").disabled = false;
     await loadTasks();
+    await loadApprovals();
+    await loadSavedPackets();
   } catch (error) {
     serverOnline = false;
     chip.classList.remove("checking");
@@ -711,6 +720,11 @@ function showView(name) {
   }
   if (name === "approvals" && serverOnline) {
     loadApprovals();
+  }
+  if (name === "packets" && serverOnline) {
+    loadPacketTaskOptions();
+    loadSavedPackets();
+    updatePacketSourceUI();
   }
 }
 
@@ -1112,6 +1126,352 @@ document.querySelector("#refresh-queue")?.addEventListener("click", () => {
 document.querySelector("#refresh-approvals")?.addEventListener("click", () => {
   loadApprovals();
 });
+
+// —— Agent packets ——
+function linesFrom(value) {
+  return String(value || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function updatePacketSourceUI() {
+  const source = document.querySelector("#packet_source_type")?.value || "manual";
+  const taskBlock = document.querySelector("#packet-source-task");
+  const prBlock = document.querySelector("#packet-source-pr");
+  const issueBlock = document.querySelector("#packet-source-issue");
+  if (taskBlock) taskBlock.hidden = source !== "task";
+  if (prBlock) prBlock.hidden = source !== "pull_request";
+  if (issueBlock) issueBlock.hidden = source !== "issue";
+}
+
+function packetFormPayload() {
+  const source_type = document.querySelector("#packet_source_type").value;
+  const payload = {
+    source_type,
+    title: document.querySelector("#packet_title").value.trim(),
+    target_repository: document.querySelector("#packet_repo").value.trim(),
+    target_branch: document.querySelector("#packet_branch").value.trim(),
+    operating_mode: document.querySelector("#packet_mode").value,
+    objective: document.querySelector("#packet_objective").value.trim(),
+    context: document.querySelector("#packet_context").value.trim(),
+    allowed_files: linesFrom(document.querySelector("#packet_allowed").value),
+    forbidden_files: linesFrom(document.querySelector("#packet_forbidden").value),
+    acceptance_criteria: linesFrom(document.querySelector("#packet_acceptance").value),
+    required_tests: linesFrom(document.querySelector("#packet_tests").value),
+    manual_proof: linesFrom(document.querySelector("#packet_proof").value),
+  };
+  return payload;
+}
+
+function applyPacketToForm(packet) {
+  if (!packet) return;
+  document.querySelector("#packet_title").value = packet.title || "";
+  document.querySelector("#packet_repo").value = packet.target_repository || "shanchaudary/Buildforme";
+  document.querySelector("#packet_branch").value = packet.target_branch || "main";
+  document.querySelector("#packet_mode").value = packet.operating_mode || "IMPLEMENTATION";
+  document.querySelector("#packet_objective").value = packet.objective || "";
+  document.querySelector("#packet_context").value = packet.context || "";
+  document.querySelector("#packet_allowed").value = (packet.allowed_files || []).join("\n");
+  document.querySelector("#packet_forbidden").value = (packet.forbidden_files || []).join("\n");
+  document.querySelector("#packet_acceptance").value = (packet.acceptance_criteria || []).join("\n");
+  if (packet.required_tests) {
+    document.querySelector("#packet_tests").value = (packet.required_tests || []).join("\n");
+  }
+  if (packet.manual_proof) {
+    document.querySelector("#packet_proof").value = (packet.manual_proof || []).join("\n");
+  }
+}
+
+function showGeneratedPacket(packet) {
+  lastGeneratedPacket = packet;
+  document.querySelector("#packet-empty").hidden = true;
+  document.querySelector("#packet-body").hidden = false;
+  document.querySelector("#packet-markdown").textContent = packet.markdown || "";
+  const risk = packet.risk || "UNKNOWN";
+  const chip = document.querySelector("#packet-risk-chip");
+  chip.textContent = risk;
+  chip.className = `risk-badge risk-${String(risk).toLowerCase()}`;
+}
+
+async function generatePacket(event) {
+  event?.preventDefault?.();
+  showFeedback("#packet-form-feedback", "");
+  const payload = packetFormPayload();
+  if (!payload.objective) {
+    showFeedback("#packet-form-feedback", "Objective is required.", "is-error");
+    return;
+  }
+  try {
+    const response = await fetch("/api/packets/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    showGeneratedPacket(data.packet);
+    showFeedback("#packet-form-feedback", `Generated · risk ${data.packet.risk}`, "is-ok");
+  } catch (error) {
+    showFeedback("#packet-form-feedback", error.message, "is-error");
+  }
+}
+
+async function loadPacketTaskOptions() {
+  const select = document.querySelector("#packet_task_select");
+  if (!select) return;
+  try {
+    const response = await fetch("/api/tasks");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    const tasks = payload.tasks || [];
+    select.innerHTML = "";
+    if (!tasks.length) {
+      select.innerHTML = `<option value="">No saved tasks</option>`;
+      return;
+    }
+    select.innerHTML = `<option value="">Select a saved task…</option>`;
+    for (const record of tasks.slice().reverse()) {
+      const task = record.task || {};
+      const opt = document.createElement("option");
+      opt.value = task.task_id || "";
+      opt.textContent = `${task.task_id || "?"} · ${(task.objective || "").slice(0, 60)}`;
+      opt.dataset.record = JSON.stringify(record);
+      select.appendChild(opt);
+    }
+  } catch (error) {
+    select.innerHTML = `<option value="">Could not load tasks</option>`;
+  }
+}
+
+async function importSavedTask() {
+  const select = document.querySelector("#packet_task_select");
+  const option = select?.selectedOptions?.[0];
+  if (!option?.dataset?.record) {
+    showFeedback("#packet-form-feedback", "Select a saved task first.", "is-error");
+    return;
+  }
+  try {
+    const record = JSON.parse(option.dataset.record);
+    const response = await fetch("/api/packets/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source_type: "task", task: record }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    applyPacketToForm(data.packet);
+    document.querySelector("#packet_source_type").value = "task";
+    updatePacketSourceUI();
+    showGeneratedPacket(data.packet);
+    showFeedback("#packet-form-feedback", "Imported saved task into packet.", "is-ok");
+  } catch (error) {
+    showFeedback("#packet-form-feedback", error.message, "is-error");
+  }
+}
+
+async function importPrForPacket() {
+  const repository = document.querySelector("#packet_pr_repo").value.trim();
+  const number = document.querySelector("#packet_pr_number").value.trim();
+  showFeedback("#packet-form-feedback", "Fetching PR (read-only)…", "is-ok");
+  try {
+    const response = await fetch("/api/packets/from-pr", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repository, number: Number(number) }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    applyPacketToForm(data.packet);
+    document.querySelector("#packet_source_type").value = "pull_request";
+    updatePacketSourceUI();
+    showGeneratedPacket(data.packet);
+    showFeedback("#packet-form-feedback", `Imported PR #${number}.`, "is-ok");
+  } catch (error) {
+    showFeedback("#packet-form-feedback", error.message, "is-error");
+  }
+}
+
+async function importIssueForPacket() {
+  const repository = document.querySelector("#packet_issue_repo").value.trim();
+  const number = document.querySelector("#packet_issue_number").value.trim();
+  showFeedback("#packet-form-feedback", "Fetching issue (read-only)…", "is-ok");
+  try {
+    const response = await fetch("/api/packets/from-issue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repository, number: Number(number) }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    applyPacketToForm(data.packet);
+    document.querySelector("#packet_source_type").value = "issue";
+    updatePacketSourceUI();
+    showGeneratedPacket(data.packet);
+    showFeedback("#packet-form-feedback", `Imported issue #${number}.`, "is-ok");
+  } catch (error) {
+    showFeedback("#packet-form-feedback", error.message, "is-error");
+  }
+}
+
+async function copyGeneratedPacket() {
+  if (!lastGeneratedPacket?.markdown) {
+    showFeedback("#packet-action-feedback", "Generate a packet first.", "is-error");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(lastGeneratedPacket.markdown);
+    showFeedback("#packet-action-feedback", "Packet copied to clipboard.", "is-ok");
+  } catch (error) {
+    // Fallback
+    const pre = document.querySelector("#packet-markdown");
+    const range = document.createRange();
+    range.selectNodeContents(pre);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    showFeedback("#packet-action-feedback", "Clipboard blocked — packet text selected for manual copy.", "is-error");
+  }
+}
+
+async function saveGeneratedPacket() {
+  if (!lastGeneratedPacket) {
+    showFeedback("#packet-action-feedback", "Generate a packet first.", "is-error");
+    return;
+  }
+  try {
+    const response = await fetch("/api/packets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ packet: lastGeneratedPacket }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    lastGeneratedPacket = data.packet;
+    showFeedback("#packet-action-feedback", "Saved locally (runtime/packets.json).", "is-ok");
+    await loadSavedPackets();
+  } catch (error) {
+    showFeedback("#packet-action-feedback", error.message, "is-error");
+  }
+}
+
+function downloadGeneratedPacket() {
+  if (!lastGeneratedPacket?.markdown) {
+    showFeedback("#packet-action-feedback", "Generate a packet first.", "is-error");
+    return;
+  }
+  const blob = new Blob([lastGeneratedPacket.markdown], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const safe = String(lastGeneratedPacket.title || lastGeneratedPacket.id || "packet")
+    .replace(/[^\w\-]+/g, "_")
+    .slice(0, 60);
+  a.href = url;
+  a.download = `${safe || "agent-packet"}.md`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  showFeedback("#packet-action-feedback", "Download started.", "is-ok");
+}
+
+function resetPacketForm() {
+  document.querySelector("#packet_source_type").value = "manual";
+  document.querySelector("#packet_title").value = "Scoped agent handoff";
+  document.querySelector("#packet_repo").value = "shanchaudary/Buildforme";
+  document.querySelector("#packet_branch").value = "main";
+  document.querySelector("#packet_mode").value = "READ_ONLY_AUDIT";
+  document.querySelector("#packet_objective").value = "Read-only audit of open documentation and report risks.";
+  document.querySelector("#packet_context").value = "Generated for external agent handoff. No production authority.";
+  document.querySelector("#packet_allowed").value = "docs/**\ntests/**";
+  document.querySelector("#packet_forbidden").value = ".env\nsecrets/**\ncredentials/**";
+  document.querySelector("#packet_acceptance").value = "Objective complete\nNo secrets exposed\nFinal report filled";
+  document.querySelector("#packet_tests").value = "";
+  document.querySelector("#packet_proof").value = "";
+  lastGeneratedPacket = null;
+  document.querySelector("#packet-empty").hidden = false;
+  document.querySelector("#packet-body").hidden = true;
+  updatePacketSourceUI();
+  showFeedback("#packet-form-feedback", "Form reset.", "is-ok");
+  showFeedback("#packet-action-feedback", "");
+}
+
+async function loadSavedPackets() {
+  const list = document.querySelector("#saved-packets-list");
+  const badge = document.querySelector("#packet-count");
+  if (!list) return;
+  try {
+    const response = await fetch("/api/packets");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    const packets = (payload.packets || []).slice().reverse();
+    if (badge) badge.textContent = String(packets.length);
+    list.innerHTML = "";
+    if (!packets.length) {
+      list.innerHTML = `<div class="empty-inline">No saved packets yet. Generate and save one above.</div>`;
+      return;
+    }
+    for (const packet of packets) {
+      const row = document.createElement("article");
+      row.className = "queue-item";
+      const risk = packet.risk || "UNKNOWN";
+      row.innerHTML = `
+        <div class="queue-item-head">
+          <h3 class="queue-item-title">${escapeHtml(packet.title || packet.id || "packet")}</h3>
+          <span class="risk-badge risk-${String(risk).toLowerCase()}">${escapeHtml(risk)}</span>
+        </div>
+        <div class="queue-meta">
+          <span>${escapeHtml(packet.source_type || "manual")}</span>
+          <span>${escapeHtml(packet.target_repository || "")}</span>
+          <span>${escapeHtml(packet.created_at || packet.updated_at || "")}</span>
+        </div>
+        <div class="queue-actions">
+          <button type="button" class="btn btn-secondary btn-sm" data-view-packet>View</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-copy-packet>Copy</button>
+          <button type="button" class="btn btn-danger btn-sm" data-delete-packet>Delete</button>
+        </div>
+      `;
+      row.querySelector("[data-view-packet]").addEventListener("click", () => {
+        applyPacketToForm(packet);
+        showGeneratedPacket(packet);
+        showFeedback("#packet-form-feedback", "Loaded saved packet.", "is-ok");
+      });
+      row.querySelector("[data-copy-packet]").addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(packet.markdown || "");
+          showFeedback("#packet-form-feedback", "Saved packet copied.", "is-ok");
+        } catch (error) {
+          showFeedback("#packet-form-feedback", "Could not copy automatically.", "is-error");
+        }
+      });
+      row.querySelector("[data-delete-packet]").addEventListener("click", async () => {
+        try {
+          const response = await fetch(`/api/packets/${encodeURIComponent(packet.id)}`, { method: "DELETE" });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+          await loadSavedPackets();
+          showFeedback("#packet-form-feedback", "Packet deleted locally.", "is-ok");
+        } catch (error) {
+          showFeedback("#packet-form-feedback", error.message, "is-error");
+        }
+      });
+      list.appendChild(row);
+    }
+  } catch (error) {
+    list.innerHTML = `<div class="empty-inline warning">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+document.querySelector("#packet-form")?.addEventListener("submit", generatePacket);
+document.querySelector("#packet_source_type")?.addEventListener("change", updatePacketSourceUI);
+document.querySelector("#import-saved-task")?.addEventListener("click", importSavedTask);
+document.querySelector("#import-pr")?.addEventListener("click", importPrForPacket);
+document.querySelector("#import-issue")?.addEventListener("click", importIssueForPacket);
+document.querySelector("#copy-packet-md")?.addEventListener("click", copyGeneratedPacket);
+document.querySelector("#save-packet")?.addEventListener("click", saveGeneratedPacket);
+document.querySelector("#download-packet")?.addEventListener("click", downloadGeneratedPacket);
+document.querySelector("#packet-reset")?.addEventListener("click", resetPacketForm);
+document.querySelector("#refresh-packets")?.addEventListener("click", loadSavedPackets);
 
 setupNav();
 showView("classify");

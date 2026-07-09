@@ -23,6 +23,18 @@ Buildforme is designed to let agents work while Shan is not watching the screen,
 
 Stage 2 only implements **local Buildforme approval**. UI copy must keep that explicit.
 
+## Agent packets (Stage 3)
+
+| Concept | Meaning |
+| --- | --- |
+| **Generated packet** | Structured instructions for an external agent (Markdown/JSON) |
+| **Not approval** | Saving or copying a packet does not approve RED work or merges |
+| **Not execution** | Buildforme does not call Grok/Codex/Claude/GLM in this stage |
+| **Scope** | Agent must not exceed allowed files/actions in the packet |
+| **Human gate** | RED/BLACK, production, secrets, payments, deploy, merge still need Shan |
+
+Local packet save writes only to `runtime/packets.json`. It does **not** mutate GitHub.
+
 ## Risk Matrix
 
 ### GREEN

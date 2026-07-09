@@ -66,6 +66,13 @@
             Approvals
             <span id="approval-count" class="nav-badge">0</span>
           </button>
+          <button type="button" class="nav-item" data-view="packets" role="tab" aria-selected="false">
+            <span class="nav-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+            </span>
+            Agent packets
+            <span id="packet-count" class="nav-badge">0</span>
+          </button>
           <button type="button" class="nav-item" data-view="guide" role="tab" aria-selected="false">
             <span class="nav-icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -412,6 +419,192 @@ Final git status reported</textarea>
             </div>
             <div id="approvals-list" class="queue-list">
               <div class="empty-inline">No local approvals yet.</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- VIEW: Agent packets -->
+        <section id="view-packets" class="view" data-view-panel="packets" hidden>
+          <div class="local-only-banner">
+            This packet does not authorize production writes, secrets, deployments, payments, merges, or GitHub mutations
+            unless explicitly stated and approved by Shan. Buildforme does not execute agents in this stage.
+          </div>
+
+          <div class="split packet-split">
+            <form id="packet-form" class="card form-card">
+              <div class="card-head">
+                <div>
+                  <h2>Packet generator</h2>
+                  <p class="card-sub">Hand off safe instructions to Grok, Codex, Claude, GLM, or any agent</p>
+                </div>
+                <span class="chip chip-accent">Stage 3</span>
+              </div>
+
+              <div class="field">
+                <label for="packet_source_type">Packet source</label>
+                <select id="packet_source_type">
+                  <option value="manual" selected>Manual objective</option>
+                  <option value="task">Saved task</option>
+                  <option value="pull_request">Work queue / PR</option>
+                  <option value="issue">Work queue / issue</option>
+                </select>
+              </div>
+
+              <div id="packet-source-task" class="source-block" hidden>
+                <div class="field">
+                  <label for="packet_task_select">Saved task</label>
+                  <select id="packet_task_select">
+                    <option value="">Load tasks from server…</option>
+                  </select>
+                </div>
+                <button type="button" id="import-saved-task" class="btn btn-secondary btn-sm">Import task fields</button>
+              </div>
+
+              <div id="packet-source-pr" class="source-block" hidden>
+                <div class="form-grid-2">
+                  <div class="field">
+                    <label for="packet_pr_repo">Repository</label>
+                    <input id="packet_pr_repo" value="shanchaudary/Buildforme" />
+                  </div>
+                  <div class="field">
+                    <label for="packet_pr_number">PR #</label>
+                    <input id="packet_pr_number" value="1" inputmode="numeric" />
+                  </div>
+                </div>
+                <button type="button" id="import-pr" class="btn btn-secondary btn-sm">Fetch PR &amp; import</button>
+              </div>
+
+              <div id="packet-source-issue" class="source-block" hidden>
+                <div class="form-grid-2">
+                  <div class="field">
+                    <label for="packet_issue_repo">Repository</label>
+                    <input id="packet_issue_repo" value="shanchaudary/Buildforme" />
+                  </div>
+                  <div class="field">
+                    <label for="packet_issue_number">Issue #</label>
+                    <input id="packet_issue_number" value="1" inputmode="numeric" />
+                  </div>
+                </div>
+                <button type="button" id="import-issue" class="btn btn-secondary btn-sm">Fetch issue &amp; import</button>
+              </div>
+
+              <div class="form-grid-2">
+                <div class="field">
+                  <label for="packet_title">Packet title</label>
+                  <input id="packet_title" value="Scoped agent handoff" />
+                </div>
+                <div class="field">
+                  <label for="packet_mode">Operating mode</label>
+                  <select id="packet_mode">
+                    <option value="READ_ONLY_AUDIT">Read-only audit</option>
+                    <option value="PLAN_ONLY">Plan only</option>
+                    <option value="DOCUMENTATION_ONLY">Documentation only</option>
+                    <option value="IMPLEMENTATION" selected>Implementation</option>
+                    <option value="REVIEW">Review</option>
+                    <option value="RELEASE">Release</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="form-grid-2">
+                <div class="field">
+                  <label for="packet_repo">Target repo</label>
+                  <input id="packet_repo" value="shanchaudary/Buildforme" />
+                </div>
+                <div class="field">
+                  <label for="packet_branch">Target branch</label>
+                  <input id="packet_branch" value="main" />
+                </div>
+              </div>
+
+              <div class="field">
+                <label for="packet_objective">Objective</label>
+                <textarea id="packet_objective" rows="3">Read-only audit of open documentation and report risks.</textarea>
+              </div>
+
+              <div class="form-grid-2">
+                <div class="field">
+                  <label for="packet_allowed">Allowed files</label>
+                  <textarea id="packet_allowed" rows="4" class="mono">docs/**
+tests/**</textarea>
+                </div>
+                <div class="field">
+                  <label for="packet_forbidden">Forbidden files</label>
+                  <textarea id="packet_forbidden" rows="4" class="mono">.env
+secrets/**
+credentials/**</textarea>
+                </div>
+              </div>
+
+              <div class="field">
+                <label for="packet_context">Context notes</label>
+                <textarea id="packet_context" rows="3">Generated for external agent handoff. No production authority.</textarea>
+              </div>
+
+              <div class="field">
+                <label for="packet_acceptance">Acceptance criteria</label>
+                <textarea id="packet_acceptance" rows="3">Objective complete
+No secrets exposed
+Final report filled</textarea>
+              </div>
+
+              <div class="field">
+                <label for="packet_tests">Required tests (optional overrides)</label>
+                <textarea id="packet_tests" rows="2" placeholder="Leave blank for defaults"></textarea>
+              </div>
+
+              <div class="field">
+                <label for="packet_proof">Manual proof required (optional overrides)</label>
+                <textarea id="packet_proof" rows="2" placeholder="Leave blank for defaults"></textarea>
+              </div>
+
+              <div class="button-row sticky-actions">
+                <button type="submit" class="btn btn-primary">Generate packet</button>
+                <button type="button" id="packet-reset" class="btn btn-ghost">Reset</button>
+              </div>
+              <p id="packet-form-feedback" class="toast" hidden></p>
+            </form>
+
+            <aside class="card decision-card packet-preview-card">
+              <div class="card-head">
+                <div>
+                  <h2>Generated packet</h2>
+                  <p class="card-sub">Copy into any coding agent · local only</p>
+                </div>
+                <span id="packet-risk-chip" class="risk-badge risk-unknown">—</span>
+              </div>
+
+              <div id="packet-empty" class="empty">
+                <div class="empty-visual" aria-hidden="true">
+                  <div class="empty-ring"></div>
+                  <div class="empty-core"></div>
+                </div>
+                <h3>No packet yet</h3>
+                <p>Choose a source, fill the form, then click <strong>Generate packet</strong>.</p>
+              </div>
+
+              <div id="packet-body" hidden>
+                <div class="decision-toolbar" style="margin-bottom: 12px">
+                  <button type="button" id="copy-packet-md" class="btn btn-secondary btn-sm">Copy packet</button>
+                  <button type="button" id="save-packet" class="btn btn-success btn-sm">Save packet locally</button>
+                  <button type="button" id="download-packet" class="btn btn-secondary btn-sm">Download .md</button>
+                </div>
+                <p id="packet-action-feedback" class="toast" hidden></p>
+                <pre id="packet-markdown" class="code-block packet-md"></pre>
+              </div>
+            </aside>
+          </div>
+
+          <div class="card" style="margin-top: 16px">
+            <div class="card-head">
+              <div>
+                <h2>Saved packets</h2>
+                <p class="card-sub">Stored in <code>runtime/packets.json</code> · not sent to any provider</p>
+              </div>
+              <button type="button" id="refresh-packets" class="btn btn-secondary btn-sm">Refresh</button>
+            </div>
+            <div id="saved-packets-list" class="queue-list">
+              <div class="empty-inline">No saved packets yet.</div>
             </div>
           </div>
         </section>

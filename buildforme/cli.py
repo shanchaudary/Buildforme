@@ -1,4 +1,4 @@
-"""Command-line interface for Buildforme policy checks and local server."""
+"""Command-line interface for Buildforme policy checks, packets, and local server."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from buildforme.packet_generator import generate_agent_packet, packet_from_task
 from buildforme.policy import classify_task, validate_task_packet
 
 
@@ -35,6 +36,17 @@ def classify_command(args: argparse.Namespace) -> int:
     return 0 if classification.risk.value in {"GREEN", "YELLOW"} else 2
 
 
+def generate_packet_command(args: argparse.Namespace) -> int:
+    task = load_task(args.path)
+    packet = packet_from_task(task)
+    if args.json:
+        print(json.dumps(packet, indent=2, sort_keys=True))
+    else:
+        print(packet.get("markdown") or "")
+    risk = str(packet.get("risk") or "RED")
+    return 0 if risk in {"GREEN", "YELLOW"} else 2
+
+
 def serve_command(args: argparse.Namespace) -> int:
     from buildforme.server import run
 
@@ -49,6 +61,15 @@ def build_parser() -> argparse.ArgumentParser:
     classify_parser = subparsers.add_parser("classify", help="Classify a task packet JSON file")
     classify_parser.add_argument("path", nargs="?", default="-", help="Path to JSON task packet, or '-' for stdin")
     classify_parser.set_defaults(func=classify_command)
+
+    packet_parser = subparsers.add_parser(
+        "generate-packet",
+        aliases=["packet"],
+        help="Generate a tool-neutral agent handoff packet (Markdown) from a task JSON file",
+    )
+    packet_parser.add_argument("path", nargs="?", default="-", help="Path to JSON task packet, or '-' for stdin")
+    packet_parser.add_argument("--json", action="store_true", help="Print full packet JSON instead of Markdown")
+    packet_parser.set_defaults(func=generate_packet_command)
 
     serve_parser = subparsers.add_parser("serve", help="Run the local supervisor server")
     serve_parser.add_argument("--host", default="127.0.0.1", help="Host to bind")

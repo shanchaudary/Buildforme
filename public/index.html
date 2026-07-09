@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Buildforme Founder Control Plane</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Founder Control Plane MVP</p>
+          <h1>Supervise AI builders without giving them unchecked authority.</h1>
+          <p class="lede">
+            Draft a task packet, classify its risk, and decide whether an agent may run unattended,
+            prepare a PR, or must wait for Shan.
+          </p>
+        </div>
+        <div class="status-card">
+          <span class="status-dot"></span>
+          <strong>Default posture</strong>
+          <p>Block uncertain work. Never auto-merge. Never expose secrets.</p>
+        </div>
+      </section>
+
+      <section class="grid">
+        <form id="task-form" class="panel">
+          <h2>Task Packet</h2>
+          <label>
+            Task ID
+            <input id="task_id" value="BF-0002" />
+          </label>
+          <label>
+            Operating Mode
+            <select id="operating_mode">
+              <option>READ_ONLY_AUDIT</option>
+              <option>PLAN_ONLY</option>
+              <option>DOCUMENTATION_ONLY</option>
+              <option>IMPLEMENTATION</option>
+              <option>REVIEW</option>
+              <option>RELEASE</option>
+            </select>
+          </label>
+          <label>
+            Objective
+            <textarea id="objective" rows="5">Fix dashboard response parser and add tests.</textarea>
+          </label>
+          <label>
+            Allowed files, one per line
+            <textarea id="allowed_files" rows="4">src/dashboard/**
+tests/**</textarea>
+          </label>
+          <label>
+            Forbidden files, one per line
+            <textarea id="forbidden_files" rows="4">.env
+secrets/**</textarea>
+          </label>
+          <label>
+            Acceptance criteria, one per line
+            <textarea id="acceptance_criteria" rows="4">Tests pass
+No secrets exposed
+Final git status reported</textarea>
+          </label>
+          <label class="checkbox">
+            <input id="data_mutation_allowed" type="checkbox" />
+            Data mutation allowed
+          </label>
+          <button type="submit">Classify task</button>
+        </form>
+
+        <section class="panel result-panel">
+          <h2>Decision</h2>
+          <div id="risk-badge" class="risk risk-yellow">YELLOW</div>
+          <dl class="decision-list">
+            <div><dt>Auto-run</dt><dd id="auto_run">Yes</dd></div>
+            <div><dt>Auto-merge</dt><dd id="auto_merge">No</dd></div>
+            <div><dt>Human approval</dt><dd id="human_approval">Required</dd></div>
+          </dl>
+          <h3>Reasons</h3>
+          <ul id="reasons"></ul>
+          <h3>Required actions</h3>
+          <ul id="actions"></ul>
+          <h3>Generated packet</h3>
+          <pre id="packet"></pre>
+        </section>
+      </section>
+
+      <section class="panel matrix">
+        <h2>Authority Matrix</h2>
+        <div class="matrix-grid">
+          <article><strong>GREEN</strong><p>Read-only, docs, tests, reviews. May run unattended.</p></article>
+          <article><strong>YELLOW</strong><p>Scoped implementation. May prepare PR only. Review required.</p></article>
+          <article><strong>RED</strong><p>Auth, tenancy, migrations, payments, deployment, production data. Wait for Shan.</p></article>
+          <article><strong>BLACK</strong><p>Secrets, auth bypass, fake success, unsafe production mutation. Reject.</p></article>
+        </div>
+      </section>
+    </main>
+    <script src="./app.js"></script>
+  </body>
+</html>

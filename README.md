@@ -12,7 +12,10 @@ Implemented in this branch:
 
 - Python policy engine for classifying AI engineering tasks as `GREEN`, `YELLOW`, `RED`, or `BLACK` risk.
 - CLI for validating and classifying task packets.
-- Static browser dashboard for drafting task packets and seeing the same approval model.
+- Dependency-free local supervisor server.
+- Local JSON task and approval storage under `runtime/`.
+- Static browser dashboard backed by the local server when running.
+- Optional read-only GitHub inspection for repositories, issues, pull requests, and changed PR files.
 - GitHub issue template for agent tasks.
 - Pull request template with supervision gates.
 - CI workflow for Python tests and policy smoke checks.
@@ -58,42 +61,80 @@ Buildforme must not automatically approve:
 
 Requires Python 3.11+.
 
+Run verification:
+
 ```bash
-python -m unittest
+python -m unittest discover -s tests -p 'test_*.py'
 python -m buildforme.cli classify data/sample_task.json
 ```
 
-Open the static dashboard:
+Run the local supervisor app:
 
 ```bash
-python -m http.server 8000
+python -m buildforme.cli serve
 ```
 
 Then open:
 
 ```text
-http://localhost:8000/public/
+http://127.0.0.1:8787
+```
+
+The app will save local tasks and approval decisions to:
+
+```text
+runtime/buildforme_state.json
+```
+
+`runtime/` is intentionally ignored by git.
+
+## Optional GitHub Read-Only Inspection
+
+Public repositories can be checked without a token, subject to GitHub public API rate limits.
+
+For private repositories or higher limits, set one local environment variable before starting the server:
+
+```bash
+export BUILDFORME_GITHUB_TOKEN=...
+# or
+export GITHUB_TOKEN=...
+```
+
+The token is used only as an Authorization header for read-only API calls. It is not shown in the UI, not saved to the runtime state file, and must not be committed.
+
+The local server currently exposes read-only endpoints:
+
+```text
+GET  /api/health
+GET  /api/tasks
+POST /api/classify
+POST /api/tasks
+POST /api/decisions
+GET  /api/github/repo?repository=owner/name
+GET  /api/github/issues?repository=owner/name&state=open&limit=20
+GET  /api/github/pr?repository=owner/name&number=1
 ```
 
 ## Repository Layout
 
 ```text
-buildforme/                Python policy engine and CLI
-public/                    Static local dashboard
+buildforme/                Python policy engine, CLI, server, storage, GitHub client
+public/                    Browser dashboard
+runtime/                   Local ignored state files
 data/                      Example task packets
 docs/                      Architecture, operating model, and roadmap
-tests/                     Unit tests
+tests/                     Unit and local server tests
 .github/                   CI, issue template, PR template
 ```
 
 ## Intended Next Build Steps
 
-1. Add GitHub API ingestion for issues, PRs, labels, and CI status.
-2. Add local persistent storage for tasks and approvals.
-3. Add provider adapters for Claude, Codex, GLM, and other agents.
+1. Add dashboard views for open PRs, failed CI, blocked approvals, and next recommended task.
+2. Add GitHub issue/PR synchronization into local task records.
+3. Add provider adapter contracts for Claude, Codex, GLM, and other agents.
 4. Add scheduled digest generation.
 5. Add a kill switch and repository lock state.
-6. Add deployment behind owner authentication.
+6. Add owner authentication before any hosted deployment.
 
 ## Safety Position
 

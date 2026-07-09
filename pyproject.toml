@@ -1,0 +1,9 @@
+[project]
+name = "buildforme"
+version = "0.1.0"
+description = "Founder control plane for supervising AI engineering agents."
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.setuptools]
+packages = ["buildforme"]

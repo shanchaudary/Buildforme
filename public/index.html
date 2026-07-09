@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Buildforme</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/public/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <!-- Sidebar -->
+      <aside class="sidebar" aria-label="Primary">
+        <div class="sidebar-brand">
+          <div class="logo">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path
+                d="M4 7.5L12 3l8 4.5v9L12 21l-8-4.5v-9z"
+                stroke="currentColor"
+                stroke-width="1.6"
+              />
+              <path d="M12 12l8-4.5M12 12v9M12 12L4 7.5" stroke="currentColor" stroke-width="1.6" />
+            </svg>
+          </div>
+          <div class="logo-text">
+            <span class="logo-name">Buildforme</span>
+            <span class="logo-tag">Control plane</span>
+          </div>
+        </div>
+
+        <nav class="nav" role="tablist" aria-label="App sections">
+          <button type="button" class="nav-item is-active" data-view="classify" role="tab" aria-selected="true">
+            <span class="nav-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </span>
+            Classify task
+          </button>
+          <button type="button" class="nav-item" data-view="tasks" role="tab" aria-selected="false">
+            <span class="nav-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M4 6h16M4 12h16M4 18h10" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+            </span>
+            Saved tasks
+            <span id="task-count" class="nav-badge">0</span>
+          </button>
+          <button type="button" class="nav-item" data-view="github" role="tab" aria-selected="false">
+            <span class="nav-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 00-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0020 4.77 5.07 5.07 0 0019.91 1S18.73.65 16 2.48a13.38 13.38 0 00-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 005 4.77a5.44 5.44 0 00-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 009 18.13V22" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </span>
+            GitHub inspect
+          </button>
+          <button type="button" class="nav-item" data-view="queue" role="tab" aria-selected="false">
+            <span class="nav-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M4 6h16M4 12h10M4 18h14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="18" cy="12" r="2" fill="currentColor"/></svg>
+            </span>
+            Work queue
+          </button>
+          <button type="button" class="nav-item" data-view="approvals" role="tab" aria-selected="false">
+            <span class="nav-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </span>
+            Approvals
+            <span id="approval-count" class="nav-badge">0</span>
+          </button>
+          <button type="button" class="nav-item" data-view="guide" role="tab" aria-selected="false">
+            <span class="nav-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </span>
+            Risk policy
+          </button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="posture-card">
+            <div class="posture-label">Default posture</div>
+            <div class="posture-value">Block uncertain work</div>
+            <div class="posture-meta">Never auto-merge · Never expose secrets</div>
+          </div>
+          <div id="server-chip" class="status-pill checking" role="status">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="server-status">Connecting…</span>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Main -->
+      <div class="main">
+        <header class="topbar">
+          <div class="topbar-left">
+            <p class="page-kicker" id="page-kicker">Workflow</p>
+            <h1 class="page-title" id="page-title">Classify task</h1>
+            <p class="page-desc" id="page-desc">
+              Scope the work an AI agent may do. Get a risk decision before it runs.
+            </p>
+          </div>
+          <div class="topbar-actions">
+            <button type="button" id="reset-example" class="btn btn-ghost">Reset example</button>
+            <button type="button" id="save-task" class="btn btn-secondary">Save task</button>
+            <button type="submit" form="task-form" class="btn btn-primary" id="classify-btn">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9 11l3 3L22 4M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Classify risk
+            </button>
+          </div>
+        </header>
+
+        <!-- VIEW: Classify -->
+        <section id="view-classify" class="view is-active" data-view-panel="classify">
+          <div class="metrics">
+            <article class="metric">
+              <span class="metric-label">Risk levels</span>
+              <div class="metric-pills">
+                <span class="pill pill-green">GREEN</span>
+                <span class="pill pill-yellow">YELLOW</span>
+                <span class="pill pill-red">RED</span>
+                <span class="pill pill-black">BLACK</span>
+              </div>
+            </article>
+            <article class="metric">
+              <span class="metric-label">Auto-merge</span>
+              <strong class="metric-value">Always off</strong>
+            </article>
+            <article class="metric">
+              <span class="metric-label">Uncertain risk</span>
+              <strong class="metric-value metric-value-warn">Defaults to RED</strong>
+            </article>
+            <article class="metric">
+              <span class="metric-label">Your role</span>
+              <strong class="metric-value">Approve high-risk only</strong>
+            </article>
+          </div>
+
+          <div class="split">
+            <form id="task-form" class="card form-card">
+              <div class="card-head">
+                <div>
+                  <h2>Task packet</h2>
+                  <p class="card-sub">What the agent is allowed to work on</p>
+                </div>
+                <span class="chip">Step 1</span>
+              </div>
+
+              <div class="form-grid-2">
+                <div class="field">
+                  <label for="task_id">Task ID</label>
+                  <input id="task_id" name="task_id" value="BF-0002" autocomplete="off" placeholder="BF-0002" />
+                </div>
+                <div class="field">
+                  <label for="operating_mode">Operating mode</label>
+                  <select id="operating_mode" name="operating_mode">
+                    <option value="READ_ONLY_AUDIT">Read-only audit</option>
+                    <option value="PLAN_ONLY">Plan only</option>
+                    <option value="DOCUMENTATION_ONLY">Documentation only</option>
+                    <option value="IMPLEMENTATION" selected>Implementation</option>
+                    <option value="REVIEW">Review</option>
+                    <option value="RELEASE">Release</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="field">
+                <label for="objective">Objective</label>
+                <textarea id="objective" name="objective" rows="3" placeholder="What should the agent accomplish?">Fix dashboard response parser and add tests.</textarea>
+              </div>
+
+              <div class="form-grid-2">
+                <div class="field">
+                  <label for="allowed_files">Allowed files <span class="hint">one glob / line</span></label>
+                  <textarea id="allowed_files" name="allowed_files" rows="4" class="mono">src/dashboard/**
+tests/**</textarea>
+                </div>
+                <div class="field">
+                  <label for="forbidden_files">Forbidden files <span class="hint">one path / line</span></label>
+                  <textarea id="forbidden_files" name="forbidden_files" rows="4" class="mono">.env
+secrets/**</textarea>
+                </div>
+              </div>
+
+              <div class="field">
+                <label for="acceptance_criteria">Acceptance criteria <span class="hint">one per line</span></label>
+                <textarea id="acceptance_criteria" name="acceptance_criteria" rows="3">Tests pass
+No secrets exposed
+Final git status reported</textarea>
+              </div>
+
+              <label class="switch-row">
+                <input id="data_mutation_allowed" name="data_mutation_allowed" type="checkbox" />
+                <span class="switch-ui" aria-hidden="true"></span>
+                <span class="switch-copy">
+                  <strong>Allow data mutation</strong>
+                  <span>Leave off unless the agent may change real or production data</span>
+                </span>
+              </label>
+
+              <p id="form-feedback" class="toast" hidden></p>
+
+              <div class="form-footer mobile-only">
+                <button type="submit" class="btn btn-primary btn-block">Classify risk</button>
+              </div>
+            </form>
+
+            <aside class="card decision-card" aria-live="polite">
+              <div class="card-head">
+                <div>
+                  <h2>Decision</h2>
+                  <p class="card-sub">What you’re allowed to do next</p>
+                </div>
+                <span class="chip chip-accent">Step 2</span>
+              </div>
+
+              <div id="decision-empty" class="empty">
+                <div class="empty-visual" aria-hidden="true">
+                  <div class="empty-ring"></div>
+                  <div class="empty-core"></div>
+                </div>
+                <h3>Waiting for classification</h3>
+                <p>
+                  Fill the task packet, then click <strong>Classify risk</strong>. You’ll get a clear risk level and the next safe action.
+                </p>
+                <div class="empty-steps">
+                  <div><span>1</span> Describe work</div>
+                  <div><span>2</span> Classify</div>
+                  <div><span>3</span> Act on guidance</div>
+                </div>
+              </div>
+
+              <div id="decision-body" class="decision" hidden>
+                <div class="verdict-banner" id="verdict-banner">
+                  <div id="risk-badge" class="risk-badge risk-yellow">YELLOW</div>
+                  <div class="verdict-copy">
+                    <h3 id="verdict-title">Scoped work — prepare a PR</h3>
+                    <p id="verdict-blurb"></p>
+                    <p id="decision-source" class="source"></p>
+                  </div>
+                </div>
+
+                <div class="next-card">
+                  <div class="next-label">Do this next</div>
+                  <p id="next-step" class="next-text"></p>
+                  <ul id="actions" class="action-list"></ul>
+                </div>
+
+                <div class="gates">
+                  <div class="gate" id="gate-autorun">
+                    <span class="gate-k">Unattended run</span>
+                    <span id="auto_run" class="gate-v">—</span>
+                  </div>
+                  <div class="gate" id="gate-automerge">
+                    <span class="gate-k">Auto-merge</span>
+                    <span id="auto_merge" class="gate-v">—</span>
+                  </div>
+                  <div class="gate" id="gate-human">
+                    <span class="gate-k">Your approval</span>
+                    <span id="human_approval" class="gate-v">—</span>
+                  </div>
+                </div>
+
+                <div class="why">
+                  <div class="why-label">Why this risk</div>
+                  <ul id="reasons" class="reason-list"></ul>
+                </div>
+
+                <div class="decision-toolbar">
+                  <button type="button" id="copy-packet" class="btn btn-secondary btn-sm">Copy packet</button>
+                  <button type="button" id="approve-task" class="btn btn-success btn-sm" hidden>Record approve</button>
+                  <button type="button" id="block-task" class="btn btn-danger btn-sm" hidden>Record block</button>
+                </div>
+                <p id="decision-feedback" class="toast" hidden></p>
+
+                <details class="code-details">
+                  <summary>Technical packet (JSON)</summary>
+                  <pre id="packet" class="code-block"></pre>
+                </details>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <!-- VIEW: Tasks -->
+        <section id="view-tasks" class="view" data-view-panel="tasks" hidden>
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>Saved tasks</h2>
+                <p class="card-sub">Local store · <code>runtime/buildforme_state.json</code> · click a row to load</p>
+              </div>
+            </div>
+            <div id="tasks-list" class="task-table"></div>
+          </div>
+        </section>
+
+        <!-- VIEW: GitHub -->
+        <section id="view-github" class="view" data-view-panel="github" hidden>
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>GitHub inspect</h2>
+                <p class="card-sub">Read-only PR and issue inspection · requires local server</p>
+              </div>
+            </div>
+            <form id="github-form" class="github-bar">
+              <div class="field grow">
+                <label for="github_repository">Repository</label>
+                <input id="github_repository" value="shanchaudary/Buildforme" placeholder="owner/repo" />
+              </div>
+              <div class="field field-narrow">
+                <label for="github_pr_number">PR #</label>
+                <input id="github_pr_number" value="1" inputmode="numeric" />
+              </div>
+              <div class="github-actions">
+                <button type="submit" class="btn btn-primary">Inspect PR</button>
+                <button type="button" id="load-issues" class="btn btn-secondary">Open issues</button>
+              </div>
+            </form>
+            <div id="github-summary" class="github-result" hidden></div>
+            <details class="code-details">
+              <summary>Raw API response</summary>
+              <pre id="github-output" class="code-block">Run a check to see results.</pre>
+            </details>
+          </div>
+        </section>
+
+        <!-- VIEW: Work queue -->
+        <section id="view-queue" class="view" data-view-panel="queue" hidden>
+          <div class="card queue-toolbar-card">
+            <div class="card-head">
+              <div>
+                <h2>Watched repositories</h2>
+                <p class="card-sub">
+                  Read-only GitHub sync · local notes only · never merges or writes to GitHub
+                </p>
+              </div>
+              <span class="chip chip-accent">Stage 2</span>
+            </div>
+            <form id="watch-repo-form" class="github-bar">
+              <div class="field grow">
+                <label for="watch_repository">Repository</label>
+                <input id="watch_repository" value="shanchaudary/Buildforme" placeholder="owner/repo" />
+              </div>
+              <div class="github-actions">
+                <button type="submit" class="btn btn-secondary">Add watched repo</button>
+                <button type="button" id="refresh-queue" class="btn btn-primary">Refresh queue</button>
+              </div>
+            </form>
+            <div id="watched-repos" class="chip-row"></div>
+            <p id="queue-feedback" class="toast" hidden></p>
+          </div>
+
+          <div id="queue-summary" class="metrics queue-metrics">
+            <article class="metric"><span class="metric-label">Open PRs</span><strong class="metric-value" id="sum-prs">—</strong></article>
+            <article class="metric"><span class="metric-label">Open issues</span><strong class="metric-value" id="sum-issues">—</strong></article>
+            <article class="metric"><span class="metric-label">CI failures</span><strong class="metric-value" id="sum-ci">—</strong></article>
+            <article class="metric"><span class="metric-label">Blocked / RED</span><strong class="metric-value" id="sum-blocked">—</strong></article>
+            <article class="metric"><span class="metric-label">Ready for review</span><strong class="metric-value" id="sum-ready">—</strong></article>
+            <article class="metric"><span class="metric-label">Safe next tasks</span><strong class="metric-value" id="sum-safe">—</strong></article>
+          </div>
+
+          <div id="recommended-next" class="card recommend-card">
+            <div class="recommend-label">Next recommended task</div>
+            <h3 id="recommend-headline">Load the work queue to get a recommendation</h3>
+            <p id="recommend-detail" class="card-sub">Click Refresh queue to pull open PRs and issues from watched repositories.</p>
+            <p id="recommend-action" class="recommend-action"></p>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>Pull requests</h2>
+                <p class="card-sub">Risk, CI, files, and local-only actions</p>
+              </div>
+            </div>
+            <div id="queue-pr-list" class="queue-list">
+              <div class="empty-inline">Refresh the queue to load open PRs.</div>
+            </div>
+          </div>
+
+          <div class="card" style="margin-top: 16px">
+            <div class="card-head">
+              <div>
+                <h2>Issues</h2>
+                <p class="card-sub">Candidate agent work · classified from title, body, labels</p>
+              </div>
+            </div>
+            <div id="queue-issue-list" class="queue-list">
+              <div class="empty-inline">Refresh the queue to load open issues.</div>
+            </div>
+          </div>
+
+          <div id="queue-errors" class="card" style="margin-top: 16px" hidden>
+            <div class="card-head"><h2>Queue errors</h2></div>
+            <ul id="queue-error-list" class="reason-list"></ul>
+          </div>
+        </section>
+
+        <!-- VIEW: Approvals -->
+        <section id="view-approvals" class="view" data-view-panel="approvals" hidden>
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>Local approvals</h2>
+                <p class="card-sub">
+                  Stored only on this machine · <strong>not</strong> GitHub reviews · <strong>not</strong> merge approval
+                </p>
+              </div>
+              <button type="button" id="refresh-approvals" class="btn btn-secondary btn-sm">Refresh</button>
+            </div>
+            <div class="local-only-banner">
+              Local decisions never call GitHub write APIs. They do not approve PRs on GitHub and do not authorize merges.
+            </div>
+            <div id="approvals-list" class="queue-list">
+              <div class="empty-inline">No local approvals yet.</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- VIEW: Guide -->
+        <section id="view-guide" class="view" data-view-panel="guide" hidden>
+          <div class="policy-grid">
+            <article class="policy-card policy-green">
+              <div class="policy-top">
+                <span class="pill pill-green">GREEN</span>
+                <span class="policy-auto">May auto-run</span>
+              </div>
+              <h3>Low risk</h3>
+              <p>Read-only audits, documentation, tests-only, reviews.</p>
+              <ul>
+                <li>Agent may run unattended</li>
+                <li>Must report final status</li>
+                <li>Merge still follows repo policy</li>
+              </ul>
+            </article>
+            <article class="policy-card policy-yellow">
+              <div class="policy-top">
+                <span class="pill pill-yellow">YELLOW</span>
+                <span class="policy-auto">PR only</span>
+              </div>
+              <h3>Medium risk</h3>
+              <p>Scoped implementation with tests and no high-risk data effects.</p>
+              <ul>
+                <li>May create branch / PR</li>
+                <li>Requires second-pass review</li>
+                <li>No merge without approval</li>
+              </ul>
+            </article>
+            <article class="policy-card policy-red">
+              <div class="policy-top">
+                <span class="pill pill-red">RED</span>
+                <span class="policy-auto">Founder gate</span>
+              </div>
+              <h3>High risk</h3>
+              <p>Auth, tenancy, migrations, payments, deploy, production data, legal.</p>
+              <ul>
+                <li>Plan or blocked PR only</li>
+                <li>Requires your explicit approval</li>
+                <li>Uncertain work defaults here</li>
+              </ul>
+            </article>
+            <article class="policy-card policy-black">
+              <div class="policy-top">
+                <span class="pill pill-black">BLACK</span>
+                <span class="policy-auto">Reject</span>
+              </div>
+              <h3>Forbidden</h3>
+              <p>Secrets, auth bypass, fake success, hide failing tests, unsafe mutation.</p>
+              <ul>
+                <li>Reject automatically</li>
+                <li>Rewrite the task safely</li>
+                <li>Never execute as written</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="card never-card">
+            <h2>Never auto-approved</h2>
+            <div class="never-grid">
+              <div>Production writes</div>
+              <div>Live payment capture</div>
+              <div>Database migrations</div>
+              <div>Secret handling</div>
+              <div>Production deploy</div>
+              <div>Merges to main</div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <script src="/public/app.js"></script>
+  </body>
+</html>

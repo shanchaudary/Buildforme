@@ -1,0 +1,82 @@
+name: Agent task
+
+description: Create a scoped task packet for an AI builder or reviewer.
+
+title: "[Agent Task]: "
+
+labels:
+  - agent-task
+
+body:
+  - type: input
+    id: task_id
+    attributes:
+      label: Task ID
+      placeholder: BF-0003
+    validations:
+      required: true
+
+  - type: dropdown
+    id: operating_mode
+    attributes:
+      label: Operating mode
+      options:
+        - READ_ONLY_AUDIT
+        - PLAN_ONLY
+        - DOCUMENTATION_ONLY
+        - IMPLEMENTATION
+        - REVIEW
+        - RELEASE
+    validations:
+      required: true
+
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: One narrow objective only.
+    validations:
+      required: true
+
+  - type: textarea
+    id: allowed_files
+    attributes:
+      label: Allowed files
+      description: One path or glob per line.
+    validations:
+      required: true
+
+  - type: textarea
+    id: forbidden_files
+    attributes:
+      label: Forbidden files
+      description: Include .env, secrets, unrelated modules, and anything out of scope.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance criteria
+      description: Concrete proof required before the task is accepted.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: data_mutation
+    attributes:
+      label: Data mutation allowed?
+      options:
+        - "No"
+        - "Yes - explicit approval attached"
+    validations:
+      required: true
+
+  - type: textarea
+    id: human_approval
+    attributes:
+      label: Human approval required before
+      description: List anything that must wait for Shan.
+      placeholder: merge, deployment, write-mode ingestion, migration, payment, secrets
+    validations:
+      required: false

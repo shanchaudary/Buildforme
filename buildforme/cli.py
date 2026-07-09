@@ -1,4 +1,4 @@
-"""Command-line interface for Buildforme policy checks."""
+"""Command-line interface for Buildforme policy checks and local server."""
 
 from __future__ import annotations
 
@@ -35,6 +35,13 @@ def classify_command(args: argparse.Namespace) -> int:
     return 0 if classification.risk.value in {"GREEN", "YELLOW"} else 2
 
 
+def serve_command(args: argparse.Namespace) -> int:
+    from buildforme.server import run
+
+    run(host=args.host, port=args.port, state_path=args.state)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Buildforme supervisor CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -42,6 +49,12 @@ def build_parser() -> argparse.ArgumentParser:
     classify_parser = subparsers.add_parser("classify", help="Classify a task packet JSON file")
     classify_parser.add_argument("path", nargs="?", default="-", help="Path to JSON task packet, or '-' for stdin")
     classify_parser.set_defaults(func=classify_command)
+
+    serve_parser = subparsers.add_parser("serve", help="Run the local supervisor server")
+    serve_parser.add_argument("--host", default="127.0.0.1", help="Host to bind")
+    serve_parser.add_argument("--port", type=int, default=8787, help="Port to bind")
+    serve_parser.add_argument("--state", default="runtime/buildforme_state.json", help="Local JSON state path")
+    serve_parser.set_defaults(func=serve_command)
     return parser
 
 

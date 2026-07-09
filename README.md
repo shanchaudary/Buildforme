@@ -13,9 +13,10 @@ Implemented in this branch:
 - Python policy engine for classifying AI engineering tasks as `GREEN`, `YELLOW`, `RED`, or `BLACK` risk.
 - CLI for validating and classifying task packets.
 - Dependency-free local supervisor server.
-- Local JSON task and approval storage under `runtime/`.
-- Static browser dashboard backed by the local server when running.
-- Optional read-only GitHub inspection for repositories, issues, pull requests, and changed PR files.
+- Local JSON task, watched-repo, and approval storage under `runtime/`.
+- Polished browser dashboard (dark control-plane UI).
+- **Stage 2 GitHub Work Queue**: open PRs/issues, CI status, risk, recommended next task, local-only approvals.
+- Optional read-only GitHub inspection for repositories, issues, pull requests, changed files, and commit checks.
 - GitHub issue template for agent tasks.
 - Pull request template with supervision gates.
 - CI workflow for Python tests and policy smoke checks.
@@ -31,7 +32,8 @@ It helps answer:
 - Is the task safe to run unattended?
 - Which files are allowed?
 - Which actions require human approval?
-- Did the agent provide enough proof?
+- Which PRs/issues need attention right now?
+- Did CI pass, fail, pend, or is status unknown?
 - Should a PR be merged, reviewed, reworked, or blocked?
 
 ## What Buildforme Must Not Do
@@ -47,6 +49,14 @@ Buildforme must not automatically approve:
 - cross-tenant or auth-sensitive changes
 - broad refactors
 - merges to `main`
+
+**Stage 2 still does not:**
+
+- call AI providers (Claude/Codex/GLM)
+- launch autonomous coding runs
+- merge or auto-merge PRs
+- edit GitHub issues, labels, or reviews
+- deploy or host multi-user auth
 
 ## Risk Levels
 
@@ -80,15 +90,35 @@ Then open:
 http://127.0.0.1:8787
 ```
 
-The app will save local tasks and approval decisions to:
+### Dashboard pages
+
+1. **Classify task** — draft a task packet and classify risk  
+2. **Saved tasks** — local task history  
+3. **GitHub inspect** — single PR/issue read-only check  
+4. **Work queue** — watched repos, open PRs/issues, CI, risk, next action  
+5. **Approvals** — local-only decisions (not GitHub reviews)  
+6. **Risk policy** — GREEN/YELLOW/RED/BLACK guide  
+
+### Work queue smoke test
+
+1. Start the server and open the dashboard.  
+2. Open **Work queue**.  
+3. Confirm watched repo defaults to `shanchaudary/Buildforme` (or add it).  
+4. Click **Refresh queue**.  
+5. Confirm PR #1 (or current open PRs) appears with risk, files, and CI status.  
+6. Use a local action such as **Mark locally reviewed** and confirm it appears under **Approvals**.  
+7. Confirm the UI never shows a token value.
+
+Local state files (gitignored):
 
 ```text
-runtime/buildforme_state.json
+runtime/buildforme_state.json   # tasks (legacy + primary)
+runtime/tasks.json              # task mirror
+runtime/repos.json              # watched repositories
+runtime/approvals.json          # local work-queue approvals
 ```
 
-`runtime/` is intentionally ignored by git.
-
-## Optional GitHub Read-Only Inspection
+## Optional GitHub Read-Only Access
 
 Public repositories can be checked without a token, subject to GitHub public API rate limits.
 
@@ -100,25 +130,48 @@ export BUILDFORME_GITHUB_TOKEN=...
 export GITHUB_TOKEN=...
 ```
 
-The token is used only as an Authorization header for read-only API calls. It is not shown in the UI, not saved to the runtime state file, and must not be committed.
+### What the token is used for
 
-The local server currently exposes read-only endpoints:
+- Authorization header on **read-only** GitHub REST API calls  
+- Listing open PRs and issues  
+- Reading PR metadata, changed files, and commit check/status data  
+
+### What the token is never used for
+
+- Merging PRs  
+- Creating reviews or approvals on GitHub  
+- Editing issues, labels, or comments  
+- Pushing code  
+- Any write API  
+
+The token is not shown in the UI, not saved under `runtime/`, and must not be committed.
+
+## API surface (local server)
 
 ```text
-GET  /api/health
-GET  /api/tasks
-POST /api/classify
-POST /api/tasks
-POST /api/decisions
-GET  /api/github/repo?repository=owner/name
-GET  /api/github/issues?repository=owner/name&state=open&limit=20
-GET  /api/github/pr?repository=owner/name&number=1
+GET    /api/health
+GET    /api/tasks
+POST   /api/classify
+POST   /api/tasks
+POST   /api/decisions
+GET    /api/repos
+POST   /api/repos
+DELETE /api/repos/{owner%2Fname}
+GET    /api/approvals
+POST   /api/approvals
+GET    /api/work-queue?repos=owner/name,owner/name
+GET    /api/pr/{owner}/{repo}/{number}/status
+GET    /api/github/repo?repository=owner/name
+GET    /api/github/issues?repository=owner/name&state=open&limit=20
+GET    /api/github/pr?repository=owner/name&number=1
 ```
+
+All GitHub-backed routes are read-only against GitHub. Approvals and decisions are local only.
 
 ## Repository Layout
 
 ```text
-buildforme/                Python policy engine, CLI, server, storage, GitHub client
+buildforme/                Policy, CLI, server, storage, GitHub client, work queue
 public/                    Browser dashboard
 runtime/                   Local ignored state files
 data/                      Example task packets
@@ -129,15 +182,17 @@ tests/                     Unit and local server tests
 
 ## Intended Next Build Steps
 
-1. Add dashboard views for open PRs, failed CI, blocked approvals, and next recommended task.
-2. Add GitHub issue/PR synchronization into local task records.
-3. Add provider adapter contracts for Claude, Codex, GLM, and other agents.
-4. Add scheduled digest generation.
-5. Add a kill switch and repository lock state.
-6. Add owner authentication before any hosted deployment.
+1. ~~GitHub work queue~~ (Stage 2 — this branch)  
+2. Stage 3 — Agent packet generator (still no live provider execution)  
+3. Provider adapter contracts for Claude, Codex, GLM  
+4. Scheduled digest generation  
+5. Kill switch and repository lock state  
+6. Owner authentication before any hosted deployment  
 
 ## Safety Position
 
 The app is intentionally conservative. It should prefer blocking work over approving dangerous work silently.
 
 If the classification is uncertain, the task must be treated as `RED` until a human approves it.
+
+**Local approval ≠ GitHub approval ≠ merge approval.**

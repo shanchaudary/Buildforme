@@ -24,7 +24,7 @@ Exit criteria:
 
 ## Stage 1 — Local Testable Supervisor
 
-Status: implemented in the current MVP branch.
+Status: implemented.
 
 Delivered:
 
@@ -35,6 +35,7 @@ Delivered:
 - Browser dashboard that can save and list tasks.
 - Optional read-only GitHub repository, issue, PR, and changed-file inspection.
 - Tests for policy, storage, GitHub client helpers, and local server endpoints.
+- Polished dark control-plane UI (sidebar navigation).
 
 Exit criteria:
 
@@ -46,21 +47,23 @@ Exit criteria:
 
 ## Stage 2 — GitHub Work Queue
 
-Next.
+Status: implemented in the current MVP branch.
 
 Objective:
 
 - Turn GitHub Issues and PRs into a usable work queue.
 - Show blocked, ready, failed, and needs-review states.
-- Map labels such as `risk:green`, `risk:yellow`, `risk:red`, `blocked:shan`, `stage:A` into the dashboard.
+- Recommend the next action for Shan without screen-watching.
 
-Tasks:
+Delivered:
 
-- Sync selected GitHub issues into local records.
-- Sync selected PR metadata and changed files into local records.
-- Pull CI status for PR head commits.
-- Add dashboard filters for risk, stage, and approval state.
-- Add a review checklist for each PR.
+- Watched repository storage (`runtime/repos.json`).
+- Work queue API assembling open PRs, issues, CI, risk, and recommended next task.
+- PR changed-file summary and commit check/status normalization (`passing` / `failing` / `pending` / `unknown`).
+- Local work-queue approvals (`runtime/approvals.json`) that never write to GitHub.
+- Dashboard pages: Work queue + Approvals (existing Classify / Saved / Inspect preserved).
+- Policy helper `classify_github_item` and recommended-action strings.
+- Tests for policy, GitHub client, storage, server, and work-queue ranking.
 
 Do not build yet:
 
@@ -68,26 +71,20 @@ Do not build yet:
 - auto-merge
 - production deployment
 - secret storage
+- GitHub label writes or PR reviews via API
 
-## Stage 3 — Agent Adapter Contracts
+## Stage 3 — Agent Packet Generator
+
+Next.
 
 Objective:
 
-- Define provider-neutral adapter contracts for Claude, Codex, GLM, and future coding agents.
-- Keep provider credentials outside task packets and outside git.
+- Given an issue/PR/work-queue item, generate a complete safe task packet for Codex, Claude, GLM, or Grok.
+- Still no live agent execution.
+- Still no auto-merge.
+- Still no production authority.
 
-Tasks:
-
-- Add adapter interface docs and stub-free contracts.
-- Add task dispatch plan format.
-- Add result intake format.
-- Add reviewer-agent packet format.
-
-Do not build yet:
-
-- live provider calls unless approved
-- background scheduling
-- autonomous merge
+Then: provider adapter contracts (dispatch plan, result intake, reviewer packet) without live provider calls until explicitly approved.
 
 ## Stage 4 — Approval Queue and Kill Switch
 

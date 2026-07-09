@@ -1352,3 +1352,240 @@ code {
     /* keep icon */
   }
 }
+
+/* -- Work queue / Approvals (Stage 2) -- */
+.queue-toolbar-card {
+  margin-bottom: 16px;
+}
+
+.queue-metrics {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  margin-bottom: 16px;
+}
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.repo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: rgba(7, 10, 18, 0.55);
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.repo-chip button {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.repo-chip button:hover {
+  color: #fda4af;
+}
+
+.recommend-card {
+  margin-bottom: 16px;
+  border-color: rgba(99, 102, 241, 0.35);
+  background:
+    radial-gradient(600px 120px at 0% 0%, rgba(99, 102, 241, 0.18), transparent 60%),
+    linear-gradient(180deg, rgba(20, 30, 46, 0.95) 0%, rgba(16, 24, 38, 0.98) 100%);
+}
+
+.recommend-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-2);
+  margin-bottom: 8px;
+}
+
+.recommend-card h3 {
+  margin: 0 0 6px;
+  font-size: 1.1rem;
+  letter-spacing: -0.02em;
+}
+
+.recommend-action {
+  margin: 12px 0 0;
+  font-size: 0.9rem;
+  font-weight: 650;
+  color: #c7d2fe;
+}
+
+.queue-list {
+  display: grid;
+  gap: 12px;
+}
+
+.queue-item {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  background: rgba(7, 10, 18, 0.45);
+  min-width: 0;
+}
+
+.queue-item-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.queue-item-title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  word-break: break-word;
+}
+
+.queue-item-title a {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.queue-item-title a:hover {
+  color: #a5b4fc;
+  text-decoration: underline;
+}
+
+.queue-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 10px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.queue-meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px solid var(--border);
+}
+
+.ci-passing { color: #4ade80; }
+.ci-failing { color: #fb7185; }
+.ci-pending { color: #facc15; }
+.ci-unknown { color: var(--text-muted); }
+
+.queue-action {
+  margin: 0 0 10px;
+  font-size: 0.88rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.queue-files {
+  margin: 0 0 12px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  word-break: break-all;
+}
+
+.queue-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.queue-note-input {
+  flex: 1 1 180px;
+  min-width: 140px;
+  margin: 0 !important;
+}
+
+.local-only-banner {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(234, 179, 8, 0.3);
+  background: var(--yellow-soft);
+  color: #fde68a;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.approval-row {
+  display: grid;
+  grid-template-columns: 110px 1fr auto;
+  gap: 12px;
+  align-items: start;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  background: rgba(7, 10, 18, 0.45);
+}
+
+.approval-decision {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #c7d2fe;
+  text-transform: uppercase;
+}
+
+.approval-title {
+  margin: 0 0 4px;
+  font-size: 0.92rem;
+  font-weight: 650;
+}
+
+.approval-meta {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.loading-inline {
+  padding: 28px;
+  text-align: center;
+  color: var(--text-secondary);
+  border: 1px dashed var(--border-strong);
+  border-radius: 12px;
+  font-size: 0.9rem;
+}
+
+@media (max-width: 1100px) {
+  .queue-metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 960px) {
+  .queue-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .approval-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .queue-metrics {
+    grid-template-columns: 1fr;
+  }
+}

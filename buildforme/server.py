@@ -1,8 +1,8 @@
 """Local Buildforme supervisor server.
 
-This is a dependency-free HTTP server for testing the MVP locally. It serves the
-static dashboard and exposes small JSON APIs for policy classification, local
-approval/task storage, and read-only GitHub inspection.
+Dependency-free HTTP server for the MVP. Serves the static dashboard and JSON
+APIs for policy classification, local storage, read-only GitHub inspection, and
+the Stage 2 work queue. Never mutates GitHub objects.
 """
 
 from __future__ import annotations
@@ -19,59 +19,113 @@ from typing import Any
 from buildforme.github_client import GitHubClient, GitHubClientError
 from buildforme.policy import classify_task, validate_task_packet
 from buildforme.storage import DEFAULT_STATE_PATH, LocalStore
+from buildforme.work_queue import build_pr_status, build_work_queue
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PUBLIC_ROOT = PROJECT_ROOT / "public"
 
 
 class BuildformeRequestHandler(BaseHTTPRequestHandler):
-    server_version = "BuildformeMVP/0.2"
+    server_version = "BuildformeMVP/0.3"
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path in {"/", "/public", "/public/", "/index.html"}:
+        path = parsed.path
+
+        if path in {"/", "/public", "/public/", "/index.html"}:
             self._serve_file(PUBLIC_ROOT / "index.html")
             return
-        if parsed.path.startswith("/public/"):
-            relative = parsed.path.removeprefix("/public/")
+        if path.startswith("/public/"):
+            relative = path.removeprefix("/public/")
             self._serve_file(PUBLIC_ROOT / relative)
             return
-        if parsed.path == "/api/health":
-            self._json(HTTPStatus.OK, {"status": "ok", "service": "buildforme"})
+
+        if path == "/api/health":
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "status": "ok",
+                    "service": "buildforme",
+                    "version": self.server_version,
+                    "github_token_configured": bool(self._github().token),
+                },
+            )
             return
-        if parsed.path == "/api/tasks":
+        if path == "/api/tasks":
             self._json(HTTPStatus.OK, {"tasks": self._store().list_tasks()})
             return
-        if parsed.path == "/api/github/repo":
+        if path == "/api/repos":
+            self._json(HTTPStatus.OK, {"repositories": self._store().list_repos()})
+            return
+        if path == "/api/approvals":
+            self._json(HTTPStatus.OK, {"approvals": self._store().list_approvals()})
+            return
+        if path == "/api/work-queue":
+            self._work_queue(parsed)
+            return
+        if path == "/api/github/repo":
             self._github_repo(parsed)
             return
-        if parsed.path == "/api/github/issues":
+        if path == "/api/github/issues":
             self._github_issues(parsed)
             return
-        if parsed.path == "/api/github/pr":
+        if path == "/api/github/pr":
             self._github_pr(parsed)
             return
-        # Serve dashboard assets at site root so href="./styles.css" works at /
-        # e.g. /styles.css, /app.js → public/styles.css, public/app.js
-        if self._try_serve_public_asset(parsed.path):
+        if path.startswith("/api/pr/") and path.endswith("/status"):
+            self._pr_status(path)
+            return
+
+        if self._try_serve_public_asset(path):
             return
         self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
-    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+    def do_POST(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path == "/api/classify":
+        path = parsed.path
+        if path == "/api/classify":
             self._classify(save=False)
             return
-        if parsed.path == "/api/tasks":
+        if path == "/api/tasks":
             self._classify(save=True)
             return
-        if parsed.path == "/api/decisions":
+        if path == "/api/decisions":
             self._record_decision()
+            return
+        if path == "/api/repos":
+            self._add_repo()
+            return
+        if path == "/api/approvals":
+            self._add_approval()
             return
         self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - stdlib signature
-        # Keep local testing output concise. Request details are not suppressed on errors.
+    def do_DELETE(self) -> None:  # noqa: N802
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        if path.startswith("/api/repos/"):
+            encoded = path.removeprefix("/api/repos/")
+            repository = urllib.parse.unquote(encoded)
+            try:
+                repos = self._store().remove_repo(repository)
+                self._json(HTTPStatus.OK, {"repositories": repos, "removed": repository})
+            except ValueError as exc:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        if path == "/api/repos":
+            repository = _first_query_value(parsed, "repository")
+            if not repository:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "repository query parameter is required"})
+                return
+            try:
+                repos = self._store().remove_repo(repository)
+                self._json(HTTPStatus.OK, {"repositories": repos, "removed": repository})
+            except ValueError as exc:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         return
 
     def _classify(self, save: bool) -> None:
@@ -110,6 +164,94 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_json"})
 
+    def _add_repo(self) -> None:
+        try:
+            payload = self._read_json()
+            if not isinstance(payload, dict):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
+                return
+            repository = str(payload.get("repository") or "").strip()
+            if not repository:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "repository is required"})
+                return
+            repos = self._store().add_repo(repository)
+            self._json(HTTPStatus.OK, {"repositories": repos, "added": repository})
+        except json.JSONDecodeError:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_json"})
+        except ValueError as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def _add_approval(self) -> None:
+        try:
+            payload = self._read_json()
+            if not isinstance(payload, dict):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
+                return
+            record = self._store().add_approval(payload)
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "record": record,
+                    "note": "Local Buildforme decision only — not a GitHub review or merge.",
+                },
+            )
+        except json.JSONDecodeError:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_json"})
+        except ValueError as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def _work_queue(self, parsed: urllib.parse.ParseResult) -> None:
+        repos_param = _first_query_value(parsed, "repos")
+        repos: list[str] | None = None
+        if repos_param:
+            repos = [part.strip() for part in repos_param.split(",") if part.strip()]
+        try:
+            payload = build_work_queue(self._store(), self._github(), repos=repos)
+            self._json(HTTPStatus.OK, payload)
+        except Exception as exc:  # noqa: BLE001 — never crash the supervisor process
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "repos": [],
+                    "watched_repositories": repos or [],
+                    "summary": {
+                        "open_prs": 0,
+                        "open_issues": 0,
+                        "ci_failures": 0,
+                        "blocked": 0,
+                        "ready_for_review": 0,
+                        "safe_next_tasks": 0,
+                    },
+                    "pull_requests": [],
+                    "issues": [],
+                    "recommended_next_task": {
+                        "priority": 7,
+                        "headline": "Work queue unavailable",
+                        "detail": str(exc),
+                        "recommended_action": "Retry refresh or check GitHub connectivity.",
+                    },
+                    "errors": [{"error": str(exc)}],
+                    "github_token_configured": bool(self._github().token),
+                },
+            )
+
+    def _pr_status(self, path: str) -> None:
+        # /api/pr/{owner}/{repo}/{number}/status
+        parts = path.strip("/").split("/")
+        if len(parts) != 6 or parts[0] != "api" or parts[1] != "pr" or parts[5] != "status":
+            self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+            return
+        owner, repo_name, number_raw = parts[2], parts[3], parts[4]
+        repository = f"{owner}/{repo_name}"
+        try:
+            number = int(number_raw)
+            payload = build_pr_status(self._github(), self._store(), repository, number)
+            self._json(HTTPStatus.OK, payload)
+        except ValueError as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        except GitHubClientError as exc:
+            self._json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
+
     def _github_repo(self, parsed: urllib.parse.ParseResult) -> None:
         repository = _first_query_value(parsed, "repository")
         if not repository:
@@ -137,7 +279,10 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
         repository = _first_query_value(parsed, "repository")
         number = _first_query_value(parsed, "number")
         if not repository or not number:
-            self._json(HTTPStatus.BAD_REQUEST, {"error": "repository and number query parameters are required"})
+            self._json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "repository and number query parameters are required"},
+            )
             return
         try:
             pr_number = int(number)
@@ -148,11 +293,6 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
 
     def _try_serve_public_asset(self, request_path: str) -> bool:
-        """Serve a file from public/ when requested from the site root.
-
-        Browsers resolve ./styles.css on http://host:8787/ to /styles.css.
-        Without this, the dashboard HTML loads unstyled.
-        """
         relative = request_path.lstrip("/")
         if not relative or relative.startswith("api/") or ".." in relative.split("/"):
             return False
@@ -180,7 +320,6 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
         body = resolved.read_bytes()
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
-        # Avoid sticky stale CSS/JS while iterating on the dashboard
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -209,7 +348,6 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
 
 
 def _content_type_for(path: Path) -> str:
-    """Reliable MIME types for dashboard assets (Windows mimetypes can miss .js/.css)."""
     suffix = path.suffix.lower()
     explicit = {
         ".html": "text/html; charset=utf-8",
@@ -247,6 +385,7 @@ def run(host: str = "127.0.0.1", port: int = 8787, state_path: str | Path = DEFA
     server.state_path = Path(state_path)  # type: ignore[attr-defined]
     print(f"Buildforme running at http://{host}:{port}")
     print(f"State file: {Path(state_path)}")
+    print("GitHub access: read-only (no merge, labels, comments, or PR writes)")
     server.serve_forever()
 
 

@@ -13,6 +13,16 @@ Buildforme is designed to let agents work while Shan is not watching the screen,
 | CI | Runs objective verification commands |
 | Buildforme | Coordinates packets, risk, status, and approvals |
 
+## Approval layers (do not conflate)
+
+| Layer | Meaning | Who | GitHub effect |
+| --- | --- | --- | --- |
+| **Local Buildforme approval** | Shan recorded a note/decision in `runtime/approvals.json` | Founder via dashboard | **None** — local only |
+| **GitHub PR review/approval** | Formal review on the PR | Human on GitHub | Appears on the PR |
+| **Merge approval** | Permission to merge to the target branch | Founder / branch protection | Required for merge; Buildforme never auto-merges |
+
+Stage 2 only implements **local Buildforme approval**. UI copy must keep that explicit.
+
 ## Risk Matrix
 
 ### GREEN

@@ -141,6 +141,16 @@ const PAGE_META = {
     title: "GitHub inspect",
     desc: "Read-only check of pull requests and issues before granting an agent more authority.",
   },
+  queue: {
+    kicker: "Supervisor",
+    title: "Work queue",
+    desc: "Open PRs, issues, CI, risk, and what needs you next — GitHub read-only, local notes only.",
+  },
+  approvals: {
+    kicker: "Supervisor",
+    title: "Approvals",
+    desc: "Local-only decisions. These are not GitHub reviews and do not authorize merges.",
+  },
   guide: {
     kicker: "Policy",
     title: "Risk policy",
@@ -691,12 +701,357 @@ function showView(name) {
   document.querySelector("#reset-example").style.display = onClassify ? "" : "none";
   document.querySelector("#save-task").style.display = onClassify ? "" : "none";
   document.querySelector("#classify-btn").style.display = onClassify ? "" : "none";
+
+  if (name === "queue" && serverOnline) {
+    loadWatchedRepos();
+    if (!document.querySelector("#queue-pr-list .queue-item")) {
+      // auto-load once when entering empty queue
+      refreshWorkQueue();
+    }
+  }
+  if (name === "approvals" && serverOnline) {
+    loadApprovals();
+  }
 }
 
 function setupNav() {
   document.querySelectorAll(".nav-item").forEach((item) => {
     item.addEventListener("click", () => showView(item.dataset.view));
   });
+}
+
+// —— Work queue ——
+
+async function loadWatchedRepos() {
+  const row = document.querySelector("#watched-repos");
+  if (!row) return;
+  try {
+    const response = await fetch("/api/repos");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    const repos = payload.repositories || [];
+    row.innerHTML = "";
+    if (repos.length === 0) {
+      row.innerHTML = `<span class="muted">No watched repos yet. Add one above.</span>`;
+      return;
+    }
+    for (const repo of repos) {
+      const chip = document.createElement("span");
+      chip.className = "repo-chip";
+      chip.innerHTML = `<span>${escapeHtml(repo)}</span>`;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.setAttribute("aria-label", `Remove ${repo}`);
+      remove.textContent = "×";
+      remove.addEventListener("click", () => removeWatchedRepo(repo));
+      chip.appendChild(remove);
+      row.appendChild(chip);
+    }
+  } catch (error) {
+    row.innerHTML = `<span class="warning">Could not load watched repos.</span>`;
+  }
+}
+
+async function addWatchedRepo(event) {
+  event.preventDefault();
+  const repository = document.querySelector("#watch_repository").value.trim();
+  if (!repository) {
+    showFeedback("#queue-feedback", "Enter owner/repo first.", "is-error");
+    return;
+  }
+  try {
+    const response = await fetch("/api/repos", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repository }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    showFeedback("#queue-feedback", `Watching ${repository}`, "is-ok");
+    await loadWatchedRepos();
+    await refreshWorkQueue();
+  } catch (error) {
+    showFeedback("#queue-feedback", error.message, "is-error");
+  }
+}
+
+async function removeWatchedRepo(repository) {
+  try {
+    const response = await fetch(`/api/repos/${encodeURIComponent(repository)}`, {
+      method: "DELETE",
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    showFeedback("#queue-feedback", `Removed ${repository}`, "is-ok");
+    await loadWatchedRepos();
+    await refreshWorkQueue();
+  } catch (error) {
+    showFeedback("#queue-feedback", error.message, "is-error");
+  }
+}
+
+async function refreshWorkQueue() {
+  const prList = document.querySelector("#queue-pr-list");
+  const issueList = document.querySelector("#queue-issue-list");
+  const errorBox = document.querySelector("#queue-errors");
+  const errorList = document.querySelector("#queue-error-list");
+  if (!prList || !issueList) return;
+
+  prList.innerHTML = `<div class="loading-inline">Loading work queue from GitHub (read-only)…</div>`;
+  issueList.innerHTML = `<div class="loading-inline">Loading issues…</div>`;
+  showFeedback("#queue-feedback", "");
+
+  try {
+    const response = await fetch("/api/work-queue");
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+
+    const summary = payload.summary || {};
+    setText("#sum-prs", summary.open_prs ?? 0);
+    setText("#sum-issues", summary.open_issues ?? 0);
+    setText("#sum-ci", summary.ci_failures ?? 0);
+    setText("#sum-blocked", summary.blocked ?? 0);
+    setText("#sum-ready", summary.ready_for_review ?? 0);
+    setText("#sum-safe", summary.safe_next_tasks ?? 0);
+
+    renderRecommended(payload.recommended_next_task);
+    renderPrQueue(payload.pull_requests || []);
+    renderIssueQueue(payload.issues || []);
+    await loadWatchedRepos();
+
+    const errors = payload.errors || [];
+    if (errors.length) {
+      errorBox.hidden = false;
+      errorList.innerHTML = errors
+        .map(
+          (err) =>
+            `<li>${escapeHtml(err.repository || "queue")}: ${escapeHtml(err.error || JSON.stringify(err))}</li>`,
+        )
+        .join("");
+    } else {
+      errorBox.hidden = true;
+      errorList.innerHTML = "";
+    }
+
+    const tokenNote = payload.github_token_configured
+      ? "Token configured (never displayed)."
+      : "No token — public repos only; rate limits apply.";
+    showFeedback("#queue-feedback", `Queue refreshed. ${tokenNote}`, "is-ok");
+  } catch (error) {
+    prList.innerHTML = `<div class="empty-inline warning">${escapeHtml(error.message)}</div>`;
+    issueList.innerHTML = `<div class="empty-inline warning">Queue failed to load.</div>`;
+    showFeedback("#queue-feedback", error.message, "is-error");
+  }
+}
+
+function setText(selector, value) {
+  const node = document.querySelector(selector);
+  if (node) node.textContent = String(value);
+}
+
+function renderRecommended(item) {
+  if (!item) return;
+  setText("#recommend-headline", item.headline || "No recommendation");
+  setText("#recommend-detail", item.detail || "");
+  const action = item.recommended_action
+    ? item.recommended_action
+    : item.title
+      ? `${item.repository || ""} #${item.number || ""} · ${item.title}`
+      : "";
+  setText("#recommend-action", action);
+}
+
+function ciClass(status) {
+  const value = String(status || "unknown").toLowerCase();
+  if (value === "passing") return "ci-passing";
+  if (value === "failing") return "ci-failing";
+  if (value === "pending") return "ci-pending";
+  return "ci-unknown";
+}
+
+function riskBadgeHtml(risk) {
+  const value = String(risk || "UNKNOWN").toUpperCase();
+  return `<span class="risk-badge risk-${value.toLowerCase()}">${escapeHtml(value)}</span>`;
+}
+
+function renderPrQueue(items) {
+  const list = document.querySelector("#queue-pr-list");
+  list.innerHTML = "";
+  if (!items.length) {
+    list.innerHTML = `<div class="empty-inline">No open pull requests in watched repositories.</div>`;
+    return;
+  }
+  for (const item of items) {
+    list.appendChild(renderQueueCard(item, "pull_request"));
+  }
+}
+
+function renderIssueQueue(items) {
+  const list = document.querySelector("#queue-issue-list");
+  list.innerHTML = "";
+  if (!items.length) {
+    list.innerHTML = `<div class="empty-inline">No open issues (excluding PRs) in watched repositories.</div>`;
+    return;
+  }
+  for (const item of items) {
+    list.appendChild(renderQueueCard(item, "issue"));
+  }
+}
+
+function renderQueueCard(item, targetType) {
+  const risk = (item.classification || {}).risk || "UNKNOWN";
+  const ci = (item.ci || {}).status || "unknown";
+  const local = item.local_approval;
+  const files = (item.files || []).slice(0, 8);
+  const card = document.createElement("article");
+  card.className = "queue-item";
+
+  const titleLink = item.html_url
+    ? `<a href="${escapeHtml(item.html_url)}" target="_blank" rel="noopener">#${escapeHtml(String(item.number))} ${escapeHtml(item.title || "")}</a>`
+    : `#${escapeHtml(String(item.number))} ${escapeHtml(item.title || "")}`;
+
+  const metaBits = [
+    `<span>${escapeHtml(item.repository || "")}</span>`,
+    `<span>${escapeHtml(item.state || "open")}</span>`,
+  ];
+  if (targetType === "pull_request") {
+    metaBits.push(`<span>draft: ${item.draft ? "yes" : "no"}</span>`);
+    if (item.mergeable != null) metaBits.push(`<span>mergeable: ${item.mergeable ? "yes" : "no"}</span>`);
+    metaBits.push(`<span>files: ${escapeHtml(String(item.changed_files_count ?? files.length))}</span>`);
+    if (item.additions != null) metaBits.push(`<span>+${escapeHtml(String(item.additions))} / −${escapeHtml(String(item.deletions ?? 0))}</span>`);
+    metaBits.push(`<span class="${ciClass(ci)}">CI: ${escapeHtml(ci)}</span>`);
+  } else {
+    const labels = (item.labels || []).join(", ") || "no labels";
+    metaBits.push(`<span>${escapeHtml(labels)}</span>`);
+    if (item.updated_at) metaBits.push(`<span>updated ${escapeHtml(item.updated_at)}</span>`);
+  }
+  if (local?.decision) {
+    metaBits.push(`<span>local: ${escapeHtml(local.decision)}</span>`);
+  }
+
+  card.innerHTML = `
+    <div class="queue-item-head">
+      <h3 class="queue-item-title">${titleLink}</h3>
+      ${riskBadgeHtml(risk)}
+    </div>
+    <div class="queue-meta">${metaBits.join("")}</div>
+    <p class="queue-action"><strong>Action:</strong> ${escapeHtml(item.recommended_action || "—")}</p>
+    ${
+      files.length
+        ? `<p class="queue-files">${files.map((f) => escapeHtml(f)).join(" · ")}${
+            (item.files || []).length > files.length ? " · …" : ""
+          }</p>`
+        : ""
+    }
+    <div class="queue-actions">
+      <input class="queue-note-input" type="text" placeholder="Local note (optional)" data-note />
+      <button type="button" class="btn btn-secondary btn-sm" data-decision="reviewed">Mark locally reviewed</button>
+      <button type="button" class="btn btn-secondary btn-sm" data-decision="ready_for_shan">Ready for Shan</button>
+      <button type="button" class="btn btn-danger btn-sm" data-decision="blocked">Mark blocked</button>
+      <button type="button" class="btn btn-ghost btn-sm" data-load-classify>Open in Classify</button>
+    </div>
+    <p class="toast" hidden data-row-feedback></p>
+  `;
+
+  card.querySelectorAll("[data-decision]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const note = card.querySelector("[data-note]").value;
+      const feedback = card.querySelector("[data-row-feedback]");
+      try {
+        await postLocalApproval({
+          target_type: targetType,
+          repository: item.repository,
+          number: item.number,
+          decision: btn.getAttribute("data-decision"),
+          note,
+        });
+        feedback.hidden = false;
+        feedback.className = "toast is-ok";
+        feedback.textContent = "Saved locally (not a GitHub approval).";
+        await loadApprovals();
+      } catch (error) {
+        feedback.hidden = false;
+        feedback.className = "toast is-error";
+        feedback.textContent = error.message;
+      }
+    });
+  });
+
+  card.querySelector("[data-load-classify]")?.addEventListener("click", () => {
+    loadItemIntoClassify(item, targetType);
+  });
+
+  return card;
+}
+
+function loadItemIntoClassify(item, targetType) {
+  const files = item.files || [];
+  const objective =
+    targetType === "pull_request"
+      ? `Review PR #${item.number}: ${item.title || ""}`
+      : `Work issue #${item.number}: ${item.title || ""}`;
+  fillForm({
+    task_id: `GH-${targetType === "pull_request" ? "PR" : "ISSUE"}-${item.number}`,
+    operating_mode: targetType === "pull_request" ? "REVIEW" : "IMPLEMENTATION",
+    objective,
+    allowed_files: files.length ? files.join("\n") : "docs/**\n",
+    forbidden_files: ".env\nsecrets/**",
+    acceptance_criteria: "Tests/CI considered\nNo secrets exposed\nFinal status reported",
+    data_mutation_allowed: false,
+  });
+  showView("classify");
+  showFeedback("#form-feedback", "Loaded from work queue — classify before giving an agent more authority.", "is-ok");
+}
+
+async function postLocalApproval(payload) {
+  const response = await fetch("/api/approvals", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error || `HTTP ${response.status}`);
+  }
+  return data;
+}
+
+async function loadApprovals() {
+  const list = document.querySelector("#approvals-list");
+  const badge = document.querySelector("#approval-count");
+  if (!list) return;
+  try {
+    const response = await fetch("/api/approvals");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    const approvals = (payload.approvals || []).slice().reverse();
+    if (badge) badge.textContent = String(approvals.length);
+    list.innerHTML = "";
+    if (!approvals.length) {
+      list.innerHTML = `<div class="empty-inline">No local approvals yet. Use Work queue actions to record one.</div>`;
+      return;
+    }
+    for (const item of approvals) {
+      const row = document.createElement("article");
+      row.className = "approval-row";
+      const target =
+        item.target_type === "task"
+          ? "task"
+          : `${item.repository || "?"} #${item.number ?? "?"}`;
+      row.innerHTML = `
+        <div class="approval-decision">${escapeHtml(item.decision || "")}</div>
+        <div>
+          <p class="approval-title">${escapeHtml(String(item.target_type || ""))} · ${escapeHtml(target)}</p>
+          <div class="approval-meta">${escapeHtml(item.note || "No note")} · ${escapeHtml(item.updated_at || item.created_at || "")}</div>
+          <div class="approval-meta">Local only — not a GitHub review or merge approval</div>
+        </div>
+        <span class="chip">local</span>
+      `;
+      list.appendChild(row);
+    }
+  } catch (error) {
+    list.innerHTML = `<div class="empty-inline warning">${escapeHtml(error.message)}</div>`;
+  }
 }
 
 async function copyPacket() {
@@ -749,6 +1104,14 @@ document.querySelector("#block-task").addEventListener("click", () => {
 
 document.querySelector("#github-form").addEventListener("submit", inspectPullRequest);
 document.querySelector("#load-issues").addEventListener("click", loadIssues);
+
+document.querySelector("#watch-repo-form")?.addEventListener("submit", addWatchedRepo);
+document.querySelector("#refresh-queue")?.addEventListener("click", () => {
+  refreshWorkQueue();
+});
+document.querySelector("#refresh-approvals")?.addEventListener("click", () => {
+  loadApprovals();
+});
 
 setupNav();
 showView("classify");

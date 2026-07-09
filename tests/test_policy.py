@@ -76,6 +76,21 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(result.risk, RiskLevel.RED)
         self.assertFalse(result.auto_run_allowed)
 
+    def test_changed_env_file_escalates(self):
+        task = dict(BASE_TASK)
+        task["files_changed"] = [".env", "README.md"]
+        result = classify_task(task)
+        self.assertEqual(result.risk, RiskLevel.RED)
+        self.assertFalse(result.auto_run_allowed)
+
+    def test_forbidden_env_does_not_escalate_without_changed_files(self):
+        task = dict(BASE_TASK)
+        task["forbidden_files"] = [".env", "secrets/**"]
+        task["files_changed"] = []
+        result = classify_task(task)
+        self.assertEqual(result.risk, RiskLevel.GREEN)
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -53,6 +53,19 @@
             </span>
             GitHub inspect
           </button>
+          <button type="button" class="nav-item" data-view="queue" role="tab" aria-selected="false">
+            <span class="nav-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M4 6h16M4 12h10M4 18h14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="18" cy="12" r="2" fill="currentColor"/></svg>
+            </span>
+            Work queue
+          </button>
+          <button type="button" class="nav-item" data-view="approvals" role="tab" aria-selected="false">
+            <span class="nav-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </span>
+            Approvals
+            <span id="approval-count" class="nav-badge">0</span>
+          </button>
           <button type="button" class="nav-item" data-view="guide" role="tab" aria-selected="false">
             <span class="nav-icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -307,6 +320,99 @@ Final git status reported</textarea>
               <summary>Raw API response</summary>
               <pre id="github-output" class="code-block">Run a check to see results.</pre>
             </details>
+          </div>
+        </section>
+
+        <!-- VIEW: Work queue -->
+        <section id="view-queue" class="view" data-view-panel="queue" hidden>
+          <div class="card queue-toolbar-card">
+            <div class="card-head">
+              <div>
+                <h2>Watched repositories</h2>
+                <p class="card-sub">
+                  Read-only GitHub sync · local notes only · never merges or writes to GitHub
+                </p>
+              </div>
+              <span class="chip chip-accent">Stage 2</span>
+            </div>
+            <form id="watch-repo-form" class="github-bar">
+              <div class="field grow">
+                <label for="watch_repository">Repository</label>
+                <input id="watch_repository" value="shanchaudary/Buildforme" placeholder="owner/repo" />
+              </div>
+              <div class="github-actions">
+                <button type="submit" class="btn btn-secondary">Add watched repo</button>
+                <button type="button" id="refresh-queue" class="btn btn-primary">Refresh queue</button>
+              </div>
+            </form>
+            <div id="watched-repos" class="chip-row"></div>
+            <p id="queue-feedback" class="toast" hidden></p>
+          </div>
+
+          <div id="queue-summary" class="metrics queue-metrics">
+            <article class="metric"><span class="metric-label">Open PRs</span><strong class="metric-value" id="sum-prs">—</strong></article>
+            <article class="metric"><span class="metric-label">Open issues</span><strong class="metric-value" id="sum-issues">—</strong></article>
+            <article class="metric"><span class="metric-label">CI failures</span><strong class="metric-value" id="sum-ci">—</strong></article>
+            <article class="metric"><span class="metric-label">Blocked / RED</span><strong class="metric-value" id="sum-blocked">—</strong></article>
+            <article class="metric"><span class="metric-label">Ready for review</span><strong class="metric-value" id="sum-ready">—</strong></article>
+            <article class="metric"><span class="metric-label">Safe next tasks</span><strong class="metric-value" id="sum-safe">—</strong></article>
+          </div>
+
+          <div id="recommended-next" class="card recommend-card">
+            <div class="recommend-label">Next recommended task</div>
+            <h3 id="recommend-headline">Load the work queue to get a recommendation</h3>
+            <p id="recommend-detail" class="card-sub">Click Refresh queue to pull open PRs and issues from watched repositories.</p>
+            <p id="recommend-action" class="recommend-action"></p>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>Pull requests</h2>
+                <p class="card-sub">Risk, CI, files, and local-only actions</p>
+              </div>
+            </div>
+            <div id="queue-pr-list" class="queue-list">
+              <div class="empty-inline">Refresh the queue to load open PRs.</div>
+            </div>
+          </div>
+
+          <div class="card" style="margin-top: 16px">
+            <div class="card-head">
+              <div>
+                <h2>Issues</h2>
+                <p class="card-sub">Candidate agent work · classified from title, body, labels</p>
+              </div>
+            </div>
+            <div id="queue-issue-list" class="queue-list">
+              <div class="empty-inline">Refresh the queue to load open issues.</div>
+            </div>
+          </div>
+
+          <div id="queue-errors" class="card" style="margin-top: 16px" hidden>
+            <div class="card-head"><h2>Queue errors</h2></div>
+            <ul id="queue-error-list" class="reason-list"></ul>
+          </div>
+        </section>
+
+        <!-- VIEW: Approvals -->
+        <section id="view-approvals" class="view" data-view-panel="approvals" hidden>
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>Local approvals</h2>
+                <p class="card-sub">
+                  Stored only on this machine · <strong>not</strong> GitHub reviews · <strong>not</strong> merge approval
+                </p>
+              </div>
+              <button type="button" id="refresh-approvals" class="btn btn-secondary btn-sm">Refresh</button>
+            </div>
+            <div class="local-only-banner">
+              Local decisions never call GitHub write APIs. They do not approve PRs on GitHub and do not authorize merges.
+            </div>
+            <div id="approvals-list" class="queue-list">
+              <div class="empty-inline">No local approvals yet.</div>
+            </div>
           </div>
         </section>
 

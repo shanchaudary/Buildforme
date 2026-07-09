@@ -25,16 +25,38 @@ Risk classification
 Human / reviewer / agent action
 ```
 
+### Stage 2 — Work queue data flow
+
+```text
+GitHub REST API (read-only)
+    ↓
+github_client.py
+    ↓
+work_queue.py  (+ policy.py classify_github_item)
+    ↓
+server.py  /api/work-queue
+    ↓
+Dashboard Work queue page
+    ↓
+Local approvals → storage.py → runtime/approvals.json
+```
+
+Notes:
+
+- GitHub token (optional) is read from environment only and never persisted or rendered.
+- Local approval records are **not** GitHub reviews and grant **no** merge rights.
+- CI unknown must never be labeled as passing.
+
 ## Future Components
 
 ```text
 GitHub Issues / PRs / CI
     ↓
-Repository watcher
+Work queue (Stage 2 — implemented)
     ↓
-Policy engine
+Agent packet generator (Stage 3)
     ↓
-Agent router
+Agent router (later)
     ├── Claude adapter
     ├── Codex adapter
     ├── GLM adapter
@@ -42,9 +64,9 @@ Agent router
     ↓
 Reviewer agent
     ↓
-Approval queue
+Approval queue / kill switch
     ↓
-Merge / reject / rework
+Human merge decision (never auto-merge by default)
 ```
 
 ## Authority Boundaries

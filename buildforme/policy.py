@@ -213,6 +213,9 @@ def classify_task(task: dict[str, Any]) -> Classification:
 
     sensitive_file_hits = _sensitive_file_hits(task)
     red_hits = _hits(haystack, RED_PATTERNS)
+    mode = str(task.get("operating_mode") or "").strip().upper()
+    red_hits = _filter_red_hits_for_context(haystack, mode, red_hits)
+
     if problems:
         reasons.extend(problems)
     if red_hits:
@@ -225,6 +228,20 @@ def classify_task(task: dict[str, Any]) -> Classification:
         reasons.append("Task allows data mutation")
 
     if reasons:
+        # PLAN_ONLY with high-risk topics remains RED (founder gate) but plan-only.
+        if mode == "PLAN_ONLY" and not sensitive_file_hits and not explicit_mutation and not problems:
+            return Classification(
+                risk=RiskLevel.RED,
+                auto_run_allowed=False,
+                auto_merge_allowed=False,
+                required_human_approval=True,
+                reasons=reasons + ["PLAN_ONLY mode: planning allowed, implementation blocked without Shan approval"],
+                required_actions=[
+                    "Produce plan and risk analysis only",
+                    "Do not implement code changes unless Shan upgrades the packet",
+                    "No merge, deploy, secrets, or production writes",
+                ],
+            )
         actions.extend(
             [
                 "Require Shan approval before execution or merge",
@@ -459,6 +476,63 @@ def _hits(text: str, patterns: set[str]) -> list[str]:
         if re.search(rf"(?<![a-z0-9]){re.escape(pattern)}(?![a-z0-9])", text):
             found.append(pattern)
     return sorted(found)
+
+
+# Modes where high-risk *topics* may be discussed without implying execution.
+_DOC_AUDIT_MODES = {"DOCUMENTATION_ONLY", "READ_ONLY_AUDIT"}
+
+# Phrases that still mean real execution even in docs/audit mode.
+_EXECUTION_INTENT_PHRASES = {
+    "deploy production",
+    "deploy to production",
+    "production write",
+    "write production",
+    "rewrite auth",
+    "change auth",
+    "implement auth",
+    "disable auth",
+    "bypass auth",
+    "run migration",
+    "apply migration",
+    "capture payment",
+    "charge card",
+    "merge to main",
+    "auto-merge",
+    "rotate secret",
+    "store credential",
+    "send customer email",
+}
+
+
+def _filter_red_hits_for_context(haystack: str, mode: str, red_hits: list[str]) -> list[str]:
+    """Reduce false positives when work is clearly docs/audit *about* high-risk topics.
+
+    Does not weaken BLACK, sensitive files, or explicit execution phrasing.
+    PLAN_ONLY keeps RED topic hits (founder gate) but classify_task handles plan-only actions.
+    """
+    if not red_hits:
+        return red_hits
+    if mode not in _DOC_AUDIT_MODES:
+        return red_hits
+    if any(phrase in haystack for phrase in _EXECUTION_INTENT_PHRASES):
+        return red_hits
+    # Pure documentation/audit language about risks — drop bare topic hits.
+    doc_markers = (
+        "document",
+        "documentation",
+        "docs",
+        "describe",
+        "explain",
+        "audit",
+        "read-only",
+        "inspect",
+        "review risks",
+        "risk analysis",
+        "plan only",
+    )
+    if any(marker in haystack for marker in doc_markers):
+        return []
+    return red_hits
 
 
 def _sensitive_file_hits(task: dict[str, Any]) -> list[str]:

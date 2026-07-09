@@ -135,6 +135,61 @@ class LocalStoreTests(unittest.TestCase):
             data = json.loads(raw)
             self.assertIn("approvals", data)
 
+    def test_save_list_get_delete_packets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LocalStore(Path(temp_dir) / "state.json")
+            self.assertEqual(store.list_packets(), [])
+            saved = store.save_packet(
+                {
+                    "id": "pkt_test1",
+                    "title": "Demo",
+                    "risk": "GREEN",
+                    "source_type": "manual",
+                    "objective": "audit",
+                    "markdown": "# Demo",
+                    "api_token": "should-redact",
+                }
+            )
+            self.assertEqual(saved["id"], "pkt_test1")
+            self.assertEqual(saved["api_token"], "[redacted]")
+            listed = store.list_packets()
+            self.assertEqual(len(listed), 1)
+            got = store.get_packet("pkt_test1")
+            self.assertEqual(got["title"], "Demo")
+            store.delete_packet("pkt_test1")
+            self.assertEqual(store.list_packets(), [])
+            with self.assertRaises(KeyError):
+                store.get_packet("pkt_test1")
+
+    def test_missing_packets_file_handled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LocalStore(Path(temp_dir) / "state.json")
+            self.assertEqual(store.list_packets(), [])
+
+    def test_runtime_storage_separation_preserved(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LocalStore(Path(temp_dir) / "state.json")
+            store.upsert_task(TASK, CLASSIFICATION)
+            store.add_repo("owner/name")
+            store.add_approval(
+                {
+                    "target_type": "pull_request",
+                    "repository": "owner/name",
+                    "number": 1,
+                    "decision": "reviewed",
+                    "note": "ok",
+                }
+            )
+            store.save_packet({"id": "pkt_x", "title": "t", "markdown": "m"})
+            self.assertEqual(len(store.list_tasks()), 1)
+            self.assertEqual(store.list_repos(), ["owner/name"])
+            self.assertEqual(len(store.list_approvals()), 1)
+            self.assertEqual(len(store.list_packets()), 1)
+            self.assertTrue((Path(temp_dir) / "packets.json").exists())
+            self.assertTrue((Path(temp_dir) / "repos.json").exists())
+            self.assertTrue((Path(temp_dir) / "approvals.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
+

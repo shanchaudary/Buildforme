@@ -1589,3 +1589,32 @@ code {
     grid-template-columns: 1fr;
   }
 }
+
+/* —— Agent packets (Stage 3) —— */
+.packet-split {
+  margin-bottom: 0;
+}
+
+.packet-preview-card {
+  min-height: 520px;
+}
+
+.packet-md {
+  max-height: min(70vh, 720px);
+  white-space: pre-wrap;
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+
+.source-block {
+  margin: 0 0 14px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px dashed var(--border-strong);
+  background: rgba(7, 10, 18, 0.35);
+}
+
+.source-block .btn {
+  margin-top: 4px;
+}
+

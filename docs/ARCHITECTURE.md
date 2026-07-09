@@ -47,6 +47,24 @@ Notes:
 - Local approval records are **not** GitHub reviews and grant **no** merge rights.
 - CI unknown must never be labeled as passing.
 
+### Stage 3 — Agent packet generator data flow
+
+```text
+Work queue item / saved task / PR / issue / manual form
+    ↓
+packet_generator.py
+    ↓
+policy.py  (risk + mode-aware allowed actions)
+    ↓
+server.py  /api/packets/*
+    ↓
+Dashboard Agent packets page
+    ↓
+runtime/packets.json  (local only; scrubbed of secret-like fields)
+```
+
+Generated packets are **instructions**, not approvals and not executions.
+
 ## Future Components
 
 ```text
@@ -54,15 +72,15 @@ GitHub Issues / PRs / CI
     ↓
 Work queue (Stage 2 — implemented)
     ↓
-Agent packet generator (Stage 3)
+Agent packet generator (Stage 3 — implemented)
     ↓
-Agent router (later)
-    ├── Claude adapter
-    ├── Codex adapter
-    ├── GLM adapter
-    └── Future agent adapter
+Provider adapter planning (Stage 4)
+    ├── Claude adapter contract
+    ├── Codex adapter contract
+    ├── Grok adapter contract
+    └── GLM adapter contract
     ↓
-Reviewer agent
+Reviewer agent (later)
     ↓
 Approval queue / kill switch
     ↓

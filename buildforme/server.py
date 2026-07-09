@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from buildforme.github_client import GitHubClient, GitHubClientError
+from buildforme.packet_generator import generate_agent_packet
 from buildforme.policy import classify_task, validate_task_packet
 from buildforme.storage import DEFAULT_STATE_PATH, LocalStore
 from buildforme.work_queue import build_pr_status, build_work_queue
@@ -26,7 +27,7 @@ PUBLIC_ROOT = PROJECT_ROOT / "public"
 
 
 class BuildformeRequestHandler(BaseHTTPRequestHandler):
-    server_version = "BuildformeMVP/0.3"
+    server_version = "BuildformeMVP/0.4"
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urllib.parse.urlparse(self.path)
@@ -60,6 +61,19 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/approvals":
             self._json(HTTPStatus.OK, {"approvals": self._store().list_approvals()})
             return
+        if path == "/api/packets":
+            self._json(HTTPStatus.OK, {"packets": self._store().list_packets()})
+            return
+        if path.startswith("/api/packets/"):
+            packet_id = urllib.parse.unquote(path.removeprefix("/api/packets/").strip("/"))
+            if packet_id and packet_id not in {"generate", "from-pr", "from-issue"}:
+                try:
+                    self._json(HTTPStatus.OK, {"packet": self._store().get_packet(packet_id)})
+                except KeyError as exc:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                except ValueError as exc:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
         if path == "/api/work-queue":
             self._work_queue(parsed)
             return
@@ -98,11 +112,33 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/approvals":
             self._add_approval()
             return
+        if path == "/api/packets/generate":
+            self._generate_packet()
+            return
+        if path == "/api/packets":
+            self._save_packet()
+            return
+        if path == "/api/packets/from-pr":
+            self._packet_from_pr()
+            return
+        if path == "/api/packets/from-issue":
+            self._packet_from_issue()
+            return
         self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
     def do_DELETE(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+        if path.startswith("/api/packets/"):
+            packet_id = urllib.parse.unquote(path.removeprefix("/api/packets/").strip("/"))
+            try:
+                self._store().delete_packet(packet_id)
+                self._json(HTTPStatus.OK, {"deleted": packet_id})
+            except KeyError as exc:
+                self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            except ValueError as exc:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
         if path.startswith("/api/repos/"):
             encoded = path.removeprefix("/api/repos/")
             repository = urllib.parse.unquote(encoded)
@@ -199,6 +235,136 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_json"})
         except ValueError as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def _generate_packet(self) -> None:
+        try:
+            payload = self._read_json()
+            if not isinstance(payload, dict):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
+                return
+            packet = generate_agent_packet(payload)
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "packet": packet,
+                    "note": "Generated packet is an instruction set only. It does not execute agents or mutate GitHub.",
+                },
+            )
+        except json.JSONDecodeError:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_json"})
+        except ValueError as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        except Exception as exc:  # noqa: BLE001
+            self._json(HTTPStatus.BAD_REQUEST, {"error": f"packet generation failed: {exc}"})
+
+    def _save_packet(self) -> None:
+        try:
+            payload = self._read_json()
+            if not isinstance(payload, dict):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
+                return
+            packet = payload.get("packet") if isinstance(payload.get("packet"), dict) else payload
+            if not isinstance(packet, dict):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "packet object required"})
+                return
+            # Ensure markdown present
+            if not packet.get("markdown"):
+                packet = generate_agent_packet({**packet, "source_type": packet.get("source_type") or "manual"})
+            record = self._store().save_packet(packet)
+            self._json(HTTPStatus.OK, {"packet": record})
+        except json.JSONDecodeError:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_json"})
+        except ValueError as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def _packet_from_pr(self) -> None:
+        try:
+            payload = self._read_json()
+            if not isinstance(payload, dict):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
+                return
+            repository = str(payload.get("repository") or "").strip()
+            number = int(payload.get("number") or 0)
+            if not repository or number <= 0:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "repository and number are required"})
+                return
+            status = build_pr_status(self._github(), self._store(), repository, number)
+            pr = {
+                **(status.get("pull_request") or {}),
+                "repository": repository,
+                "files": status.get("files") or [],
+                "ci": status.get("ci") or {},
+                "classification": status.get("classification"),
+                "recommended_action": status.get("recommended_action"),
+            }
+            packet = generate_agent_packet(
+                {
+                    "source_type": "pull_request",
+                    "pull_request": pr,
+                    "target_repository": repository,
+                    "target_branch": payload.get("target_branch") or pr.get("head") or "main",
+                    "title": payload.get("title"),
+                    "objective": payload.get("objective"),
+                    "context": payload.get("context"),
+                    "operating_mode": payload.get("operating_mode") or "REVIEW",
+                    "allowed_files": payload.get("allowed_files"),
+                    "forbidden_files": payload.get("forbidden_files"),
+                    "acceptance_criteria": payload.get("acceptance_criteria"),
+                }
+            )
+            self._json(HTTPStatus.OK, {"packet": packet, "source": status})
+        except json.JSONDecodeError:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_json"})
+        except (GitHubClientError, ValueError) as exc:
+            self._json(HTTPStatus.BAD_GATEWAY if isinstance(exc, GitHubClientError) else HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def _packet_from_issue(self) -> None:
+        try:
+            payload = self._read_json()
+            if not isinstance(payload, dict):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
+                return
+            repository = str(payload.get("repository") or "").strip()
+            number = int(payload.get("number") or 0)
+            if not repository or number <= 0:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "repository and number are required"})
+                return
+            issues = self._github().list_issues(repository, state="all", limit=50)
+            match = next((item for item in issues if int(item.get("number") or 0) == number), None)
+            if match is None:
+                # Fallback: treat as sparse issue from number/title only
+                match = {
+                    "number": number,
+                    "title": payload.get("title") or f"Issue #{number}",
+                    "body": payload.get("body") or "",
+                    "labels": payload.get("labels") or [],
+                    "state": "open",
+                    "repository": repository,
+                }
+            match = {**match, "repository": repository}
+            packet = generate_agent_packet(
+                {
+                    "source_type": "issue",
+                    "issue": match,
+                    "target_repository": repository,
+                    "target_branch": payload.get("target_branch") or "main",
+                    "title": payload.get("title"),
+                    "objective": payload.get("objective"),
+                    "context": payload.get("context"),
+                    "operating_mode": payload.get("operating_mode"),
+                    "allowed_files": payload.get("allowed_files"),
+                    "forbidden_files": payload.get("forbidden_files"),
+                    "acceptance_criteria": payload.get("acceptance_criteria"),
+                }
+            )
+            self._json(HTTPStatus.OK, {"packet": packet, "source": match})
+        except json.JSONDecodeError:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_json"})
+        except (GitHubClientError, ValueError) as exc:
+            self._json(
+                HTTPStatus.BAD_GATEWAY if isinstance(exc, GitHubClientError) else HTTPStatus.BAD_REQUEST,
+                {"error": str(exc)},
+            )
 
     def _work_queue(self, parsed: urllib.parse.ParseResult) -> None:
         repos_param = _first_query_value(parsed, "repos")

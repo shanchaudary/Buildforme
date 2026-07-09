@@ -151,6 +151,66 @@ class ServerTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=5)
 
+    def test_packets_endpoints(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            server, thread, base_url = _start_server(temp_dir)
+            try:
+                status, payload = _json_request(
+                    base_url + "/api/packets/generate",
+                    {
+                        "source_type": "manual",
+                        "title": "Server packet",
+                        "objective": "Read-only audit of documentation",
+                        "operating_mode": "READ_ONLY_AUDIT",
+                        "allowed_files": ["docs/**"],
+                        "forbidden_files": [".env"],
+                        "acceptance_criteria": ["Report"],
+                        "target_repository": "shanchaudary/Buildforme",
+                        "target_branch": "main",
+                    },
+                    method="POST",
+                )
+                self.assertEqual(status, 200)
+                packet = payload["packet"]
+                self.assertEqual(packet["risk"], "GREEN")
+                self.assertIn("markdown", packet)
+
+                status, payload = _json_request(
+                    base_url + "/api/packets",
+                    {"packet": packet},
+                    method="POST",
+                )
+                self.assertEqual(status, 200)
+                packet_id = payload["packet"]["id"]
+
+                status, payload = _json_request(base_url + "/api/packets")
+                self.assertEqual(status, 200)
+                self.assertEqual(len(payload["packets"]), 1)
+
+                status, payload = _json_request(base_url + f"/api/packets/{packet_id}")
+                self.assertEqual(status, 200)
+                self.assertEqual(payload["packet"]["id"], packet_id)
+
+                status, payload = _json_request(
+                    base_url + "/api/packets/generate",
+                    {"source_type": "manual"},
+                    method="POST",
+                )
+                self.assertEqual(status, 400)
+                self.assertIn("error", payload)
+
+                status, payload = _json_request(
+                    base_url + f"/api/packets/{packet_id}",
+                    method="DELETE",
+                )
+                self.assertEqual(status, 200)
+                status, payload = _json_request(base_url + "/api/packets")
+                self.assertEqual(payload["packets"], [])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
     def test_dashboard_static_assets_are_served(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             server, thread, base_url = _start_server(temp_dir)
@@ -161,6 +221,7 @@ class ServerTests(unittest.TestCase):
                     self.assertIn("/public/styles.css", html)
                     self.assertIn("Work queue", html)
                     self.assertIn("Approvals", html)
+                    self.assertIn("Agent packets", html)
 
                 with urllib.request.urlopen(base_url + "/public/styles.css", timeout=5) as response:
                     css = response.read().decode("utf-8", errors="replace")

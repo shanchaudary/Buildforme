@@ -18,6 +18,7 @@ DEFAULT_STATE_PATH = Path("runtime/buildforme_state.json")
 DEFAULT_REPOS_NAME = "repos.json"
 DEFAULT_APPROVALS_NAME = "approvals.json"
 DEFAULT_TASKS_NAME = "tasks.json"
+DEFAULT_PACKETS_NAME = "packets.json"
 
 VALID_APPROVAL_DECISIONS = {
     "reviewed",
@@ -73,6 +74,7 @@ class LocalStore:
         self.repos_path = self.runtime_dir / DEFAULT_REPOS_NAME
         self.approvals_path = self.runtime_dir / DEFAULT_APPROVALS_NAME
         self.tasks_mirror_path = self.runtime_dir / DEFAULT_TASKS_NAME
+        self.packets_path = self.runtime_dir / DEFAULT_PACKETS_NAME
 
     # —— Tasks (existing API) ——
 
@@ -251,6 +253,57 @@ class LocalStore:
                 continue
             return item
         return None
+
+    # —— Agent packets (Stage 3) ——
+
+    def list_packets(self) -> list[dict[str, Any]]:
+        data = self._load_object(self.packets_path, default={"packets": []}, list_key="packets")
+        packets = data.get("packets", [])
+        return list(packets) if isinstance(packets, list) else []
+
+    def get_packet(self, packet_id: str) -> dict[str, Any]:
+        pid = str(packet_id or "").strip()
+        if not pid:
+            raise ValueError("packet id is required")
+        for item in self.list_packets():
+            if str(item.get("id") or "") == pid:
+                return item
+        raise KeyError(f"Packet not found: {pid}")
+
+    def save_packet(self, packet: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(packet, dict):
+            raise ValueError("packet must be an object")
+        from buildforme.packet_generator import sanitize_for_storage
+
+        cleaned = sanitize_for_storage(packet)
+        packet_id = str(cleaned.get("id") or "").strip() or f"pkt_{uuid.uuid4().hex[:12]}"
+        cleaned["id"] = packet_id
+        now = utc_now_iso()
+        packets = self.list_packets()
+        updated = False
+        for index, existing in enumerate(packets):
+            if str(existing.get("id") or "") == packet_id:
+                cleaned["created_at"] = existing.get("created_at") or now
+                cleaned["updated_at"] = now
+                packets[index] = cleaned
+                updated = True
+                break
+        if not updated:
+            cleaned.setdefault("created_at", now)
+            cleaned["updated_at"] = now
+            packets.append(cleaned)
+        self._atomic_write(self.packets_path, {"packets": packets})
+        return cleaned
+
+    def delete_packet(self, packet_id: str) -> None:
+        pid = str(packet_id or "").strip()
+        if not pid:
+            raise ValueError("packet id is required")
+        packets = self.list_packets()
+        remaining = [item for item in packets if str(item.get("id") or "") != pid]
+        if len(remaining) == len(packets):
+            raise KeyError(f"Packet not found: {pid}")
+        self._atomic_write(self.packets_path, {"packets": remaining})
 
     # —— Internals ——
 

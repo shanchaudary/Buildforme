@@ -75,18 +75,45 @@ Do not build yet:
 
 ## Stage 3 — Agent Packet Generator
 
-Next.
+Status: implemented in the current branch.
 
 Objective:
 
-- Given an issue/PR/work-queue item, generate a complete safe task packet for Codex, Claude, GLM, or Grok.
+- Given an issue/PR/work-queue item/saved task/manual objective, generate a complete safe task packet for Codex, Claude, GLM, or Grok.
 - Still no live agent execution.
 - Still no auto-merge.
 - Still no production authority.
 
-Then: provider adapter contracts (dispatch plan, result intake, reviewer packet) without live provider calls until explicitly approved.
+Delivered:
 
-## Stage 4 — Approval Queue and Kill Switch
+- `buildforme/packet_generator.py` with tool-neutral Markdown packets.
+- Dashboard **Agent packets** page (generate, copy, save, download).
+- APIs: `POST /api/packets/generate`, `GET/POST/DELETE /api/packets`, `from-pr`, `from-issue`.
+- Local storage `runtime/packets.json` with secret-field scrubbing.
+- CLI: `python -m buildforme.cli generate-packet data/sample_task.json`.
+- Policy nuance: docs/audit about high-risk topics vs execution; BLACK unchanged.
+- Tests for generator, storage, server, policy, CLI.
+
+## Stage 4 — Provider Adapter Planning
+
+Next.
+
+Objective:
+
+- Prepare provider-neutral adapter interfaces for Claude, Codex, Grok, GLM.
+- Still no API keys in the repo.
+- Still no live agent calls.
+- Still no autonomous merge.
+- Still no production authority.
+
+Tasks:
+
+- Adapter interface docs and stub-free contracts.
+- Task dispatch plan format.
+- Result intake format.
+- Reviewer-agent packet format.
+
+## Stage 5 — Approval Queue and Kill Switch
 
 Objective:
 
@@ -100,7 +127,7 @@ Tasks:
 - Block all non-read-only work when paused.
 - Add digest output.
 
-## Stage 5 — Hosted, Authenticated Control Plane
+## Stage 6 — Hosted, Authenticated Control Plane
 
 Objective:
 
@@ -116,7 +143,7 @@ Required gates:
 - Backup/restore plan.
 - No provider secrets shown in UI.
 
-## Stage 6 — Scheduled Supervision
+## Stage 7 — Scheduled Supervision
 
 Objective:
 

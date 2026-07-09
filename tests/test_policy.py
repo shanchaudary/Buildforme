@@ -90,6 +90,37 @@ class PolicyTests(unittest.TestCase):
         result = classify_task(task)
         self.assertEqual(result.risk, RiskLevel.GREEN)
 
+    def test_documentation_about_deployment_is_not_execution(self):
+        task = dict(BASE_TASK)
+        task["objective"] = "Document deployment risks for operators (documentation only)"
+        task["operating_mode"] = "DOCUMENTATION_ONLY"
+        task["allowed_files"] = ["docs/**"]
+        result = classify_task(task)
+        self.assertNotEqual(result.risk, RiskLevel.BLACK)
+        self.assertIn(result.risk, {RiskLevel.GREEN, RiskLevel.YELLOW})
+
+    def test_commit_env_remains_black(self):
+        task = dict(BASE_TASK)
+        task["objective"] = "Commit .env so local setup is easier"
+        result = classify_task(task)
+        self.assertEqual(result.risk, RiskLevel.BLACK)
+
+    def test_bypass_auth_remains_black(self):
+        task = dict(BASE_TASK)
+        task["objective"] = "Bypass auth for faster local testing"
+        result = classify_task(task)
+        self.assertEqual(result.risk, RiskLevel.BLACK)
+
+    def test_plan_tenant_isolation_is_red_plan_only(self):
+        task = dict(BASE_TASK)
+        task["objective"] = "Plan tenant isolation approach for multi-tenant routes"
+        task["operating_mode"] = "PLAN_ONLY"
+        task["allowed_files"] = ["docs/**"]
+        result = classify_task(task)
+        self.assertEqual(result.risk, RiskLevel.RED)
+        self.assertFalse(result.auto_run_allowed)
+        self.assertTrue(any("PLAN_ONLY" in reason or "plan" in reason.lower() for reason in result.reasons + result.required_actions))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,7 @@ Implemented in this branch:
 - Local JSON task, watched-repo, and approval storage under `runtime/`.
 - Polished browser dashboard (dark control-plane UI).
 - **Stage 2 GitHub Work Queue**: open PRs/issues, CI status, risk, recommended next task, local-only approvals.
+- **Stage 3 Agent Packet Generator**: tool-neutral handoff packets for Grok/Codex/Claude/GLM (no live execution).
 - Optional read-only GitHub inspection for repositories, issues, pull requests, changed files, and commit checks.
 - GitHub issue template for agent tasks.
 - Pull request template with supervision gates.
@@ -50,9 +51,9 @@ Buildforme must not automatically approve:
 - broad refactors
 - merges to `main`
 
-**Stage 2 still does not:**
+**Stage 2–3 still do not:**
 
-- call AI providers (Claude/Codex/GLM)
+- call AI providers (Claude/Codex/Grok/GLM)
 - launch autonomous coding runs
 - merge or auto-merge PRs
 - edit GitHub issues, labels, or reviews
@@ -97,7 +98,33 @@ http://127.0.0.1:8787
 3. **GitHub inspect** — single PR/issue read-only check  
 4. **Work queue** — watched repos, open PRs/issues, CI, risk, next action  
 5. **Approvals** — local-only decisions (not GitHub reviews)  
-6. **Risk policy** — GREEN/YELLOW/RED/BLACK guide  
+6. **Agent packets** — generate / copy / save / download handoff packets  
+7. **Risk policy** — GREEN/YELLOW/RED/BLACK guide  
+
+### Agent packet generator
+
+Buildforme can turn a manual objective, saved task, PR, or issue into a **complete handoff packet** you paste into any coding agent.
+
+It does **not** run the agent. It does **not** call Claude/Codex/Grok/GLM APIs. It does **not** authorize production writes, secrets, deployments, payments, merges, or GitHub mutations.
+
+**Browser**
+
+1. Open **Agent packets**.  
+2. Choose source: Manual / Saved task / PR / Issue.  
+3. Click **Generate packet**.  
+4. **Copy**, **Save locally**, or **Download .md**.  
+
+**CLI**
+
+```bash
+python -m buildforme.cli generate-packet data/sample_task.json
+# alias:
+python -m buildforme.cli packet data/sample_task.json
+# full JSON:
+python -m buildforme.cli generate-packet data/sample_task.json --json
+```
+
+Saved packets live in `runtime/packets.json` (gitignored).
 
 ### Work queue smoke test
 
@@ -159,6 +186,13 @@ POST   /api/repos
 DELETE /api/repos/{owner%2Fname}
 GET    /api/approvals
 POST   /api/approvals
+GET    /api/packets
+POST   /api/packets
+GET    /api/packets/{id}
+DELETE /api/packets/{id}
+POST   /api/packets/generate
+POST   /api/packets/from-pr
+POST   /api/packets/from-issue
 GET    /api/work-queue?repos=owner/name,owner/name
 GET    /api/pr/{owner}/{repo}/{number}/status
 GET    /api/github/repo?repository=owner/name
@@ -166,7 +200,7 @@ GET    /api/github/issues?repository=owner/name&state=open&limit=20
 GET    /api/github/pr?repository=owner/name&number=1
 ```
 
-All GitHub-backed routes are read-only against GitHub. Approvals and decisions are local only.
+All GitHub-backed routes are read-only against GitHub. Approvals, decisions, and agent packets are local only.
 
 ## Repository Layout
 
@@ -182,11 +216,11 @@ tests/                     Unit and local server tests
 
 ## Intended Next Build Steps
 
-1. ~~GitHub work queue~~ (Stage 2 — this branch)  
-2. Stage 3 — Agent packet generator (still no live provider execution)  
-3. Provider adapter contracts for Claude, Codex, GLM  
-4. Scheduled digest generation  
-5. Kill switch and repository lock state  
+1. ~~GitHub work queue~~ (Stage 2)  
+2. ~~Agent packet generator~~ (Stage 3)  
+3. Stage 4 — Provider adapter planning (no live calls yet)  
+4. Kill switch and repository lock state  
+5. Scheduled digest generation  
 6. Owner authentication before any hosted deployment  
 
 ## Safety Position

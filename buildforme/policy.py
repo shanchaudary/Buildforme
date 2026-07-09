@@ -82,8 +82,10 @@ RED_PATTERNS = {
     "tenant isolation",
     "auth",
     "session",
-    "secret",
-    "credential",
+    "secret storage",
+    "credential storage",
+    "provider credential",
+    "rotate secret",
     "write-mode ingestion",
     "write mode ingestion",
     "erp credential",
@@ -192,7 +194,7 @@ def classify_task(task: dict[str, Any]) -> Classification:
     if red_hits:
         reasons.extend(f"High-risk term detected: {hit}" for hit in red_hits)
     if sensitive_file_hits:
-        reasons.extend(f"Sensitive file or area detected: {hit}" for hit in sensitive_file_hits)
+        reasons.extend(f"Sensitive allowed/changed file or area detected: {hit}" for hit in sensitive_file_hits)
 
     explicit_mutation = bool(task.get("data_mutation_allowed"))
     if explicit_mutation:
@@ -270,8 +272,13 @@ def _hits(text: str, patterns: set[str]) -> list[str]:
 
 
 def _sensitive_file_hits(task: dict[str, Any]) -> list[str]:
+    """Detect sensitive files only when they are allowed, targeted, or changed.
+
+    Listing `.env` or `secrets/**` under `forbidden_files` is a safety control,
+    not a reason to escalate the task by itself.
+    """
     file_values: list[str] = []
-    for key in ("allowed_files", "forbidden_files", "files_changed", "target_files"):
+    for key in ("allowed_files", "files_changed", "target_files"):
         value = task.get(key, [])
         if isinstance(value, str):
             file_values.append(value)

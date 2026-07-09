@@ -30,8 +30,10 @@ const RED_PATTERNS = [
   "tenant isolation",
   "auth",
   "session",
-  "secret",
-  "credential",
+  "secret storage",
+  "credential storage",
+  "provider credential",
+  "rotate secret",
   "write-mode ingestion",
   "write mode ingestion",
   "erp credential",
@@ -132,9 +134,9 @@ function classify(task) {
   const redHits = hits(text, RED_PATTERNS);
   reasons.push(...redHits.map((hit) => `High-risk term detected: ${hit}`));
 
-  const files = [...task.allowed_files, ...task.forbidden_files].join("\n").toLowerCase();
+  const files = task.allowed_files.join("\n").toLowerCase();
   const sensitiveHits = hits(files, SENSITIVE_FILE_PATTERNS);
-  reasons.push(...sensitiveHits.map((hit) => `Sensitive file or area detected: ${hit}`));
+  reasons.push(...sensitiveHits.map((hit) => `Sensitive allowed file or area detected: ${hit}`));
 
   if (task.data_mutation_allowed) {
     reasons.push("Task allows data mutation");

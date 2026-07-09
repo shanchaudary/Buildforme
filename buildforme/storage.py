@@ -19,6 +19,29 @@ DEFAULT_REPOS_NAME = "repos.json"
 DEFAULT_APPROVALS_NAME = "approvals.json"
 DEFAULT_TASKS_NAME = "tasks.json"
 DEFAULT_PACKETS_NAME = "packets.json"
+DEFAULT_PROJECTS_NAME = "projects.json"
+DEFAULT_STAGES_NAME = "stages.json"
+DEFAULT_PLANNED_TASKS_NAME = "planned_tasks.json"
+DEFAULT_TRUTH_NAME = "project_truth.json"
+DEFAULT_RECOMMENDATIONS_NAME = "planner_recommendations.json"
+DEFAULT_EVENTS_NAME = "events.json"
+DEFAULT_BRIEFINGS_NAME = "briefings.json"
+
+PROJECT_STATUSES = {"active", "paused", "blocked", "completed", "archived"}
+STAGE_STATUSES = {"not_started", "in_progress", "blocked", "ready_for_review", "complete"}
+PLANNED_TASK_STATUSES = {"backlog", "ready", "in_progress", "review", "blocked", "complete", "rejected"}
+TRUTH_CATEGORIES = {
+    "working",
+    "partial",
+    "broken",
+    "unsafe",
+    "unverified",
+    "not_implemented",
+    "blocked",
+}
+PRIORITIES = {"critical", "high", "medium", "low"}
+EFFORTS = {"small", "medium", "large", "unknown"}
+RISKS = {"GREEN", "YELLOW", "RED", "BLACK"}
 
 VALID_APPROVAL_DECISIONS = {
     "reviewed",
@@ -75,6 +98,13 @@ class LocalStore:
         self.approvals_path = self.runtime_dir / DEFAULT_APPROVALS_NAME
         self.tasks_mirror_path = self.runtime_dir / DEFAULT_TASKS_NAME
         self.packets_path = self.runtime_dir / DEFAULT_PACKETS_NAME
+        self.projects_path = self.runtime_dir / DEFAULT_PROJECTS_NAME
+        self.stages_path = self.runtime_dir / DEFAULT_STAGES_NAME
+        self.planned_tasks_path = self.runtime_dir / DEFAULT_PLANNED_TASKS_NAME
+        self.truth_path = self.runtime_dir / DEFAULT_TRUTH_NAME
+        self.recommendations_path = self.runtime_dir / DEFAULT_RECOMMENDATIONS_NAME
+        self.events_path = self.runtime_dir / DEFAULT_EVENTS_NAME
+        self.briefings_path = self.runtime_dir / DEFAULT_BRIEFINGS_NAME
 
     # —— Tasks (existing API) ——
 
@@ -305,6 +335,398 @@ class LocalStore:
             raise KeyError(f"Packet not found: {pid}")
         self._atomic_write(self.packets_path, {"packets": remaining})
 
+    # —— Stage 4: projects / stages / planned tasks / truth / events ——
+
+    def list_projects(self, *, include_archived: bool = True) -> list[dict[str, Any]]:
+        data = self._load_object(self.projects_path, default={"projects": []}, list_key="projects")
+        projects = list(data.get("projects") or [])
+        if include_archived:
+            return projects
+        return [p for p in projects if str(p.get("status")) != "archived"]
+
+    def get_project(self, project_id: str) -> dict[str, Any]:
+        pid = str(project_id or "").strip()
+        for item in self.list_projects():
+            if str(item.get("id")) == pid:
+                return item
+        raise KeyError(f"Project not found: {pid}")
+
+    def upsert_project(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError("project must be an object")
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            raise ValueError("name is required")
+        repository = _normalize_repo(str(payload.get("repository") or ""))
+        status = str(payload.get("status") or "active").strip()
+        if status not in PROJECT_STATUSES:
+            raise ValueError(f"status must be one of {sorted(PROJECT_STATUSES)}")
+        now = utc_now_iso()
+        project_id = str(payload.get("id") or re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-") or uuid.uuid4().hex[:8])
+        projects = self.list_projects()
+        # Prevent duplicate repository for different projects
+        for existing in projects:
+            if str(existing.get("repository")) == repository and str(existing.get("id")) != project_id:
+                raise ValueError(f"repository already registered to project {existing.get('id')}")
+        record = {
+            "id": project_id,
+            "name": name,
+            "repository": repository,
+            "default_branch": str(payload.get("default_branch") or "main").strip() or "main",
+            "status": status,
+            "objective": str(payload.get("objective") or "").strip(),
+            "current_stage_id": payload.get("current_stage_id"),
+            "sample": bool(payload.get("sample", False)),
+            "created_at": now,
+            "updated_at": now,
+        }
+        updated = False
+        for index, existing in enumerate(projects):
+            if str(existing.get("id")) == project_id:
+                record["created_at"] = existing.get("created_at") or now
+                record["updated_at"] = now
+                projects[index] = record
+                updated = True
+                break
+        if not updated:
+            projects.append(record)
+        self._atomic_write(self.projects_path, {"projects": projects})
+        self.append_event(
+            {
+                "event_type": "project_upserted" if updated else "project_created",
+                "project_id": project_id,
+                "target_type": "project",
+                "target_id": project_id,
+                "summary": f"Project {name} ({status})",
+            }
+        )
+        return record
+
+    def set_project_status(self, project_id: str, status: str) -> dict[str, Any]:
+        if status not in PROJECT_STATUSES:
+            raise ValueError(f"status must be one of {sorted(PROJECT_STATUSES)}")
+        project = self.get_project(project_id)
+        project["status"] = status
+        project["updated_at"] = utc_now_iso()
+        projects = self.list_projects()
+        for index, item in enumerate(projects):
+            if str(item.get("id")) == str(project_id):
+                projects[index] = project
+                break
+        self._atomic_write(self.projects_path, {"projects": projects})
+        self.append_event(
+            {
+                "event_type": "project_status_changed",
+                "project_id": project_id,
+                "target_type": "project",
+                "target_id": project_id,
+                "summary": f"Project status → {status}",
+            }
+        )
+        return project
+
+    def list_stages(self, project_id: str | None = None) -> list[dict[str, Any]]:
+        data = self._load_object(self.stages_path, default={"stages": []}, list_key="stages")
+        stages = list(data.get("stages") or [])
+        if project_id is None:
+            return stages
+        return [s for s in stages if str(s.get("project_id")) == str(project_id)]
+
+    def upsert_stage(self, payload: dict[str, Any]) -> dict[str, Any]:
+        project_id = str(payload.get("project_id") or "").strip()
+        self.get_project(project_id)  # ensure exists
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            raise ValueError("stage name is required")
+        status = str(payload.get("status") or "not_started")
+        if status not in STAGE_STATUSES:
+            raise ValueError(f"status must be one of {sorted(STAGE_STATUSES)}")
+        now = utc_now_iso()
+        stage_id = str(payload.get("id") or f"stage-{uuid.uuid4().hex[:8]}")
+        stages = self.list_stages()
+        order = payload.get("order")
+        if order is None:
+            existing = self.list_stages(project_id)
+            order = (max((int(s.get("order") or 0) for s in existing), default=0) + 1)
+        record = {
+            "id": stage_id,
+            "project_id": project_id,
+            "name": name,
+            "order": int(order),
+            "status": status,
+            "objective": str(payload.get("objective") or "").strip(),
+            "entry_criteria": _as_list(payload.get("entry_criteria")),
+            "exit_criteria": _as_list(payload.get("exit_criteria")),
+            "blocked_by": _as_list(payload.get("blocked_by")),
+            "created_at": now,
+            "updated_at": now,
+        }
+        updated = False
+        for index, existing in enumerate(stages):
+            if str(existing.get("id")) == stage_id:
+                record["created_at"] = existing.get("created_at") or now
+                record["updated_at"] = now
+                stages[index] = record
+                updated = True
+                break
+        if not updated:
+            stages.append(record)
+        self._atomic_write(self.stages_path, {"stages": stages})
+        self.append_event(
+            {
+                "event_type": "stage_upserted",
+                "project_id": project_id,
+                "target_type": "stage",
+                "target_id": stage_id,
+                "summary": f"Stage {name}",
+            }
+        )
+        return record
+
+    def list_planned_tasks(self, project_id: str | None = None) -> list[dict[str, Any]]:
+        data = self._load_object(self.planned_tasks_path, default={"planned_tasks": []}, list_key="planned_tasks")
+        tasks = list(data.get("planned_tasks") or [])
+        if project_id is None:
+            return tasks
+        return [t for t in tasks if str(t.get("project_id")) == str(project_id)]
+
+    def get_planned_task(self, task_id: str) -> dict[str, Any]:
+        tid = str(task_id or "").strip()
+        for item in self.list_planned_tasks():
+            if str(item.get("id")) == tid:
+                return item
+        raise KeyError(f"Planned task not found: {tid}")
+
+    def upsert_planned_task(self, payload: dict[str, Any]) -> dict[str, Any]:
+        project_id = str(payload.get("project_id") or "").strip()
+        self.get_project(project_id)
+        title = str(payload.get("title") or "").strip()
+        if not title:
+            raise ValueError("title is required")
+        status = str(payload.get("status") or "backlog")
+        if status not in PLANNED_TASK_STATUSES:
+            raise ValueError(f"status must be one of {sorted(PLANNED_TASK_STATUSES)}")
+        risk = str(payload.get("risk") or "YELLOW").upper()
+        if risk not in RISKS:
+            raise ValueError(f"risk must be one of {sorted(RISKS)}")
+        priority = str(payload.get("priority") or "medium")
+        if priority not in PRIORITIES:
+            raise ValueError(f"priority must be one of {sorted(PRIORITIES)}")
+        effort = str(payload.get("estimated_effort") or "unknown")
+        if effort not in EFFORTS:
+            raise ValueError(f"estimated_effort must be one of {sorted(EFFORTS)}")
+        now = utc_now_iso()
+        task_id = str(payload.get("id") or f"TASK-{uuid.uuid4().hex[:8].upper()}")
+        deps = _as_list(payload.get("dependencies"))
+        # Reject self-dependency
+        deps = [d for d in deps if d != task_id]
+        record = {
+            "id": task_id,
+            "project_id": project_id,
+            "stage_id": payload.get("stage_id"),
+            "title": title,
+            "objective": str(payload.get("objective") or title).strip(),
+            "status": status,
+            "risk": risk,
+            "priority": priority,
+            "estimated_effort": effort,
+            "dependencies": deps,
+            "blocks": _as_list(payload.get("blocks")),
+            "allowed_files": _as_list(payload.get("allowed_files")) or ["docs/**", "tests/**"],
+            "forbidden_files": _as_list(payload.get("forbidden_files")) or [".env", "secrets/**"],
+            "acceptance_criteria": _as_list(payload.get("acceptance_criteria"))
+            or ["Complete objective", "No secrets exposed"],
+            "required_tests": _as_list(payload.get("required_tests")),
+            "human_approval_required": bool(
+                payload.get("human_approval_required", risk in {"RED", "BLACK"})
+            ),
+            "source_type": str(payload.get("source_type") or "manual"),
+            "source_ref": payload.get("source_ref") if isinstance(payload.get("source_ref"), dict) else {},
+            "created_at": now,
+            "updated_at": now,
+        }
+        tasks = self.list_planned_tasks()
+        updated = False
+        for index, existing in enumerate(tasks):
+            if str(existing.get("id")) == task_id:
+                record["created_at"] = existing.get("created_at") or now
+                record["updated_at"] = now
+                tasks[index] = record
+                updated = True
+                break
+        if not updated:
+            tasks.append(record)
+        self._atomic_write(self.planned_tasks_path, {"planned_tasks": tasks})
+        self.append_event(
+            {
+                "event_type": "planned_task_upserted",
+                "project_id": project_id,
+                "target_type": "planned_task",
+                "target_id": task_id,
+                "summary": f"Task {task_id} → {status}/{risk}",
+            }
+        )
+        return record
+
+    def list_truth(self, project_id: str | None = None) -> list[dict[str, Any]]:
+        data = self._load_object(self.truth_path, default={"truth": []}, list_key="truth")
+        items = list(data.get("truth") or [])
+        if project_id is None:
+            return items
+        return [t for t in items if str(t.get("project_id")) == str(project_id)]
+
+    def upsert_truth(self, payload: dict[str, Any]) -> dict[str, Any]:
+        project_id = str(payload.get("project_id") or "").strip()
+        self.get_project(project_id)
+        category = str(payload.get("category") or "unverified")
+        if category not in TRUTH_CATEGORIES:
+            raise ValueError(f"category must be one of {sorted(TRUTH_CATEGORIES)}")
+        title = str(payload.get("title") or "").strip()
+        if not title:
+            raise ValueError("title is required")
+        confidence = int(payload.get("confidence") if payload.get("confidence") is not None else 50)
+        confidence = max(0, min(100, confidence))
+        now = utc_now_iso()
+        truth_id = str(payload.get("id") or f"truth-{uuid.uuid4().hex[:8]}")
+        evidence = payload.get("evidence") if isinstance(payload.get("evidence"), list) else []
+        record = {
+            "id": truth_id,
+            "project_id": project_id,
+            "category": category,
+            "title": title,
+            "description": str(payload.get("description") or "").strip(),
+            "evidence": evidence,
+            "confidence": confidence,
+            "source": str(payload.get("source") or "manual"),
+            "created_at": now,
+            "updated_at": now,
+        }
+        items = self.list_truth()
+        updated = False
+        for index, existing in enumerate(items):
+            if str(existing.get("id")) == truth_id:
+                record["created_at"] = existing.get("created_at") or now
+                record["updated_at"] = now
+                items[index] = record
+                updated = True
+                break
+        if not updated:
+            items.append(record)
+        self._atomic_write(self.truth_path, {"truth": items})
+        self.append_event(
+            {
+                "event_type": "truth_upserted",
+                "project_id": project_id,
+                "target_type": "truth",
+                "target_id": truth_id,
+                "summary": f"Truth ({category}): {title}",
+            }
+        )
+        return record
+
+    def append_event(self, payload: dict[str, Any]) -> dict[str, Any]:
+        now = utc_now_iso()
+        event = {
+            "id": str(payload.get("id") or f"evt_{uuid.uuid4().hex[:10]}"),
+            "event_type": str(payload.get("event_type") or "unknown"),
+            "project_id": payload.get("project_id"),
+            "target_type": payload.get("target_type"),
+            "target_id": payload.get("target_id"),
+            "summary": str(payload.get("summary") or ""),
+            "metadata": payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+            "created_at": now,
+        }
+        data = self._load_object(self.events_path, default={"events": []}, list_key="events")
+        events = list(data.get("events") or [])
+        events.append(event)
+        # Keep log bounded
+        if len(events) > 2000:
+            events = events[-2000:]
+        self._atomic_write(self.events_path, {"events": events})
+        return event
+
+    def list_events(self, project_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        data = self._load_object(self.events_path, default={"events": []}, list_key="events")
+        events = list(data.get("events") or [])
+        if project_id is not None:
+            events = [e for e in events if str(e.get("project_id")) == str(project_id)]
+        return events[-max(1, min(limit, 500)) :]
+
+    def save_recommendation_snapshot(self, project_id: str, plan: dict[str, Any]) -> None:
+        data = self._load_object(
+            self.recommendations_path,
+            default={"recommendations": {}},
+            list_key="recommendations",
+        )
+        # recommendations may be dict map
+        raw = data.get("recommendations")
+        if not isinstance(raw, dict):
+            raw = {}
+        raw[str(project_id)] = {
+            "project_id": project_id,
+            "saved_at": utc_now_iso(),
+            "primary": plan.get("primary_recommendation"),
+            "ranked": plan.get("ranked_recommendations"),
+            "confidence": plan.get("confidence"),
+        }
+        path = self.recommendations_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_suffix(path.suffix + ".tmp")
+        temp.write_text(json.dumps({"recommendations": raw}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temp.replace(path)
+
+    def save_briefing(self, briefing: dict[str, Any]) -> dict[str, Any]:
+        data = self._load_object(self.briefings_path, default={"briefings": []}, list_key="briefings")
+        briefings = list(data.get("briefings") or [])
+        record = dict(briefing)
+        record.setdefault("id", f"brief_{uuid.uuid4().hex[:10]}")
+        record.setdefault("generated_at", utc_now_iso())
+        briefings.append(record)
+        if len(briefings) > 50:
+            briefings = briefings[-50:]
+        self._atomic_write(self.briefings_path, {"briefings": briefings, "last_generated_at": record["generated_at"]})
+        self.append_event(
+            {
+                "event_type": "briefing_generated",
+                "project_id": None,
+                "target_type": "briefing",
+                "target_id": record["id"],
+                "summary": "Founder briefing generated",
+            }
+        )
+        return record
+
+    def last_briefing_at(self) -> str | None:
+        if not self.briefings_path.exists():
+            return None
+        try:
+            data = json.loads(self.briefings_path.read_text(encoding="utf-8") or "{}")
+        except json.JSONDecodeError:
+            return None
+        if isinstance(data, dict):
+            return data.get("last_generated_at")
+        return None
+
+    def load_sample_project(self, sample: dict[str, Any], *, replace: bool = False) -> dict[str, Any]:
+        """Load sample project payload. Will not overwrite existing project unless replace=True."""
+        project = sample.get("project") or {}
+        project_id = str(project.get("id") or "buildforme")
+        existing = None
+        try:
+            existing = self.get_project(project_id)
+        except KeyError:
+            pass
+        if existing and not replace and not existing.get("sample"):
+            raise ValueError(f"project {project_id} already exists; pass replace to overwrite sample only")
+        saved_project = self.upsert_project({**project, "sample": True})
+        for stage in sample.get("stages") or []:
+            self.upsert_stage({**stage, "project_id": project_id})
+        for task in sample.get("planned_tasks") or []:
+            self.upsert_planned_task({**task, "project_id": project_id})
+        for truth in sample.get("truth") or []:
+            self.upsert_truth({**truth, "project_id": project_id})
+        return saved_project
+
     # —— Internals ——
 
     def _load_object(self, path: Path, *, default: dict[str, Any], list_key: str) -> dict[str, Any]:
@@ -344,3 +766,13 @@ def _normalize_repo(repository: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", owner) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
         raise ValueError("repository must be in owner/name form")
     return f"{owner}/{name}"
+
+
+def _as_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [line.strip() for line in value.splitlines() if line.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()] if str(value).strip() else []

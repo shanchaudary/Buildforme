@@ -17,6 +17,7 @@ Implemented in this branch:
 - Polished browser dashboard (dark control-plane UI).
 - **Stage 2 GitHub Work Queue**: open PRs/issues, CI status, risk, recommended next task, local-only approvals.
 - **Stage 3 Agent Packet Generator**: tool-neutral handoff packets for Grok/Codex/Claude/GLM (no live execution).
+- **Stage 4 Chief Planner**: projects, roadmap, project truth, deterministic next-action ranking, founder briefing.
 - Optional read-only GitHub inspection for repositories, issues, pull requests, changed files, and commit checks.
 - GitHub issue template for agent tasks.
 - Pull request template with supervision gates.
@@ -99,7 +100,21 @@ http://127.0.0.1:8787
 4. **Work queue** — watched repos, open PRs/issues, CI, risk, next action  
 5. **Approvals** — local-only decisions (not GitHub reviews)  
 6. **Agent packets** — generate / copy / save / download handoff packets  
-7. **Risk policy** — GREEN/YELLOW/RED/BLACK guide  
+7. **Chief planner** — ranked next action, blockers, briefing  
+8. **Projects** — registry, roadmap stages, planned tasks, project truth  
+9. **Risk policy** — GREEN/YELLOW/RED/BLACK guide  
+
+### Chief planner
+
+```bash
+python -m buildforme.cli load-sample-project
+python -m buildforme.cli plan buildforme
+python -m buildforme.cli briefing
+```
+
+Scoring rules: `docs/PLANNER_SCORING.md`.
+
+Recommendations are **not** merge/production authority.
 
 ### Agent packet generator
 
@@ -218,10 +233,11 @@ tests/                     Unit and local server tests
 
 1. ~~GitHub work queue~~ (Stage 2)  
 2. ~~Agent packet generator~~ (Stage 3)  
-3. Stage 4 — Provider adapter planning (no live calls yet)  
-4. Kill switch and repository lock state  
-5. Scheduled digest generation  
-6. Owner authentication before any hosted deployment  
+3. ~~Chief planner~~ (Stage 4)  
+4. Stage 5 — Execution adapter foundation (no live autonomous runs yet)  
+5. Kill switch and repository lock state  
+6. Scheduled digests / founder briefings automation  
+7. Owner authentication before any hosted deployment  
 
 ## Safety Position
 

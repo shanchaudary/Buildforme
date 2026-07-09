@@ -35,6 +35,18 @@ Stage 2 only implements **local Buildforme approval**. UI copy must keep that ex
 
 Local packet save writes only to `runtime/packets.json`. It does **not** mutate GitHub.
 
+## Chief planner (Stage 4)
+
+| Concept | Meaning |
+| --- | --- |
+| **Project truth** | Evidence-backed claims about reality (not hopes) |
+| **Roadmap intent** | Stages and planned tasks (local only) |
+| **Recommendation** | Deterministic next action with score + explanation |
+| **Not authorization** | Planner never grants merge/production authority |
+| **Needs Shan** | RED/BLACK/security/founder decisions |
+
+Unverified truth is never treated as completed work.
+
 ## Risk Matrix
 
 ### GREEN

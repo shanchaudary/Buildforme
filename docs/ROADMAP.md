@@ -94,26 +94,40 @@ Delivered:
 - Policy nuance: docs/audit about high-risk topics vs execution; BLACK unchanged.
 - Tests for generator, storage, server, policy, CLI.
 
-## Stage 4 — Provider Adapter Planning
+## Stage 4 — Chief Planner and Roadmap Brain
 
-Next.
+Status: implemented in branch `stage-4-chief-planner`.
 
 Objective:
 
-- Prepare provider-neutral adapter interfaces for Claude, Codex, Grok, GLM.
-- Still no API keys in the repo.
-- Still no live agent calls.
-- Still no autonomous merge.
-- Still no production authority.
+- Deterministic project truth, roadmap stages, planned tasks, dependencies.
+- Ranked next-action recommendations with explainable scores.
+- Founder briefing without fabricated history.
+- Handoff into Stage 3 packet generator.
 
-Tasks:
+Delivered:
 
-- Adapter interface docs and stub-free contracts.
-- Task dispatch plan format.
-- Result intake format.
-- Reviewer-agent packet format.
+- `buildforme/planner.py`, `briefing.py`
+- Storage: projects, stages, planned_tasks, project_truth, events, briefings
+- APIs for projects/roadmap/truth/plan/briefing/packet handoff
+- UI: Chief planner + Projects
+- Sample project `data/sample_project.json`
+- CLI: `load-sample-project`, `plan`, `briefing`
+- `docs/PLANNER_SCORING.md`
 
-## Stage 5 — Approval Queue and Kill Switch
+Still forbidden: live agents, GitHub writes, auto-merge, production authority.
+
+## Stage 5 — Execution Adapter Foundation
+
+Next (planning only first).
+
+Objective:
+
+- Provider-neutral adapter interfaces for Claude, Codex, Grok, GLM.
+- Capability discovery / dry-run contracts.
+- Still no live autonomous execution until kill switch, run logs, and approval gates exist.
+
+## Stage 6 — Approval Queue and Kill Switch
 
 Objective:
 

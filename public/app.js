@@ -156,6 +156,16 @@ const PAGE_META = {
     title: "Agent packets",
     desc: "Generate tool-neutral instructions for Grok, Codex, Claude, or GLM. No live agent execution.",
   },
+  planner: {
+    kicker: "Control plane",
+    title: "Chief planner",
+    desc: "Deterministic next-action ranking from roadmap, truth, CI, and risk. No live agents.",
+  },
+  projects: {
+    kicker: "Control plane",
+    title: "Projects",
+    desc: "Local project registry, roadmap stages, planned tasks, and project truth.",
+  },
   guide: {
     kicker: "Policy",
     title: "Risk policy",
@@ -164,6 +174,7 @@ const PAGE_META = {
 };
 
 let lastGeneratedPacket = null;
+let lastPlan = null;
 
 let lastPacket = null;
 let lastClassification = null;
@@ -725,6 +736,12 @@ function showView(name) {
     loadPacketTaskOptions();
     loadSavedPackets();
     updatePacketSourceUI();
+  }
+  if (name === "planner" && serverOnline) {
+    loadPlannerProjects();
+  }
+  if (name === "projects" && serverOnline) {
+    loadProjectsPage();
   }
 }
 
@@ -1472,6 +1489,428 @@ document.querySelector("#save-packet")?.addEventListener("click", saveGeneratedP
 document.querySelector("#download-packet")?.addEventListener("click", downloadGeneratedPacket);
 document.querySelector("#packet-reset")?.addEventListener("click", resetPacketForm);
 document.querySelector("#refresh-packets")?.addEventListener("click", loadSavedPackets);
+
+// —— Stage 4 planner / projects ——
+async function loadPlannerProjects() {
+  const select = document.querySelector("#planner_project");
+  const roadmapSelect = document.querySelector("#roadmap_project");
+  try {
+    const response = await fetch("/api/projects");
+    const data = await response.json();
+    const projects = (data.projects || []).filter((p) => p.status !== "archived");
+    const fill = (el) => {
+      if (!el) return;
+      const prev = el.value;
+      el.innerHTML = "";
+      if (!projects.length) {
+        el.innerHTML = `<option value="">No projects — load sample</option>`;
+        return;
+      }
+      for (const p of projects) {
+        const opt = document.createElement("option");
+        opt.value = p.id;
+        opt.textContent = `${p.name} (${p.id})`;
+        el.appendChild(opt);
+      }
+      if (prev && projects.some((p) => p.id === prev)) el.value = prev;
+    };
+    fill(select);
+    fill(roadmapSelect);
+  } catch (error) {
+    if (select) select.innerHTML = `<option value="">Failed to load</option>`;
+  }
+}
+
+async function loadSampleProject(feedbackSelector) {
+  try {
+    const response = await fetch("/api/projects/sample", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ replace: true }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    showFeedback(feedbackSelector, `Sample project loaded: ${data.project.id}`, "is-ok");
+    await loadPlannerProjects();
+    await loadProjectsPage();
+    const sel = document.querySelector("#planner_project");
+    if (sel) sel.value = data.project.id;
+    await refreshPlan();
+  } catch (error) {
+    showFeedback(feedbackSelector, error.message, "is-error");
+  }
+}
+
+async function refreshPlan() {
+  const projectId = document.querySelector("#planner_project")?.value;
+  if (!projectId) {
+    showFeedback("#planner-feedback", "Select or load a project first.", "is-error");
+    return;
+  }
+  showFeedback("#planner-feedback", "Planning…", "is-ok");
+  try {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/plan/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    lastPlan = data.plan;
+    renderPlan(data.plan);
+    showFeedback("#planner-feedback", `Plan ready · confidence ${data.plan.confidence}`, "is-ok");
+  } catch (error) {
+    showFeedback("#planner-feedback", error.message, "is-error");
+  }
+}
+
+function renderPlan(plan) {
+  const summary = plan.summary || {};
+  setText("#pl-stage", summary.active_stage_name || summary.active_stage_id || "—");
+  setText("#pl-ready", summary.ready_tasks ?? "—");
+  setText("#pl-blocked", summary.blocked_tasks ?? "—");
+  setText("#pl-prs", summary.open_prs ?? "—");
+  setText("#pl-ci", summary.failing_ci ?? "—");
+  setText("#pl-shan", summary.needs_shan ?? "—");
+
+  const primary = plan.primary_recommendation || {};
+  setText("#pl-headline", primary.headline || "No recommendation");
+  setText(
+    "#pl-detail",
+    `${primary.recommendation_type || ""} · risk ${primary.risk || "—"} · score ${primary.total_score ?? "—"} · Shan: ${
+      primary.requires_shan ? "YES" : "no"
+    }`,
+  );
+  setText(
+    "#pl-meta",
+    (primary.explanation || primary.reasoning || []).slice(0, 2).join(" · ") || plan.disclaimer || "",
+  );
+  const explain = document.querySelector("#pl-explain");
+  if (explain) {
+    explain.innerHTML = "";
+    for (const line of primary.explanation || primary.reasoning || []) {
+      const li = document.createElement("li");
+      li.textContent = line;
+      explain.appendChild(li);
+    }
+  }
+  const genBtn = document.querySelector("#pl-generate-packet");
+  if (genBtn) {
+    genBtn.hidden = !primary.can_generate_packet;
+    genBtn.onclick = () => generatePacketFromRecommendation(plan.project_id, primary.target_id);
+  }
+
+  const ranked = document.querySelector("#planner-ranked");
+  ranked.innerHTML = "";
+  const list = plan.ranked_recommendations || [];
+  if (!list.length) {
+    ranked.innerHTML = `<div class="empty-inline">No ranked candidates.</div>`;
+  } else {
+    for (const rec of list) {
+      const card = document.createElement("article");
+      card.className = "queue-item";
+      const risk = rec.risk || "UNKNOWN";
+      const bd = rec.score_breakdown || {};
+      card.innerHTML = `
+        <div class="queue-item-head">
+          <h3 class="queue-item-title">#${escapeHtml(String(rec.rank || ""))} ${escapeHtml(rec.headline || "")}</h3>
+          <span class="risk-badge risk-${String(risk).toLowerCase()}">${escapeHtml(risk)}</span>
+        </div>
+        <div class="queue-meta">
+          <span>score ${escapeHtml(String(rec.total_score ?? ""))}</span>
+          <span>${escapeHtml(rec.recommendation_type || "")}</span>
+          <span>${escapeHtml(rec.stage_name || rec.stage_id || "")}</span>
+          <span>${rec.requires_shan ? "Needs Shan" : "Agent-eligible"}</span>
+        </div>
+        <p class="queue-action">${escapeHtml((rec.reasoning || []).join(" · "))}</p>
+        <p class="queue-files">blocker=${bd.blocker_impact} stage=${bd.stage_alignment} risk=${bd.risk_suitability} deps=${bd.dependency_readiness} ci=${bd.ci_urgency}</p>
+        <div class="queue-actions">
+          ${
+            rec.can_generate_packet
+              ? `<button type="button" class="btn btn-secondary btn-sm" data-pkt>Generate packet</button>`
+              : ""
+          }
+          ${
+            rec.html_url
+              ? `<a class="btn btn-ghost btn-sm" href="${escapeHtml(rec.html_url)}" target="_blank" rel="noopener">Open source</a>`
+              : ""
+          }
+        </div>
+      `;
+      card.querySelector("[data-pkt]")?.addEventListener("click", () => {
+        generatePacketFromRecommendation(plan.project_id, rec.target_id);
+      });
+      ranked.appendChild(card);
+    }
+  }
+
+  const blockers = document.querySelector("#planner-blockers");
+  blockers.innerHTML = "";
+  const bl = plan.blockers || [];
+  if (!bl.length) {
+    blockers.innerHTML = `<div class="empty-inline">No blockers detected.</div>`;
+  } else {
+    for (const b of bl) {
+      const card = document.createElement("article");
+      card.className = "queue-item";
+      card.innerHTML = `
+        <div class="queue-item-head">
+          <h3 class="queue-item-title">${escapeHtml(b.blocker || "")}</h3>
+          <span class="chip">${escapeHtml(b.severity || "")}</span>
+        </div>
+        <p class="queue-action">Blocks: ${escapeHtml(b.what_it_blocks || "")}</p>
+        <p class="queue-action">Resolution: ${escapeHtml(b.recommended_resolution || "")}</p>
+        <div class="queue-meta"><span>${b.requires_shan ? "Needs Shan" : "No Shan required"}</span></div>
+      `;
+      blockers.appendChild(card);
+    }
+  }
+}
+
+async function generatePacketFromRecommendation(projectId, targetId) {
+  try {
+    const response = await fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/recommendation/${encodeURIComponent(targetId)}/packet`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+    );
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    showGeneratedPacket(data.packet);
+    showView("packets");
+    showFeedback("#packet-form-feedback", "Packet generated from planner recommendation.", "is-ok");
+  } catch (error) {
+    showFeedback("#planner-feedback", error.message, "is-error");
+  }
+}
+
+async function generateBriefing() {
+  try {
+    const response = await fetch("/api/briefing/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    document.querySelector("#planner-briefing").textContent = JSON.stringify(data.briefing, null, 2);
+    showFeedback("#planner-feedback", "Briefing generated.", "is-ok");
+  } catch (error) {
+    showFeedback("#planner-feedback", error.message, "is-error");
+  }
+}
+
+async function loadProjectsPage() {
+  await loadPlannerProjects();
+  try {
+    const response = await fetch("/api/projects");
+    const data = await response.json();
+    const list = document.querySelector("#projects-list");
+    list.innerHTML = "";
+    for (const p of data.projects || []) {
+      const card = document.createElement("article");
+      card.className = "queue-item";
+      card.innerHTML = `
+        <div class="queue-item-head">
+          <h3 class="queue-item-title">${escapeHtml(p.name)} <span class="muted">(${escapeHtml(p.id)})</span></h3>
+          <span class="chip">${escapeHtml(p.status)}</span>
+        </div>
+        <p class="queue-action">${escapeHtml(p.repository || "")} · ${escapeHtml(p.objective || "")}</p>
+        <div class="queue-actions">
+          <button type="button" class="btn btn-secondary btn-sm" data-open>Open in planner</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-pause>${p.status === "paused" ? "Resume" : "Pause"}</button>
+          <button type="button" class="btn btn-danger btn-sm" data-archive>Archive</button>
+        </div>
+      `;
+      card.querySelector("[data-open]").addEventListener("click", async () => {
+        showView("planner");
+        document.querySelector("#planner_project").value = p.id;
+        await refreshPlan();
+      });
+      card.querySelector("[data-pause]").addEventListener("click", async () => {
+        const status = p.status === "paused" ? "active" : "paused";
+        await fetch(`/api/projects/${encodeURIComponent(p.id)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: p.id, status }),
+        });
+        await loadProjectsPage();
+      });
+      card.querySelector("[data-archive]").addEventListener("click", async () => {
+        await fetch(`/api/projects/${encodeURIComponent(p.id)}`, { method: "DELETE" });
+        await loadProjectsPage();
+      });
+      list.appendChild(card);
+    }
+    const projectId = document.querySelector("#roadmap_project")?.value;
+    if (projectId) await loadRoadmap(projectId);
+  } catch (error) {
+    showFeedback("#projects-feedback", error.message, "is-error");
+  }
+}
+
+async function loadRoadmap(projectId) {
+  if (!projectId) return;
+  try {
+    const [stagesRes, tasksRes, truthRes] = await Promise.all([
+      fetch(`/api/projects/${encodeURIComponent(projectId)}/stages`),
+      fetch(`/api/projects/${encodeURIComponent(projectId)}/planned-tasks`),
+      fetch(`/api/projects/${encodeURIComponent(projectId)}/truth`),
+    ]);
+    const stages = (await stagesRes.json()).stages || [];
+    const tasks = (await tasksRes.json()).planned_tasks || [];
+    const truth = (await truthRes.json()).truth || [];
+
+    const stagesList = document.querySelector("#stages-list");
+    stagesList.innerHTML = stages.length
+      ? stages
+          .slice()
+          .sort((a, b) => (a.order || 0) - (b.order || 0))
+          .map(
+            (s) => `<article class="queue-item"><strong>${escapeHtml(s.order)}. ${escapeHtml(s.name)}</strong>
+          <div class="queue-meta"><span>${escapeHtml(s.id)}</span><span>${escapeHtml(s.status)}</span></div>
+          <p class="queue-action">${escapeHtml(s.objective || "")}</p></article>`,
+          )
+          .join("")
+      : `<div class="empty-inline">No stages yet.</div>`;
+
+    const tasksList = document.querySelector("#planned-tasks-list");
+    tasksList.innerHTML = tasks.length
+      ? tasks
+          .map(
+            (t) => `<article class="queue-item">
+          <div class="queue-item-head"><h3 class="queue-item-title">${escapeHtml(t.id)} · ${escapeHtml(t.title)}</h3>
+          <span class="risk-badge risk-${String(t.risk || "yellow").toLowerCase()}">${escapeHtml(t.risk || "")}</span></div>
+          <div class="queue-meta"><span>${escapeHtml(t.status)}</span><span>${escapeHtml(t.stage_id || "")}</span>
+          <span>deps: ${escapeHtml((t.dependencies || []).join(", ") || "none")}</span></div>
+          <p class="queue-action">${escapeHtml(t.objective || "")}</p></article>`,
+          )
+          .join("")
+      : `<div class="empty-inline">No planned tasks yet.</div>`;
+
+    const truthList = document.querySelector("#truth-list");
+    truthList.innerHTML = truth.length
+      ? truth
+          .map(
+            (t) => `<article class="queue-item">
+          <div class="queue-item-head"><h3 class="queue-item-title">${escapeHtml(t.title)}</h3>
+          <span class="chip">${escapeHtml(t.category)}</span></div>
+          <p class="queue-action">${escapeHtml(t.description || "")}</p>
+          <div class="queue-meta"><span>confidence ${escapeHtml(String(t.confidence))}</span>
+          <span>${escapeHtml(t.source || "")}</span></div></article>`,
+          )
+          .join("")
+      : `<div class="empty-inline">No truth items yet.</div>`;
+  } catch (error) {
+    showFeedback("#projects-feedback", error.message, "is-error");
+  }
+}
+
+document.querySelector("#planner-refresh")?.addEventListener("click", refreshPlan);
+document.querySelector("#planner-sample")?.addEventListener("click", () => loadSampleProject("#planner-feedback"));
+document.querySelector("#planner-briefing")?.addEventListener("click", generateBriefing);
+document.querySelector("#proj-load-sample")?.addEventListener("click", () => loadSampleProject("#projects-feedback"));
+document.querySelector("#roadmap_project")?.addEventListener("change", (e) => loadRoadmap(e.target.value));
+
+document.querySelector("#project-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const response = await fetch("/api/projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: document.querySelector("#proj_id").value.trim() || undefined,
+        name: document.querySelector("#proj_name").value.trim(),
+        repository: document.querySelector("#proj_repo").value.trim(),
+        default_branch: document.querySelector("#proj_branch").value.trim() || "main",
+        objective: document.querySelector("#proj_objective").value.trim(),
+        status: "active",
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    showFeedback("#projects-feedback", `Saved project ${data.project.id}`, "is-ok");
+    await loadProjectsPage();
+  } catch (error) {
+    showFeedback("#projects-feedback", error.message, "is-error");
+  }
+});
+
+document.querySelector("#stage-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const projectId = document.querySelector("#roadmap_project").value;
+  if (!projectId) return showFeedback("#projects-feedback", "Select a project", "is-error");
+  try {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/stages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: document.querySelector("#stage_name").value.trim(),
+        order: Number(document.querySelector("#stage_order").value || 1),
+        status: "not_started",
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    document.querySelector("#stage_name").value = "";
+    await loadRoadmap(projectId);
+  } catch (error) {
+    showFeedback("#projects-feedback", error.message, "is-error");
+  }
+});
+
+document.querySelector("#planned-task-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const projectId = document.querySelector("#roadmap_project").value;
+  if (!projectId) return showFeedback("#projects-feedback", "Select a project", "is-error");
+  try {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/planned-tasks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: document.querySelector("#pt_title").value.trim(),
+        stage_id: document.querySelector("#pt_stage").value.trim() || null,
+        risk: document.querySelector("#pt_risk").value,
+        status: document.querySelector("#pt_status").value,
+        objective: document.querySelector("#pt_objective").value.trim(),
+        dependencies: linesFrom(document.querySelector("#pt_deps").value),
+        priority: "medium",
+        estimated_effort: "small",
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    document.querySelector("#pt_title").value = "";
+    await loadRoadmap(projectId);
+  } catch (error) {
+    showFeedback("#projects-feedback", error.message, "is-error");
+  }
+});
+
+document.querySelector("#truth-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const projectId = document.querySelector("#roadmap_project").value;
+  if (!projectId) return showFeedback("#projects-feedback", "Select a project", "is-error");
+  try {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/truth`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: document.querySelector("#truth_title").value.trim(),
+        category: document.querySelector("#truth_cat").value,
+        description: document.querySelector("#truth_desc").value.trim(),
+        confidence: Number(document.querySelector("#truth_conf").value || 50),
+        source: "manual",
+        evidence: [],
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    document.querySelector("#truth_title").value = "";
+    await loadRoadmap(projectId);
+  } catch (error) {
+    showFeedback("#projects-feedback", error.message, "is-error");
+  }
+});
 
 setupNav();
 showView("classify");

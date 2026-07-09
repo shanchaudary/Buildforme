@@ -54,6 +54,79 @@ def serve_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def load_sample_project_command(args: argparse.Namespace) -> int:
+    from buildforme.storage import LocalStore
+
+    sample_path = Path(__file__).resolve().parent.parent / "data" / "sample_project.json"
+    sample = json.loads(sample_path.read_text(encoding="utf-8"))
+    store = LocalStore(args.state)
+    project = store.load_sample_project(sample, replace=bool(args.replace))
+    print(json.dumps({"project": project, "note": "Sample project loaded locally"}, indent=2))
+    return 0
+
+
+def plan_command(args: argparse.Namespace) -> int:
+    from buildforme.planner import plan_project
+    from buildforme.storage import LocalStore
+    from buildforme.work_queue import build_work_queue
+    from buildforme.github_client import GitHubClient
+
+    store = LocalStore(args.state)
+    project = store.get_project(args.project_id)
+    github = {"available": False}
+    if not args.local_only:
+        try:
+            queue = build_work_queue(store, GitHubClient.from_env(), repos=[project["repository"]])
+            github = {
+                "available": True,
+                "pull_requests": queue.get("pull_requests") or [],
+                "issues": queue.get("issues") or [],
+                "errors": queue.get("errors") or [],
+            }
+        except Exception as exc:  # noqa: BLE001
+            github = {"available": False, "errors": [{"error": str(exc)}]}
+    plan = plan_project(args.project_id, store, github_data=github)
+    if args.json:
+        print(json.dumps(plan, indent=2, sort_keys=True))
+    else:
+        primary = plan.get("primary_recommendation") or {}
+        print(f"Project: {args.project_id}")
+        print(f"Confidence: {plan.get('confidence')}")
+        print(f"Primary: {primary.get('headline')}")
+        print(f"Risk: {primary.get('risk')} · Score: {primary.get('total_score')}")
+        print(f"Requires Shan: {primary.get('requires_shan')}")
+        for line in primary.get("explanation") or primary.get("reasoning") or []:
+            print(f"  - {line}")
+        print("\nTop ranked:")
+        for rec in (plan.get("ranked_recommendations") or [])[:5]:
+            print(f"  {rec.get('rank')}. [{rec.get('total_score')}] {rec.get('headline')} ({rec.get('risk')})")
+    return 0
+
+
+def briefing_command(args: argparse.Namespace) -> int:
+    from buildforme.briefing import build_founder_briefing
+    from buildforme.storage import LocalStore
+
+    store = LocalStore(args.state)
+    briefing = build_founder_briefing(store, project_ids=args.project_id)
+    if args.json:
+        print(json.dumps(briefing, indent=2, sort_keys=True))
+    else:
+        summary = briefing.get("summary") or {}
+        print("Founder briefing")
+        print(f"Generated: {briefing.get('generated_at')}")
+        print(f"Active projects: {summary.get('active_projects')} · Needs Shan: {summary.get('needs_shan')}")
+        print(f"Open PRs: {summary.get('open_prs')} · Failing CI: {summary.get('failing_ci')}")
+        print(briefing.get("completed_note"))
+        print("\nRecommended next:")
+        for item in briefing.get("recommended_next") or []:
+            print(f"  - [{item.get('project_id')}] {item.get('headline')}")
+        print("\nNeeds Shan:")
+        for item in briefing.get("needs_shan") or []:
+            print(f"  - [{item.get('project_id')}] {item.get('headline')}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Buildforme supervisor CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -76,6 +149,24 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--port", type=int, default=8787, help="Port to bind")
     serve_parser.add_argument("--state", default="runtime/buildforme_state.json", help="Local JSON state path")
     serve_parser.set_defaults(func=serve_command)
+
+    sample_parser = subparsers.add_parser("load-sample-project", help="Load Buildforme sample project into local runtime")
+    sample_parser.add_argument("--state", default="runtime/buildforme_state.json")
+    sample_parser.add_argument("--replace", action="store_true", default=True)
+    sample_parser.set_defaults(func=load_sample_project_command)
+
+    plan_parser = subparsers.add_parser("plan", help="Run chief planner for a project")
+    plan_parser.add_argument("project_id", help="Project id (e.g. buildforme)")
+    plan_parser.add_argument("--state", default="runtime/buildforme_state.json")
+    plan_parser.add_argument("--json", action="store_true")
+    plan_parser.add_argument("--local-only", action="store_true", help="Skip GitHub read-only fetch")
+    plan_parser.set_defaults(func=plan_command)
+
+    briefing_parser = subparsers.add_parser("briefing", help="Generate founder briefing")
+    briefing_parser.add_argument("--project-id", action="append", dest="project_id")
+    briefing_parser.add_argument("--state", default="runtime/buildforme_state.json")
+    briefing_parser.add_argument("--json", action="store_true")
+    briefing_parser.set_defaults(func=briefing_command)
     return parser
 
 

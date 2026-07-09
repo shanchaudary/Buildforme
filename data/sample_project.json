@@ -1,0 +1,140 @@
+{
+  "project": {
+    "id": "buildforme",
+    "name": "Buildforme",
+    "repository": "shanchaudary/Buildforme",
+    "default_branch": "main",
+    "status": "active",
+    "objective": "Founder control plane for supervising AI coding agents safely",
+    "current_stage_id": "bf-stage-4",
+    "sample": true
+  },
+  "stages": [
+    {
+      "id": "bf-stage-1",
+      "name": "Local supervisor MVP",
+      "order": 1,
+      "status": "complete",
+      "objective": "Classify risk, save tasks, local server, dashboard"
+    },
+    {
+      "id": "bf-stage-2",
+      "name": "GitHub work queue",
+      "order": 2,
+      "status": "complete",
+      "objective": "Read-only PR/issue queue with CI and local approvals"
+    },
+    {
+      "id": "bf-stage-3",
+      "name": "Agent packet generator",
+      "order": 3,
+      "status": "complete",
+      "objective": "Tool-neutral handoff packets without live agent execution"
+    },
+    {
+      "id": "bf-stage-4",
+      "name": "Chief planner foundation",
+      "order": 4,
+      "status": "in_progress",
+      "objective": "Deterministic roadmap brain and next-action recommendations"
+    }
+  ],
+  "planned_tasks": [
+    {
+      "id": "BF-S3-DONE",
+      "stage_id": "bf-stage-3",
+      "title": "Ship agent packet generator",
+      "objective": "Generate copy/save/download packets from tasks and GitHub items",
+      "status": "complete",
+      "risk": "YELLOW",
+      "priority": "high",
+      "estimated_effort": "medium",
+      "dependencies": [],
+      "allowed_files": ["buildforme/**", "public/**", "tests/**"],
+      "forbidden_files": [".env", "secrets/**"],
+      "acceptance_criteria": ["Packets generate", "Tests pass", "No provider calls"],
+      "human_approval_required": false,
+      "source_type": "roadmap"
+    },
+    {
+      "id": "BF-S4-READY",
+      "stage_id": "bf-stage-4",
+      "title": "Polish planner empty states and docs",
+      "objective": "Improve planner UX empty states and PLANNER_SCORING clarity",
+      "status": "ready",
+      "risk": "YELLOW",
+      "priority": "medium",
+      "estimated_effort": "small",
+      "dependencies": ["BF-S3-DONE"],
+      "allowed_files": ["public/**", "docs/**", "tests/**"],
+      "forbidden_files": [".env", "secrets/**"],
+      "acceptance_criteria": ["Empty states clear", "Docs accurate", "Tests pass"],
+      "required_tests": ["python -m unittest discover -s tests -p \"test_*.py\""],
+      "human_approval_required": false,
+      "source_type": "roadmap"
+    },
+    {
+      "id": "BF-S4-DEP",
+      "stage_id": "bf-stage-4",
+      "title": "Add planner integration tests for multi-project ranking",
+      "objective": "Expand planner tests once sample polish lands",
+      "status": "backlog",
+      "risk": "GREEN",
+      "priority": "low",
+      "estimated_effort": "small",
+      "dependencies": ["BF-S4-READY"],
+      "allowed_files": ["tests/**", "buildforme/planner.py"],
+      "forbidden_files": [".env"],
+      "acceptance_criteria": ["Tests cover multi-project path"],
+      "human_approval_required": false,
+      "source_type": "roadmap"
+    },
+    {
+      "id": "BF-S4-RED",
+      "stage_id": "bf-stage-4",
+      "title": "Design auth model for hosted control plane",
+      "objective": "Plan tenant isolation and owner authentication for future hosted deploy",
+      "status": "ready",
+      "risk": "RED",
+      "priority": "high",
+      "estimated_effort": "large",
+      "dependencies": [],
+      "allowed_files": ["docs/**"],
+      "forbidden_files": [".env", "secrets/**"],
+      "acceptance_criteria": ["Written plan only", "No implementation without Shan approval"],
+      "human_approval_required": true,
+      "source_type": "roadmap"
+    }
+  ],
+  "truth": [
+    {
+      "id": "truth-sample-working",
+      "category": "working",
+      "title": "Local supervisor and packet generator work",
+      "description": "Stages 1-3 are merged on main with tests and UI.",
+      "evidence": [
+        {
+          "type": "test",
+          "reference": "python -m unittest",
+          "summary": "Unit suite green on Stage 3 merge"
+        },
+        {
+          "type": "manual",
+          "reference": "http://127.0.0.1:8787",
+          "summary": "Dashboard pages load locally"
+        }
+      ],
+      "confidence": 85,
+      "source": "audit"
+    },
+    {
+      "id": "truth-sample-unverified",
+      "category": "unverified",
+      "title": "Hosted multi-user auth not verified",
+      "description": "No hosted deployment or SSO verification yet.",
+      "evidence": [],
+      "confidence": 20,
+      "source": "manual"
+    }
+  ]
+}

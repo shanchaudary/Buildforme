@@ -65,6 +65,23 @@ runtime/packets.json  (local only; scrubbed of secret-like fields)
 
 Generated packets are **instructions**, not approvals and not executions.
 
+### Stage 4 — Chief planner data flow
+
+```text
+projects / stages / planned_tasks / project_truth (local runtime)
+        + optional read-only GitHub queue signals
+    ↓
+planner.py  (deterministic scores + hard rules)
+    ↓
+recommendation + blockers + confidence
+    ↓
+briefing.py  (founder briefing)
+    ↓
+dashboard Chief planner / Projects
+    ↓
+optional → packet_generator.py (Stage 3 handoff)
+```
+
 ## Future Components
 
 ```text
@@ -74,13 +91,15 @@ Work queue (Stage 2 — implemented)
     ↓
 Agent packet generator (Stage 3 — implemented)
     ↓
-Provider adapter planning (Stage 4)
+Chief planner / roadmap brain (Stage 4 — implemented)
+    ↓
+Execution adapter foundation (Stage 5)
     ├── Claude adapter contract
     ├── Codex adapter contract
     ├── Grok adapter contract
     └── GLM adapter contract
     ↓
-Reviewer agent (later)
+Supervised agent runs (later)
     ↓
 Approval queue / kill switch
     ↓

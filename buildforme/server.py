@@ -16,18 +16,21 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from buildforme.briefing import build_founder_briefing
 from buildforme.github_client import GitHubClient, GitHubClientError
 from buildforme.packet_generator import generate_agent_packet
+from buildforme.planner import plan_project, recommendation_to_packet_input
 from buildforme.policy import classify_task, validate_task_packet
 from buildforme.storage import DEFAULT_STATE_PATH, LocalStore
 from buildforme.work_queue import build_pr_status, build_work_queue
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PUBLIC_ROOT = PROJECT_ROOT / "public"
+SAMPLE_PROJECT_PATH = PROJECT_ROOT / "data" / "sample_project.json"
 
 
 class BuildformeRequestHandler(BaseHTTPRequestHandler):
-    server_version = "BuildformeMVP/0.4"
+    server_version = "BuildformeMVP/0.5"
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urllib.parse.urlparse(self.path)
@@ -89,6 +92,26 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/pr/") and path.endswith("/status"):
             self._pr_status(path)
             return
+        if path == "/api/projects":
+            self._json(HTTPStatus.OK, {"projects": self._store().list_projects()})
+            return
+        if path == "/api/events":
+            limit = _safe_int(_first_query_value(parsed, "limit"), default=100, maximum=500)
+            self._json(HTTPStatus.OK, {"events": self._store().list_events(limit=limit)})
+            return
+        if path == "/api/briefing":
+            self._json(HTTPStatus.OK, {"last_generated_at": self._store().last_briefing_at()})
+            return
+        if path.startswith("/api/projects/"):
+            if self._get_project_routes(path, parsed):
+                return
+        if path.startswith("/api/planned-tasks/"):
+            task_id = urllib.parse.unquote(path.removeprefix("/api/planned-tasks/").strip("/"))
+            try:
+                self._json(HTTPStatus.OK, {"task": self._store().get_planned_task(task_id)})
+            except KeyError as exc:
+                self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            return
 
         if self._try_serve_public_asset(path):
             return
@@ -124,6 +147,55 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/packets/from-issue":
             self._packet_from_issue()
             return
+        if path == "/api/projects":
+            self._upsert_project()
+            return
+        if path == "/api/projects/sample":
+            self._load_sample_project()
+            return
+        if path == "/api/briefing/generate":
+            self._generate_briefing()
+            return
+        if path.startswith("/api/projects/") and path.endswith("/stages"):
+            project_id = path.removeprefix("/api/projects/").removesuffix("/stages").strip("/")
+            self._upsert_stage(project_id)
+            return
+        if path.startswith("/api/projects/") and path.endswith("/planned-tasks"):
+            project_id = path.removeprefix("/api/projects/").removesuffix("/planned-tasks").strip("/")
+            self._upsert_planned_task(project_id)
+            return
+        if path.startswith("/api/projects/") and path.endswith("/truth"):
+            project_id = path.removeprefix("/api/projects/").removesuffix("/truth").strip("/")
+            self._upsert_truth(project_id)
+            return
+        if path.startswith("/api/projects/") and path.endswith("/plan/refresh"):
+            project_id = path.removeprefix("/api/projects/").removesuffix("/plan/refresh").strip("/")
+            self._plan_project(project_id, refresh=True)
+            return
+        if "/recommendation/" in path and path.endswith("/packet"):
+            # /api/projects/{id}/recommendation/{target_id}/packet
+            self._packet_from_recommendation(path)
+            return
+        self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+
+    def do_PUT(self) -> None:  # noqa: N802
+        path = urllib.parse.urlparse(self.path).path
+        if path.startswith("/api/projects/") and path.count("/") == 3:
+            project_id = path.removeprefix("/api/projects/").strip("/")
+            self._upsert_project(project_id=project_id)
+            return
+        if path.startswith("/api/stages/"):
+            stage_id = path.removeprefix("/api/stages/").strip("/")
+            self._upsert_stage(None, stage_id=stage_id)
+            return
+        if path.startswith("/api/planned-tasks/"):
+            task_id = path.removeprefix("/api/planned-tasks/").strip("/")
+            self._upsert_planned_task(None, task_id=task_id)
+            return
+        if path.startswith("/api/truth/"):
+            truth_id = path.removeprefix("/api/truth/").strip("/")
+            self._upsert_truth(None, truth_id=truth_id)
+            return
         self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
     def do_DELETE(self) -> None:  # noqa: N802
@@ -138,6 +210,15 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
             except ValueError as exc:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        if path.startswith("/api/projects/") and path.count("/") == 3:
+            project_id = path.removeprefix("/api/projects/").strip("/")
+            try:
+                project = self._store().set_project_status(project_id, "archived")
+                self._json(HTTPStatus.OK, {"project": project, "note": "Archived (local only)."})
+            except (KeyError, ValueError) as exc:
+                code = HTTPStatus.NOT_FOUND if isinstance(exc, KeyError) else HTTPStatus.BAD_REQUEST
+                self._json(code, {"error": str(exc)})
             return
         if path.startswith("/api/repos/"):
             encoded = path.removeprefix("/api/repos/")
@@ -365,6 +446,219 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
                 HTTPStatus.BAD_GATEWAY if isinstance(exc, GitHubClientError) else HTTPStatus.BAD_REQUEST,
                 {"error": str(exc)},
             )
+
+    def _get_project_routes(self, path: str, parsed: urllib.parse.ParseResult) -> bool:
+        parts = [p for p in path.strip("/").split("/") if p]
+        # api projects {id} ...
+        if len(parts) < 3 or parts[0] != "api" or parts[1] != "projects":
+            return False
+        project_id = urllib.parse.unquote(parts[2])
+        if len(parts) == 3:
+            try:
+                self._json(HTTPStatus.OK, {"project": self._store().get_project(project_id)})
+            except KeyError as exc:
+                self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            return True
+        resource = parts[3]
+        try:
+            if resource == "stages":
+                self._json(HTTPStatus.OK, {"stages": self._store().list_stages(project_id)})
+                return True
+            if resource == "planned-tasks":
+                self._json(HTTPStatus.OK, {"planned_tasks": self._store().list_planned_tasks(project_id)})
+                return True
+            if resource == "truth":
+                self._json(HTTPStatus.OK, {"truth": self._store().list_truth(project_id)})
+                return True
+            if resource == "events":
+                self._json(HTTPStatus.OK, {"events": self._store().list_events(project_id)})
+                return True
+            if resource == "plan":
+                self._plan_project(project_id, refresh=False)
+                return True
+            if resource == "recommendation":
+                self._plan_project(project_id, refresh=False, recommendation_only=True)
+                return True
+        except KeyError as exc:
+            self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            return True
+        return False
+
+    def _upsert_project(self, project_id: str | None = None) -> None:
+        try:
+            payload = self._read_json()
+            if not isinstance(payload, dict):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
+                return
+            if project_id:
+                payload["id"] = project_id
+            if payload.get("status") in {"paused", "active", "archived", "blocked", "completed"} and set(
+                payload.keys()
+            ) <= {"id", "status"}:
+                project = self._store().set_project_status(str(payload["id"]), str(payload["status"]))
+            else:
+                project = self._store().upsert_project(payload)
+            self._json(HTTPStatus.OK, {"project": project})
+        except json.JSONDecodeError:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_json"})
+        except (KeyError, ValueError) as exc:
+            code = HTTPStatus.NOT_FOUND if isinstance(exc, KeyError) else HTTPStatus.BAD_REQUEST
+            self._json(code, {"error": str(exc)})
+
+    def _upsert_stage(self, project_id: str | None, stage_id: str | None = None) -> None:
+        try:
+            payload = self._read_json()
+            if not isinstance(payload, dict):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
+                return
+            if project_id:
+                payload["project_id"] = project_id
+            if stage_id:
+                payload["id"] = stage_id
+            stage = self._store().upsert_stage(payload)
+            self._json(HTTPStatus.OK, {"stage": stage})
+        except json.JSONDecodeError:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_json"})
+        except (KeyError, ValueError) as exc:
+            code = HTTPStatus.NOT_FOUND if isinstance(exc, KeyError) else HTTPStatus.BAD_REQUEST
+            self._json(code, {"error": str(exc)})
+
+    def _upsert_planned_task(self, project_id: str | None, task_id: str | None = None) -> None:
+        try:
+            payload = self._read_json()
+            if not isinstance(payload, dict):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
+                return
+            if project_id:
+                payload["project_id"] = project_id
+            if task_id:
+                payload["id"] = task_id
+                if "project_id" not in payload:
+                    existing = self._store().get_planned_task(task_id)
+                    payload["project_id"] = existing.get("project_id")
+            task = self._store().upsert_planned_task(payload)
+            self._json(HTTPStatus.OK, {"task": task})
+        except json.JSONDecodeError:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_json"})
+        except (KeyError, ValueError) as exc:
+            code = HTTPStatus.NOT_FOUND if isinstance(exc, KeyError) else HTTPStatus.BAD_REQUEST
+            self._json(code, {"error": str(exc)})
+
+    def _upsert_truth(self, project_id: str | None, truth_id: str | None = None) -> None:
+        try:
+            payload = self._read_json()
+            if not isinstance(payload, dict):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
+                return
+            if project_id:
+                payload["project_id"] = project_id
+            if truth_id:
+                payload["id"] = truth_id
+            record = self._store().upsert_truth(payload)
+            self._json(HTTPStatus.OK, {"truth": record})
+        except json.JSONDecodeError:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid_json"})
+        except (KeyError, ValueError) as exc:
+            code = HTTPStatus.NOT_FOUND if isinstance(exc, KeyError) else HTTPStatus.BAD_REQUEST
+            self._json(code, {"error": str(exc)})
+
+    def _github_data_for_project(self, project: dict[str, Any]) -> dict[str, Any]:
+        repository = str(project.get("repository") or "").strip()
+        if not repository:
+            return {"available": False, "note": "No repository configured"}
+        try:
+            queue = build_work_queue(self._store(), self._github(), repos=[repository], pr_limit=15, issue_limit=15)
+            return {
+                "available": True,
+                "pull_requests": queue.get("pull_requests") or [],
+                "issues": queue.get("issues") or [],
+                "errors": queue.get("errors") or [],
+                "note": queue.get("note"),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"available": False, "errors": [{"error": str(exc)}], "note": "GitHub unavailable"}
+
+    def _plan_project(self, project_id: str, *, refresh: bool, recommendation_only: bool = False) -> None:
+        try:
+            project = self._store().get_project(project_id)
+            github = self._github_data_for_project(project) if refresh or True else {"available": False}
+            plan = plan_project(project_id, self._store(), github_data=github)
+            if recommendation_only:
+                self._json(HTTPStatus.OK, {"recommendation": plan.get("primary_recommendation"), "plan": plan})
+            else:
+                self._json(HTTPStatus.OK, {"plan": plan})
+        except KeyError as exc:
+            self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+        except Exception as exc:  # noqa: BLE001
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def _packet_from_recommendation(self, path: str) -> None:
+        # /api/projects/{id}/recommendation/{target_id}/packet
+        parts = [p for p in path.strip("/").split("/") if p]
+        try:
+            project_id = parts[2]
+            target_id = parts[4]
+            project = self._store().get_project(project_id)
+            github = self._github_data_for_project(project)
+            plan = plan_project(project_id, self._store(), github_data=github)
+            match = None
+            for rec in plan.get("ranked_recommendations") or []:
+                if str(rec.get("target_id")) == str(target_id) or str(rec.get("id")) == str(target_id):
+                    match = rec
+                    break
+            if match is None and str((plan.get("primary_recommendation") or {}).get("target_id")) == str(target_id):
+                match = plan.get("primary_recommendation")
+            if match is None:
+                self._json(HTTPStatus.NOT_FOUND, {"error": f"recommendation target not found: {target_id}"})
+                return
+            packet_input = recommendation_to_packet_input(project, match)
+            packet = generate_agent_packet(packet_input)
+            self._store().append_event(
+                {
+                    "event_type": "packet_generated_from_planner",
+                    "project_id": project_id,
+                    "target_type": match.get("target_type"),
+                    "target_id": target_id,
+                    "summary": f"Packet from planner: {match.get('headline')}",
+                }
+            )
+            self._json(HTTPStatus.OK, {"packet": packet, "recommendation": match})
+        except (KeyError, ValueError, IndexError) as exc:
+            code = HTTPStatus.NOT_FOUND if isinstance(exc, KeyError) else HTTPStatus.BAD_REQUEST
+            self._json(code, {"error": str(exc)})
+        except Exception as exc:  # noqa: BLE001
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def _load_sample_project(self) -> None:
+        try:
+            payload = self._read_json() if int(self.headers.get("Content-Length") or "0") else {}
+            if not isinstance(payload, dict):
+                payload = {}
+            replace = bool(payload.get("replace", True))
+            sample = json.loads(SAMPLE_PROJECT_PATH.read_text(encoding="utf-8"))
+            project = self._store().load_sample_project(sample, replace=replace)
+            self._json(HTTPStatus.OK, {"project": project, "note": "Sample/demo data loaded locally."})
+        except FileNotFoundError:
+            self._json(HTTPStatus.NOT_FOUND, {"error": "sample project file missing"})
+        except (json.JSONDecodeError, ValueError) as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def _generate_briefing(self) -> None:
+        try:
+            payload = self._read_json() if int(self.headers.get("Content-Length") or "0") else {}
+            if not isinstance(payload, dict):
+                payload = {}
+            project_ids = payload.get("project_ids")
+            queues: dict[str, Any] = {}
+            for project in self._store().list_projects(include_archived=False):
+                pid = str(project.get("id"))
+                if project_ids and pid not in project_ids:
+                    continue
+                queues[pid] = self._github_data_for_project(project)
+            briefing = build_founder_briefing(self._store(), project_ids=project_ids, queues=queues)
+            self._json(HTTPStatus.OK, {"briefing": briefing})
+        except Exception as exc:  # noqa: BLE001
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
     def _work_queue(self, parsed: urllib.parse.ParseResult) -> None:
         repos_param = _first_query_value(parsed, "repos")

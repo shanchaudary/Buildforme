@@ -85,6 +85,10 @@ h1 {
   align-items: start;
 }
 
+.lower-grid {
+  margin-top: 24px;
+}
+
 .panel {
   padding: 24px;
 }
@@ -122,6 +126,13 @@ textarea {
   width: auto;
 }
 
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
 button {
   border: 0;
   border-radius: 999px;
@@ -130,6 +141,26 @@ button {
   color: white;
   font-weight: 800;
   cursor: pointer;
+}
+
+button.secondary {
+  border: 1px solid var(--line);
+  background: white;
+  color: var(--ink);
+}
+
+code {
+  border-radius: 8px;
+  background: rgba(31, 41, 51, 0.08);
+  padding: 2px 6px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.warning {
+  color: var(--red);
 }
 
 .risk {
@@ -182,6 +213,33 @@ button {
 .decision-list dd {
   margin: 4px 0 0;
   font-weight: 800;
+}
+
+.stack-list {
+  display: grid;
+  gap: 12px;
+}
+
+.mini-card {
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 14px;
+  background: white;
+}
+
+.mini-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.mini-card p {
+  margin: 10px 0;
+}
+
+.mini-card small {
+  color: var(--muted);
 }
 
 pre {

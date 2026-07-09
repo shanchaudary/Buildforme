@@ -1,104 +1,140 @@
 # Buildforme Roadmap
 
-## Stage 0 — MVP Foundation
+Buildforme is being built as a staged supervisor for AI engineering agents. The goal is not to give agents unchecked authority. The goal is to route work through explicit safety gates, task packets, PRs, tests, reviews, and human approval only where required.
 
-Status: started in `founder-control-plane-mvp`.
+## Stage 0 — Governance Foundation
 
-Exit criteria:
+Status: implemented in the first MVP branch.
 
-- Policy engine classifies task packets.
-- CLI can classify JSON packets.
-- Static dashboard drafts and classifies packets.
-- GitHub issue/PR templates exist.
-- CI runs tests.
+Delivered:
 
-## Stage 1 — GitHub Read-Only Supervisor
-
-Objective:
-
-- Pull issues, PRs, changed files, reviews, labels, and CI statuses.
-- Produce a daily approval digest.
-- Classify PRs against the risk matrix.
-
-Forbidden in this stage:
-
-- merging PRs
-- editing files through GitHub API
-- triggering production deployments
-- handling secrets beyond presence checks
-
-## Stage 2 — Task Packet Orchestrator
-
-Objective:
-
-- Convert founder intent into task packets.
-- Queue green/yellow tasks.
-- Block red/black tasks.
-- Maintain audit log.
+- AGENTS operating law.
+- Risk policy model.
+- Task packet shape.
+- PR safety template.
+- Agent task issue template.
+- CI gate.
+- Static dashboard.
 
 Exit criteria:
 
-- Every launched task has task ID, risk, scope, acceptance criteria, and reviewer requirement.
+- Task classifications are deterministic.
+- Unsafe requests are rejected or blocked.
+- CI verifies policy behavior.
 
-## Stage 3 — Agent Adapter Interface
+## Stage 1 — Local Testable Supervisor
 
-Objective:
+Status: implemented in the current MVP branch.
 
-- Define provider-neutral adapter contract.
-- Add manual adapter first.
-- Add Claude/Codex/GLM adapters only after secrets and approval gates exist.
+Delivered:
 
-Exit criteria:
-
-- Adapters cannot override policy decisions.
-- Red and black tasks cannot run without approval.
-
-## Stage 4 — Approval Queue
-
-Objective:
-
-- Web UI for pending approvals.
-- Approve/reject/rework decisions.
-- Immutable audit events.
+- Dependency-free local HTTP server.
+- Server-backed task classification.
+- Local JSON task persistence.
+- Local approval decision recording API.
+- Browser dashboard that can save and list tasks.
+- Optional read-only GitHub repository, issue, PR, and changed-file inspection.
+- Tests for policy, storage, GitHub client helpers, and local server endpoints.
 
 Exit criteria:
 
-- Shan sees only meaningful decisions, not raw terminal noise.
+- `python -m unittest discover -s tests -p 'test_*.py'` passes.
+- `python -m buildforme.cli classify data/sample_task.json` passes.
+- `python -m buildforme.cli serve` starts the app.
+- Browser can classify and save a task locally.
+- Browser can inspect a public GitHub PR without secrets.
 
-## Stage 5 — Notifications
+## Stage 2 — GitHub Work Queue
 
-Objective:
-
-- Email or chat digests.
-- Urgent approval alerts.
-- Failure reports.
-
-Exit criteria:
-
-- Daily summary can be delivered without exposing secrets.
-
-## Stage 6 — Safe Write Actions
+Next.
 
 Objective:
 
-- Create labels/issues/comments/PR review requests through GitHub.
-- Never merge automatically.
+- Turn GitHub Issues and PRs into a usable work queue.
+- Show blocked, ready, failed, and needs-review states.
+- Map labels such as `risk:green`, `risk:yellow`, `risk:red`, `blocked:shan`, `stage:A` into the dashboard.
 
-Exit criteria:
+Tasks:
 
-- All writes are audited.
-- Dangerous writes remain blocked.
+- Sync selected GitHub issues into local records.
+- Sync selected PR metadata and changed files into local records.
+- Pull CI status for PR head commits.
+- Add dashboard filters for risk, stage, and approval state.
+- Add a review checklist for each PR.
 
-## Stage 7 — Deployment
+Do not build yet:
+
+- autonomous provider execution
+- auto-merge
+- production deployment
+- secret storage
+
+## Stage 3 — Agent Adapter Contracts
 
 Objective:
 
-- Authenticated hosted app.
+- Define provider-neutral adapter contracts for Claude, Codex, GLM, and future coding agents.
+- Keep provider credentials outside task packets and outside git.
+
+Tasks:
+
+- Add adapter interface docs and stub-free contracts.
+- Add task dispatch plan format.
+- Add result intake format.
+- Add reviewer-agent packet format.
+
+Do not build yet:
+
+- live provider calls unless approved
+- background scheduling
+- autonomous merge
+
+## Stage 4 — Approval Queue and Kill Switch
+
+Objective:
+
+- Give the owner a dashboard that clearly separates auto-runnable work from blocked human decisions.
+
+Tasks:
+
+- Add approval queue views.
+- Add `PAUSED` repository state.
+- Add kill-switch state file.
+- Block all non-read-only work when paused.
+- Add digest output.
+
+## Stage 5 — Hosted, Authenticated Control Plane
+
+Objective:
+
+- Deploy Buildforme behind owner authentication.
+
+Required gates:
+
+- Authentication.
+- Authorization.
 - Secret manager.
-- Backups.
-- Observability.
-- Kill switch.
+- HTTPS.
+- Audit logging.
+- Backup/restore plan.
+- No provider secrets shown in UI.
 
-Exit criteria:
+## Stage 6 — Scheduled Supervision
 
-- Production-readiness checklist passed or accepted risks documented.
+Objective:
+
+- Let Buildforme prepare daily summaries and safe next-task packets while the owner is away.
+
+Tasks:
+
+- Scheduled digest.
+- PR review digest.
+- CI failure digest.
+- Blocked approval digest.
+
+Forbidden until explicitly approved:
+
+- automatic merge
+- production writes
+- live payment actions
+- regulatory/legal conclusions

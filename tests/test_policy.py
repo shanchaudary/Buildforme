@@ -8,8 +8,8 @@ BASE_TASK = {
     "objective": "Read-only audit of documentation",
     "operating_mode": "READ_ONLY_AUDIT",
     "allowed_files": ["docs/**"],
-    "forbidden_files": [".env"],
-    "acceptance_criteria": ["Report findings"],
+    "forbidden_files": [".env", "secrets/**"],
+    "acceptance_criteria": ["Report findings", "No secrets printed"],
     "data_mutation_allowed": False,
 }
 
@@ -28,6 +28,19 @@ class PolicyTests(unittest.TestCase):
         self.assertTrue(result.auto_run_allowed)
         self.assertFalse(result.auto_merge_allowed)
         self.assertFalse(result.required_human_approval)
+
+    def test_forbidden_sensitive_files_do_not_escalate_by_themselves(self):
+        task = dict(BASE_TASK)
+        task["forbidden_files"] = [".env", "secrets/**", "credentials/**"]
+        result = classify_task(task)
+        self.assertEqual(result.risk, RiskLevel.GREEN)
+
+    def test_allowed_sensitive_files_escalate_to_red(self):
+        task = dict(BASE_TASK)
+        task["allowed_files"] = [".env", "src/**"]
+        result = classify_task(task)
+        self.assertEqual(result.risk, RiskLevel.RED)
+        self.assertFalse(result.auto_run_allowed)
 
     def test_yellow_scoped_implementation_can_prepare_pr_only(self):
         task = dict(BASE_TASK)

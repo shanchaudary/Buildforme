@@ -29,7 +29,7 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path in {"/", "/public"}:
+        if parsed.path in {"/", "/public", "/public/", "/index.html"}:
             self._serve_file(PUBLIC_ROOT / "index.html")
             return
         if parsed.path.startswith("/public/"):
@@ -50,6 +50,10 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/github/pr":
             self._github_pr(parsed)
+            return
+        # Serve dashboard assets at site root so href="./styles.css" works at /
+        # e.g. /styles.css, /app.js → public/styles.css, public/app.js
+        if self._try_serve_public_asset(parsed.path):
             return
         self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
@@ -143,18 +147,41 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
         except (GitHubClientError, ValueError) as exc:
             self._json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
 
+    def _try_serve_public_asset(self, request_path: str) -> bool:
+        """Serve a file from public/ when requested from the site root.
+
+        Browsers resolve ./styles.css on http://host:8787/ to /styles.css.
+        Without this, the dashboard HTML loads unstyled.
+        """
+        relative = request_path.lstrip("/")
+        if not relative or relative.startswith("api/") or ".." in relative.split("/"):
+            return False
+        candidate = (PUBLIC_ROOT / relative).resolve()
+        public_root = PUBLIC_ROOT.resolve()
+        try:
+            candidate.relative_to(public_root)
+        except ValueError:
+            return False
+        if not candidate.is_file():
+            return False
+        self._serve_file(candidate)
+        return True
+
     def _serve_file(self, path: Path) -> None:
         resolved = path.resolve()
-        if PUBLIC_ROOT.resolve() not in resolved.parents and resolved != (PUBLIC_ROOT / "index.html").resolve():
+        public_root = PUBLIC_ROOT.resolve()
+        if public_root not in resolved.parents and resolved != (public_root / "index.html"):
             self._json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
             return
         if not resolved.exists() or not resolved.is_file():
             self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
             return
-        content_type = mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"
+        content_type = _content_type_for(resolved)
         body = resolved.read_bytes()
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
+        # Avoid sticky stale CSS/JS while iterating on the dashboard
+        self.send_header("Cache-Control", "no-cache")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -179,6 +206,25 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
 
     def _github(self) -> GitHubClient:
         return GitHubClient.from_env()
+
+
+def _content_type_for(path: Path) -> str:
+    """Reliable MIME types for dashboard assets (Windows mimetypes can miss .js/.css)."""
+    suffix = path.suffix.lower()
+    explicit = {
+        ".html": "text/html; charset=utf-8",
+        ".css": "text/css; charset=utf-8",
+        ".js": "text/javascript; charset=utf-8",
+        ".json": "application/json; charset=utf-8",
+        ".svg": "image/svg+xml",
+        ".png": "image/png",
+        ".ico": "image/x-icon",
+        ".woff2": "font/woff2",
+    }
+    if suffix in explicit:
+        return explicit[suffix]
+    guessed = mimetypes.guess_type(str(path))[0]
+    return guessed or "application/octet-stream"
 
 
 def _first_query_value(parsed: urllib.parse.ParseResult, key: str) -> str | None:

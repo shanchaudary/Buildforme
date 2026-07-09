@@ -50,6 +50,40 @@ class ServerTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=5)
 
+    def test_dashboard_static_assets_are_served(self):
+        """Regression: / must load CSS/JS or the UI renders as unstyled HTML."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            server = ThreadingHTTPServer(("127.0.0.1", 0), BuildformeRequestHandler)
+            server.state_path = Path(temp_dir) / "state.json"  # type: ignore[attr-defined]
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base_url = f"http://127.0.0.1:{server.server_address[1]}"
+
+                with urllib.request.urlopen(base_url + "/", timeout=5) as response:
+                    html = response.read().decode("utf-8")
+                    self.assertIn("Buildforme", html)
+                    self.assertIn("/public/styles.css", html)
+                    self.assertIn("/public/app.js", html)
+
+                with urllib.request.urlopen(base_url + "/public/styles.css", timeout=5) as response:
+                    css = response.read().decode("utf-8")
+                    self.assertIn("--bg", css)
+                    self.assertIn("text/css", response.headers.get("Content-Type", ""))
+
+                with urllib.request.urlopen(base_url + "/styles.css", timeout=5) as response:
+                    css = response.read().decode("utf-8")
+                    self.assertIn(".sidebar", css)
+
+                with urllib.request.urlopen(base_url + "/public/app.js", timeout=5) as response:
+                    js = response.read().decode("utf-8")
+                    self.assertIn("classify", js.lower())
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
 
 if __name__ == "__main__":
     unittest.main()
+

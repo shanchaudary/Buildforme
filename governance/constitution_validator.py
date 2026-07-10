@@ -76,21 +76,21 @@ def validate_constitution_document(constitution: dict[str, Any]) -> dict[str, An
         "evidence_required",
         "violation_response",
     )
-    for idx, law in enumerate(laws):
+    for index, law in enumerate(laws):
         if not isinstance(law, dict):
-            problems.append(f"laws[{idx}] must be an object")
+            problems.append(f"laws[{index}] must be an object")
             continue
         for field in required_law_fields:
             if field not in law or law[field] in (None, "", []):
-                problems.append(f"laws[{idx}] missing {field}")
-        lid = str(law.get("id") or "")
-        if lid:
-            if lid in ids:
-                problems.append(f"duplicate law id: {lid}")
-            ids.append(lid)
+                problems.append(f"laws[{index}] missing {field}")
+        law_id = str(law.get("id") or "")
+        if law_id:
+            if law_id in ids:
+                problems.append(f"duplicate law id: {law_id}")
+            ids.append(law_id)
         severity = str(law.get("severity") or "").lower()
         if severity and severity not in {"critical", "high", "medium", "low"}:
-            problems.append(f"{lid or idx}: invalid severity {severity!r}")
+            problems.append(f"{law_id or index}: invalid severity {severity!r}")
 
     if len(ids) < 20:
         problems.append(f"expected at least 20 laws, found {len(ids)}")
@@ -107,7 +107,7 @@ def validate_constitution_document(constitution: dict[str, Any]) -> dict[str, An
         if required not in ids:
             problems.append(f"missing required law {required}")
 
-    content_hash = compute_constitution_hash(constitution) if isinstance(constitution, dict) else ""
+    content_hash = compute_constitution_hash(constitution)
     return {
         "valid": not problems,
         "problems": problems,
@@ -140,38 +140,75 @@ def validate_provider_acknowledgement(
     }
 
 
-def validate_run_binding(run: dict[str, Any], constitution: dict[str, Any] | None = None) -> dict[str, Any]:
+def validate_run_binding(
+    run: dict[str, Any],
+    constitution: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate the embedded run/lease relationship.
+
+    Canonical persisted-lease comparison is performed by
+    validate_run_lease_against_store at preflight and execution boundaries.
+    """
     problems: list[str] = []
     lease = run.get("constitution_lease") if isinstance(run.get("constitution_lease"), dict) else None
     if not lease:
         problems.append("run missing constitution_lease")
     else:
-        problems.extend(validate_lease_integrity(lease))
+        problems.extend(
+            validate_lease_integrity(
+                lease,
+                expected_run_id=str(run.get("id") or ""),
+                expected_provider_id=str(run.get("provider_id") or ""),
+                expected_packet_id=str(run.get("packet_id") or ""),
+            )
+        )
         if str(run.get("constitution_hash") or "") != str(lease.get("constitution_hash") or ""):
             problems.append("run constitution_hash does not match lease")
+        if str(run.get("constitution_version") or "") != str(lease.get("constitution_version") or ""):
+            problems.append("run constitution_version does not match lease")
         if str(run.get("constitution_lease_id") or "") != str(lease.get("lease_id") or ""):
             problems.append("run constitution_lease_id does not match lease")
+        if str(run.get("constitution_lease_fingerprint") or "") != str(
+            lease.get("lease_fingerprint") or ""
+        ):
+            problems.append("run constitution_lease_fingerprint does not match lease")
     if not str(run.get("constitution_version") or "").strip():
         problems.append("run missing constitution_version")
     if not str(run.get("constitution_hash") or "").strip():
         problems.append("run missing constitution_hash")
-    # Existing run may bind an older constitution; do not force current hash match.
     return {"valid": not problems, "problems": problems, "run_id": run.get("id")}
 
 
 def validate_packet_binding(packet: dict[str, Any], constitution: dict[str, Any]) -> dict[str, Any]:
     problems: list[str] = []
-    if not str(packet.get("constitution_version") or (packet.get("constitution") or {}).get("version") or "").strip():
+    version = str(
+        packet.get("constitution_version")
+        or (packet.get("constitution") or {}).get("version")
+        or ""
+    ).strip()
+    if not version:
         problems.append("packet missing constitution_version")
-    phash = str(packet.get("constitution_hash") or (packet.get("constitution") or {}).get("hash") or "")
-    if not phash:
+    elif version != str(constitution.get("version") or ""):
+        problems.append("packet constitution_version does not match current Constitution")
+    packet_hash = str(
+        packet.get("constitution_hash")
+        or (packet.get("constitution") or {}).get("hash")
+        or ""
+    )
+    if not packet_hash:
         problems.append("packet missing constitution_hash")
-    elif not verify_constitution_hash(constitution, phash):
-        # Packets generated under a prior version are historical; flag mismatch for new validation.
+    elif not verify_constitution_hash(constitution, packet_hash):
         problems.append("packet constitution_hash does not match current Constitution")
     binding = packet.get("constitution") if isinstance(packet.get("constitution"), dict) else {}
-    if binding and binding.get("bypass_forbidden") is False:
-        problems.append("packet must not allow constitution bypass")
+    if not binding:
+        problems.append("packet missing constitution binding object")
+    else:
+        if str(binding.get("version") or "") != version:
+            problems.append("packet binding version does not match top-level version")
+        if str(binding.get("hash") or "") != packet_hash:
+            problems.append("packet binding hash does not match top-level hash")
+        if binding.get("bypass_forbidden") is not True:
+            problems.append("packet must explicitly forbid constitution bypass")
     return {"valid": not problems, "problems": problems, "packet_id": packet.get("id")}
 
 
@@ -192,8 +229,8 @@ def validate_output(
     else:
         data = dict(output or {})
         text = " ".join(
-            str(data.get(k) or "")
-            for k in (
+            str(data.get(key) or "")
+            for key in (
                 "text",
                 "summary",
                 "result_summary",
@@ -241,7 +278,7 @@ def validate_output(
 
     for pattern in CAPABILITY_CLAIM_MARKERS:
         if re.search(pattern, lower, re.I):
-            verified = set(str(c) for c in (context.get("verified_capabilities") or []))
+            verified = set(str(capability) for capability in (context.get("verified_capabilities") or []))
             if not verified:
                 add(
                     "LAW-004",
@@ -274,12 +311,18 @@ def validate_output(
             )
             break
 
-    claims_complete = bool(data.get("claims_complete") or data.get("completed") or re.search(r"\bcomplete[d]?\b", lower))
+    claims_complete = bool(
+        data.get("claims_complete")
+        or data.get("completed")
+        or re.search(r"\bcomplete[d]?\b", lower)
+    )
     if claims_complete:
         evidence = data.get("evidence") if isinstance(data.get("evidence"), list) else []
         tests = data.get("tests") or data.get("tests_run") or []
         acceptance = data.get("acceptance_criteria") or context.get("acceptance_criteria") or []
-        if not evidence and not tests and not any(h in lower for h in ("test", "verif", "evidence", "acceptance")):
+        if not evidence and not tests and not any(
+            hint in lower for hint in ("test", "verif", "evidence", "acceptance")
+        ):
             add(
                 "LAW-001",
                 "Truth Before Completion",
@@ -331,7 +374,7 @@ def validate_output(
             "Reject degraded product-for-tests changes.",
         )
 
-    critical = [v for v in violations if v.get("severity") == "critical"]
+    critical = [violation for violation in violations if violation.get("severity") == "critical"]
     return {
         "valid": len(critical) == 0 and len(violations) == 0,
         "passed": len(critical) == 0,
@@ -349,10 +392,10 @@ def validate_no_duplicate_governance(modules_declaring_authority: list[str]) -> 
     for name in modules_declaring_authority:
         key = str(name).strip().lower()
         counts[key] = counts.get(key, 0) + 1
-    dups = [k for k, n in counts.items() if n > 1]
+    duplicates = [key for key, count in counts.items() if count > 1]
     return {
-        "valid": not dups,
-        "duplicates": dups,
+        "valid": not duplicates,
+        "duplicates": duplicates,
         "authority": "governance/constitution_engine.py",
         "note": "Stage 5.5 buildforme.governance remains run/preflight validators only",
     }

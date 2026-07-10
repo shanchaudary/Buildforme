@@ -10,6 +10,129 @@ from typing import Any
 from buildforme.db import ExecutionDB, dumps, loads, new_id, row_to_dict
 from buildforme.storage import utc_now_iso
 
+# Bound at admission / scope / lease / worktree — never rewritten by generic mutation.
+PROTECTED_AUTHORITY_FIELDS: frozenset[str] = frozenset(
+    {
+        "id",
+        "project_id",
+        "task_id",
+        "packet_id",
+        "provider_id",
+        "repository",
+        "repository_local_path",
+        "baseline_ref",
+        "baseline_commit",
+        "requested_target_branch",
+        "execution_branch",
+        "operating_mode",
+        "risk",
+        "execution_mode",
+        "mode",
+        "transport",
+        "requested_capabilities",
+        "scope_fingerprint",
+        "constitution_version",
+        "constitution_hash",
+        "constitution_lease_id",
+        "constitution_lease_fingerprint",
+        "constitution_lease",
+        "task_lock_id",
+        "parent_run_id",
+        "attempt",
+        "max_attempts",
+        "idempotency_key",
+        "created_at",
+    }
+)
+
+# Always permitted bookkeeping keys on any mutation (not authority).
+_BOOKKEEPING_FIELDS: frozenset[str] = frozenset(
+    {
+        "updated_at",
+        "row_version",
+        "status",
+        "status_history",
+        "started_at",
+        "finished_at",
+    }
+)
+
+# Storage-owned same-state / transition metadata allowlists (mutation_type → fields).
+MUTATION_METADATA_ALLOWLISTS: dict[str, frozenset[str]] = {
+    "preflight_result": frozenset(
+        {"preflight", "approval_requirements", "scope_fingerprint"}
+    ),
+    "worktree_prepared": frozenset(
+        {"worktree", "worktree_path", "workspace_root", "provider_version"}
+    ),
+    "process_started": frozenset(
+        {"worktree", "worktree_path", "workspace_root", "provider_version"}
+    ),
+    "process_result": frozenset({"process_result", "result_summary"}),
+    "verification_result": frozenset({"verification"}),
+    "execution_evidence_link": frozenset(
+        {
+            "evidence",
+            "evidence_ids",
+            "final_head_sha",
+            "head_commit",
+            "worktree",
+            "worktree_path",
+        }
+    ),
+    "review_package": frozenset(
+        {
+            "review",
+            "result_summary",
+            "constitution_compliance",
+            "constitution_reminder",
+        }
+    ),
+    "constitution_compliance": frozenset(
+        {"constitution_compliance", "constitution_reminder"}
+    ),
+    "failure_detail": frozenset(
+        {"process_result", "result_summary", "preflight", "dry_run_result"}
+    ),
+    "supervised_finished": frozenset(
+        {
+            "process_result",
+            "evidence",
+            "evidence_ids",
+            "verification",
+            "review",
+            "result_summary",
+            "constitution_compliance",
+            "constitution_reminder",
+            "final_head_sha",
+            "head_commit",
+            "worktree",
+            "worktree_path",
+            "workspace_root",
+            "provider_version",
+        }
+    ),
+    "dry_run_finished": frozenset(
+        {
+            "dry_run_result",
+            "result_summary",
+            "constitution_compliance",
+            "constitution_reminder",
+        }
+    ),
+    "status_transition": frozenset(),  # status bookkeeping only
+    "cancel": frozenset({"process_result", "result_summary"}),
+}
+
+
+def _values_equal(left: Any, right: Any) -> bool:
+    if left is right:
+        return True
+    try:
+        return dumps(left) == dumps(right)
+    except Exception:
+        return left == right
+
 
 class Stage6Store:
     def __init__(self, db_path: Path | str):
@@ -149,17 +272,25 @@ class Stage6Store:
         run: dict[str, Any],
         *,
         expected_row_version: int,
+        mutation_type: str,
         event_type: str,
         event_summary: str = "",
         event_actor: str = "system",
         event_metadata: dict[str, Any] | None = None,
         require_db_status_in: set[str] | frozenset[str] | None = None,
+        transition_path: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Atomically persist an existing-run mutation + audit event with version check.
+        """Atomically persist an existing-run mutation + audit event(s).
 
-        Rejects stale writers, terminal overwrites, and unreachable status transitions.
+        - Bound authority fields cannot change.
+        - Same-state metadata uses storage-owned mutation_type allowlists.
+        - Status changes require an immediate edge, or an explicit transition_path
+          with an event recorded for every edge.
         """
-        from buildforme.run_state import can_reach, is_terminal
+        from buildforme.run_state import can_transition, is_terminal
+
+        if mutation_type not in MUTATION_METADATA_ALLOWLISTS:
+            raise ValueError(f"unknown mutation_type: {mutation_type!r}")
 
         record = dict(run)
         rid = str(record.get("id") or "")
@@ -167,6 +298,8 @@ class Stage6Store:
             raise ValueError("run id required")
         now = utc_now_iso()
         record["updated_at"] = now
+        allow = MUTATION_METADATA_ALLOWLISTS[mutation_type]
+
         with self.db.transaction() as conn:
             existing = conn.execute(
                 "SELECT id, row_version, payload_json, status FROM runs WHERE id=?",
@@ -188,18 +321,81 @@ class Stage6Store:
                     f"run mutation refused: db status {db_status!r} not in "
                     f"{sorted(require_db_status_in)}"
                 )
+
+            # —— Protected authority: any change fails closed (except allowlisted refresh) ——
+            for field in PROTECTED_AUTHORITY_FIELDS:
+                if field not in record and field not in db_payload:
+                    continue
+                if field in allow:
+                    # Explicit storage-owned exception (e.g. scope refresh on preflight)
+                    continue
+                if not _values_equal(record.get(field), db_payload.get(field)):
+                    raise ValueError(
+                        f"authority field mutation forbidden: {field} "
+                        f"(mutation_type={mutation_type})"
+                    )
+
+            # —— Changed non-bookkeeping fields must be in allowlist ——
+            changed: list[str] = []
+            all_keys = set(record.keys()) | set(db_payload.keys())
+            for key in sorted(all_keys):
+                if key in _BOOKKEEPING_FIELDS:
+                    continue
+                if key in PROTECTED_AUTHORITY_FIELDS and key not in allow:
+                    continue  # already validated equal
+                if not _values_equal(record.get(key), db_payload.get(key)):
+                    if key not in allow:
+                        raise ValueError(
+                            f"unauthorized field change: {key} "
+                            f"(mutation_type={mutation_type})"
+                        )
+                    changed.append(key)
+
+            # —— Status transitions: immediate edge or explicit path ——
+            edges: list[tuple[str, str]] = []
             if db_status != new_status:
                 if is_terminal(db_status):
                     raise ValueError(
                         f"cannot overwrite terminal status {db_status!r} with {new_status!r}"
                     )
-                if not can_reach(db_status, new_status):
-                    raise ValueError(
-                        f"unreachable run transition {db_status!r} → {new_status!r}"
-                    )
+                if transition_path is not None:
+                    path = [str(s) for s in transition_path]
+                    if len(path) < 2:
+                        raise ValueError("transition_path requires at least two statuses")
+                    if path[0] != db_status:
+                        raise ValueError(
+                            f"transition_path start {path[0]!r} != db status {db_status!r}"
+                        )
+                    if path[-1] != new_status:
+                        raise ValueError(
+                            f"transition_path end {path[-1]!r} != proposed status {new_status!r}"
+                        )
+                    for i in range(len(path) - 1):
+                        a, b = path[i], path[i + 1]
+                        if not can_transition(a, b):
+                            raise ValueError(
+                                f"invalid transition edge in path: {a!r} → {b!r}"
+                            )
+                        edges.append((a, b))
+                else:
+                    if not can_transition(db_status, new_status):
+                        raise ValueError(
+                            f"invalid immediate transition {db_status!r} → {new_status!r} "
+                            "(multi-hop requires explicit transition_path)"
+                        )
+                    edges.append((db_status, new_status))
+
+            # Force protected authority values from DB unless mutation allowlist permits
+            for field in PROTECTED_AUTHORITY_FIELDS:
+                if field in allow and field in changed:
+                    continue
+                if field in db_payload:
+                    record[field] = db_payload[field]
+            record["id"] = rid
+            record["status"] = new_status
+
             new_ver = current_ver + 1
             record["row_version"] = new_ver
-            # Preserve created_at from DB
             record["created_at"] = db_payload.get("created_at") or record.get("created_at")
             cur = conn.execute(
                 """UPDATE runs SET project_id=?, task_id=?, packet_id=?, provider_id=?, repository=?,
@@ -242,24 +438,60 @@ class Stage6Store:
             )
             if cur.rowcount == 0:
                 raise ValueError(f"stale run mutation race: run_id={rid}")
-            meta = dict(event_metadata or {})
-            meta.setdefault("previous_status", db_status)
-            meta.setdefault("resulting_status", new_status)
-            meta.setdefault("previous_row_version", current_ver)
-            meta.setdefault("row_version", new_ver)
-            conn.execute(
-                """INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at)
-                   VALUES (?,?,?,?,?,?,?)""",
-                (
-                    new_id("re"),
-                    rid,
-                    event_type,
-                    event_summary,
-                    event_actor,
-                    dumps(meta),
-                    now,
-                ),
-            )
+
+            base_meta = dict(event_metadata or {})
+            base_meta["mutation_type"] = mutation_type
+            base_meta["fields_changed"] = changed
+            base_meta["previous_row_version"] = current_ver
+            base_meta["resulting_row_version"] = new_ver
+
+            if edges:
+                # One event per committed state edge (ordered)
+                for idx, (prev_s, next_s) in enumerate(edges):
+                    edge_meta = dict(base_meta)
+                    edge_meta["previous_status"] = prev_s
+                    edge_meta["resulting_status"] = next_s
+                    edge_meta["path_index"] = idx
+                    edge_meta["path"] = [edges[0][0]] + [e[1] for e in edges]
+                    etype = event_type if idx == len(edges) - 1 else f"{event_type}_edge"
+                    if idx < len(edges) - 1:
+                        etype = "status_transition"
+                    conn.execute(
+                        """INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at)
+                           VALUES (?,?,?,?,?,?,?)""",
+                        (
+                            new_id("re"),
+                            rid,
+                            etype if idx == len(edges) - 1 else "status_transition",
+                            (
+                                event_summary
+                                if idx == len(edges) - 1
+                                else f"{prev_s} → {next_s}"
+                            ),
+                            event_actor,
+                            dumps(edge_meta),
+                            now,
+                        ),
+                    )
+            else:
+                # Same-state metadata event
+                meta = dict(base_meta)
+                meta["previous_status"] = db_status
+                meta["resulting_status"] = new_status
+                meta["status"] = new_status
+                conn.execute(
+                    """INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    (
+                        new_id("re"),
+                        rid,
+                        event_type,
+                        event_summary,
+                        event_actor,
+                        dumps(meta),
+                        now,
+                    ),
+                )
         return record
 
     def admit_run_atomic(
@@ -427,105 +659,24 @@ class Stage6Store:
         event_summary: str = "",
         event_actor: str = "system",
         event_metadata: dict[str, Any] | None = None,
+        mutation_type: str = "status_transition",
+        transition_path: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Atomically persist run state change + audit event with optimistic concurrency."""
-        from buildforme.run_state import can_reach, is_terminal
-
-        record = dict(run)
-        rid = str(record.get("id") or "")
-        if not rid:
-            raise ValueError("run id required")
-        now = utc_now_iso()
-        record["updated_at"] = now
-        with self.db.transaction() as conn:
-            existing = conn.execute(
-                "SELECT id, row_version, payload_json, status FROM runs WHERE id=?", (rid,)
-            ).fetchone()
-            if not existing:
-                raise KeyError(f"Run not found: {rid}")
-            current_ver = int(existing[1] or 1)
-            if expected_row_version is not None and current_ver != int(expected_row_version):
-                raise ValueError(
-                    f"stale run transition rejected: expected row_version={expected_row_version} "
-                    f"have={current_ver} run_id={rid}"
-                )
-            # If caller didn't pass expected version, still use DB version as base
-            if expected_row_version is None:
-                # Allow only if payload row_version matches DB (best-effort)
-                payload_ver = int(record.get("row_version") or current_ver)
-                if payload_ver != current_ver:
-                    raise ValueError(
-                        f"stale run transition rejected: payload row_version={payload_ver} "
-                        f"have={current_ver} run_id={rid}"
-                    )
-            db_status = str(existing[3] or loads(existing[2], {}).get("status") or "")
-            new_status = str(record.get("status") or db_status)
-            if db_status != new_status:
-                if is_terminal(db_status):
-                    raise ValueError(
-                        f"cannot overwrite terminal status {db_status!r} with {new_status!r}"
-                    )
-                if not can_reach(db_status, new_status):
-                    raise ValueError(
-                        f"unreachable run transition {db_status!r} → {new_status!r}"
-                    )
-            new_ver = current_ver + 1
-            record["row_version"] = new_ver
-            cur = conn.execute(
-                """UPDATE runs SET project_id=?, task_id=?, packet_id=?, provider_id=?, repository=?,
-                repository_local_path=?, baseline_ref=?, baseline_commit=?, requested_target_branch=?,
-                execution_branch=?, operating_mode=?, risk=?, status=?, execution_mode=?,
-                scope_fingerprint=?, constitution_version=?, constitution_hash=?, constitution_lease_id=?,
-                constitution_lease_fingerprint=?, task_lock_id=?, payload_json=?, updated_at=?,
-                started_at=?, finished_at=?, idempotency_key=?, row_version=?
-                WHERE id=? AND row_version=?""",
-                (
-                    str(record.get("project_id") or ""),
-                    record.get("task_id"),
-                    record.get("packet_id"),
-                    str(record.get("provider_id") or ""),
-                    str(record.get("repository") or ""),
-                    record.get("repository_local_path"),
-                    record.get("baseline_ref"),
-                    record.get("baseline_commit"),
-                    record.get("requested_target_branch") or record.get("target_branch"),
-                    record.get("execution_branch"),
-                    record.get("operating_mode"),
-                    record.get("risk"),
-                    str(record.get("status") or "draft"),
-                    str(record.get("execution_mode") or record.get("mode") or "dry_run"),
-                    record.get("scope_fingerprint"),
-                    record.get("constitution_version"),
-                    record.get("constitution_hash"),
-                    record.get("constitution_lease_id"),
-                    record.get("constitution_lease_fingerprint"),
-                    record.get("task_lock_id"),
-                    dumps(record),
-                    record["updated_at"],
-                    record.get("started_at"),
-                    record.get("finished_at"),
-                    record.get("idempotency_key"),
-                    new_ver,
-                    rid,
-                    current_ver,
-                ),
-            )
-            if cur.rowcount == 0:
-                raise ValueError(f"stale run transition race: run_id={rid}")
-            conn.execute(
-                """INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at)
-                   VALUES (?,?,?,?,?,?,?)""",
-                (
-                    new_id("re"),
-                    rid,
-                    event_type,
-                    event_summary,
-                    event_actor,
-                    dumps(event_metadata or {}),
-                    now,
-                ),
-            )
-        return record
+        """Compatibility wrapper — delegates to commit_run_mutation authority."""
+        if expected_row_version is None:
+            expected_row_version = int(run.get("row_version") or 0) or None
+        if expected_row_version is None:
+            raise ValueError("transition requires expected_row_version")
+        return self.commit_run_mutation(
+            run,
+            expected_row_version=int(expected_row_version),
+            mutation_type=mutation_type,
+            event_type=event_type,
+            event_summary=event_summary,
+            event_actor=event_actor,
+            event_metadata=event_metadata,
+            transition_path=transition_path,
+        )
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         with self.db.transaction() as conn:

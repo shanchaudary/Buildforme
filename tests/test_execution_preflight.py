@@ -18,6 +18,7 @@ class PreflightTests(unittest.TestCase):
             (Path(__file__).resolve().parent.parent / "data" / "sample_project.json").read_text(encoding="utf-8")
         )
         self.store.load_sample_project(sample, replace=True)
+        self.store.set_project_execution_control("buildforme", execution_status="enabled", reason="test")
         packet = generate_agent_packet(
             {
                 "source_type": "manual",
@@ -75,12 +76,21 @@ class PreflightTests(unittest.TestCase):
         self.assertTrue(any(c["name"] == "main_branch_policy" and c["status"] == "fail" for c in result["checks"]))
 
     def test_black_cannot_execute(self):
-        run = self._base_run(risk="BLACK")
+        with self.assertRaises(ValueError):
+            self._base_run(risk="BLACK")
+        # Also preflight-level if a BLACK run record is forced
+        run = self._base_run()
+        run["risk"] = "BLACK"
+        self.store.save_run(run)
         result = evaluate_run_preflight(run, self.store)
         self.assertFalse(result["passed"])
 
     def test_merge_capability_blocked(self):
-        run = self._base_run(requested_capabilities=["read_repository", "merge"])
+        with self.assertRaises(ValueError):
+            self._base_run(requested_capabilities=["read_repository", "merge"])
+        run = self._base_run()
+        run["requested_capabilities"] = ["read_repository", "merge"]
+        self.store.save_run(run)
         result = evaluate_run_preflight(run, self.store)
         self.assertFalse(result["passed"])
 

@@ -7,6 +7,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from buildforme.governance import (
+    contains_black_instruction,
+    contains_sensitive_allowed_path,
+    material_text_blob,
+    normalize_repo_for_compare,
+)
 from buildforme.providers import FORBIDDEN_LIVE_CAPABILITIES, get_provider, provider_supports
 from buildforme.storage import LocalStore, utc_now_iso
 
@@ -56,15 +62,26 @@ def evaluate_run_preflight(
             add("project_status", "fail", f"Project status {status} cannot execute")
 
         exec_ctrl = store.get_project_execution_control(project_id)
-        ex = str(exec_ctrl.get("execution_status") or "enabled")
-        if ex == "enabled":
-            add("project_execution_enabled", "pass", "Execution enabled")
-        elif ex == "paused":
-            add("project_execution_enabled", "fail", "Project execution paused")
+        # Fail closed: missing record is not treated as enabled.
+        if not exec_ctrl.get("explicit"):
+            add(
+                "project_execution_enabled",
+                "fail",
+                "No explicit project execution-control record (fail closed until set)",
+            )
         else:
-            add("project_execution_enabled", "fail", f"Project execution {ex}")
+            ex = str(exec_ctrl.get("execution_status") or "").strip().lower()
+            if ex == "enabled":
+                add("project_execution_enabled", "pass", "Execution enabled")
+            elif ex == "paused":
+                add("project_execution_enabled", "fail", "Project execution paused")
+            elif ex == "locked":
+                add("project_execution_enabled", "fail", "Project execution locked")
+            else:
+                add("project_execution_enabled", "fail", f"Unknown execution status {ex!r} (fail closed)")
 
     repository = str(run.get("repository") or (project or {}).get("repository") or "").strip()
+    repo_key = normalize_repo_for_compare(repository)
     if repository and "/" in repository:
         add("repository_defined", "pass", repository)
     else:
@@ -87,10 +104,15 @@ def evaluate_run_preflight(
     else:
         add("main_branch_policy", "pass", f"Feature branch {branch}")
 
-    locks = store.list_repository_locks(active_only=True, repository=repository or None)
+    locks = store.list_repository_locks(active_only=True, repository=None)
+    locks = [
+        lock
+        for lock in locks
+        if normalize_repo_for_compare(str(lock.get("repository") or "")) == repo_key
+    ]
     lock_fail = False
     for lock in locks:
-        scope = str(lock.get("lock_scope") or "all")
+        scope = str(lock.get("lock_scope") or "all").lower()
         if scope == "all":
             add("repository_locks", "fail", f"Active all lock: {lock.get('reason') or lock.get('id')}")
             lock_fail = True
@@ -103,8 +125,11 @@ def evaluate_run_preflight(
         elif scope == "production" and any(c in requested for c in ("deploy", "production_write")):
             add("repository_locks", "fail", "Production lock active")
             lock_fail = True
-        elif scope == "branch" and "edit_repository" in requested:
+        elif scope == "branch" and any(c in requested for c in ("edit_repository", "produce_patch", "open_pr")):
             add("repository_locks", "fail", "Branch lock blocks write execution")
+            lock_fail = True
+        elif scope not in {"all", "write", "merge", "production", "branch"}:
+            add("repository_locks", "fail", f"Unknown lock scope {scope!r} (fail closed)")
             lock_fail = True
     if not lock_fail:
         add("repository_locks", "pass", "No blocking repository locks")
@@ -203,8 +228,10 @@ def evaluate_run_preflight(
         else:
             add("provider_support", "pass", "risk/mode/capabilities supported")
 
-        # concurrency
+        # concurrency (exclude current run id if already counted)
         active = store.count_active_runs(provider_id=str(provider.get("provider_id")))
+        if str(run.get("status")) in {"queued", "starting", "running", "cancel_requested"}:
+            active = max(0, active - 1)
         max_c = int(provider.get("max_concurrent_runs") or 1)
         if active >= max_c:
             add("provider_concurrency", "fail", f"Active runs {active} >= max {max_c}")
@@ -244,11 +271,20 @@ def evaluate_run_preflight(
     elif risk == "RED":
         add("risk_gate", "pass", "RED requires Shan approval")
         required_approvals.append("shan_red_risk_approval")
+        if mode == "IMPLEMENTATION":
+            required_approvals.append("shan_task_approval")
     else:
         add("risk_gate", "pass", f"Risk {risk}")
 
-    if risk in {"RED", "YELLOW"} and mode == "IMPLEMENTATION":
+    if risk == "YELLOW" and mode == "IMPLEMENTATION":
         required_approvals.append("shan_task_approval")
+
+    # Material text black patterns (objective/context/acceptance/etc.)
+    black_hits = contains_black_instruction(material_text_blob(run, packet if isinstance(packet, dict) else None))
+    if black_hits:
+        add("material_policy", "fail", f"Unsafe instructions in material fields: {', '.join(black_hits)}")
+    else:
+        add("material_policy", "pass", "No BLACK instruction patterns in material text")
 
     # Forbidden capabilities
     bad_caps = [c for c in requested if c in FORBIDDEN_LIVE_CAPABILITIES]
@@ -258,27 +294,39 @@ def evaluate_run_preflight(
         add("forbidden_capabilities", "pass", "No merge/deploy/production_write requested")
 
     # Approvals present
+    # Missing required approvals do not fail preflight; they route the run to
+    # awaiting_approval. Rejected approvals and scope mismatches fail closed.
     approvals = store.list_run_approvals(run_id=str(run.get("id") or ""))
-    approved_types = {
-        str(a.get("requirement_type"))
-        for a in approvals
-        if str(a.get("decision")) == "approved"
-    }
+    from buildforme.governance import compute_run_scope_fingerprint
+
+    current_fp = compute_run_scope_fingerprint(run, packet if isinstance(packet, dict) else None)
+    approved_types = set()
+    for a in approvals:
+        if str(a.get("decision")) != "approved":
+            continue
+        fp = str(a.get("scope_fingerprint") or a.get("scope") or "")
+        if fp and fp != current_fp and a.get("scope_fingerprint"):
+            continue  # stale fingerprint ignored
+        approved_types.add(str(a.get("requirement_type")))
     rejected = [a for a in approvals if str(a.get("decision")) == "rejected"]
     if rejected:
         add("approvals", "fail", "Rejected approval present")
     else:
         missing = [r for r in required_approvals if r not in approved_types]
         if missing:
-            add("approvals", "fail", f"Missing approvals: {', '.join(missing)}")
+            add(
+                "approvals",
+                "warning",
+                f"Missing approvals (run will await approval): {', '.join(missing)}",
+            )
         elif required_approvals:
-            add("approvals", "pass", "Required local approvals present")
+            add("approvals", "pass", "Required local approvals present for current scope")
         else:
             add("approvals", "pass", "No extra approvals required")
 
     # Sensitive paths in allowed files
     allowed = list((packet or {}).get("allowed_files") or run.get("allowed_files") or [])
-    sensitive_hits = [p for p in allowed if any(s in str(p).lower() for s in (".env", "secret", "credential", "id_rsa"))]
+    sensitive_hits = contains_sensitive_allowed_path([str(p) for p in allowed])
     if sensitive_hits:
         add("sensitive_files", "fail", f"Sensitive paths in allowed files: {sensitive_hits[:3]}")
     else:
@@ -312,21 +360,13 @@ def evaluate_run_preflight(
     else:
         add("budget_ceilings", "pass", f"files≤{max_files} lines≤{max_lines} minutes≤{max_dur}")
 
-    # Global concurrency
-    global_active = store.count_active_runs()
+    # Global concurrency — drafts/approvals do not consume slots
     policy = store.get_execution_policy()
     max_global = int(policy.get("max_concurrent_global_runs") or 1)
-    if global_active >= max_global and str(run.get("status")) not in {
-        "running",
-        "starting",
-        "queued",
-        "cancel_requested",
-    }:
-        # counting current draft shouldn't block itself if not active
-        pass
     active_for_limit = store.count_active_runs()
-    # if this run is already active, subtract 0; drafts don't count
-    if active_for_limit >= max_global and str(run.get("status")) in {"draft", "awaiting_preflight", "awaiting_approval", "approved", "preflight_failed"}:
+    if str(run.get("status")) in {"queued", "starting", "running", "cancel_requested"}:
+        active_for_limit = max(0, active_for_limit - 1)
+    if active_for_limit >= max_global:
         add("global_concurrency", "fail", f"Global active runs at ceiling {max_global}")
     else:
         add("global_concurrency", "pass", f"{active_for_limit}/{max_global}")

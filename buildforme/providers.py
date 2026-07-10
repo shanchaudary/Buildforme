@@ -167,8 +167,23 @@ def get_provider(providers: list[dict[str, Any]], provider_id: str) -> dict[str,
 
 def sanitize_provider_update(existing: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     """Apply non-secret planning field updates only."""
+    patch = dict(patch or {})
+    for key in patch:
+        low = str(key).lower()
+        if any(x in low for x in ("token", "secret", "password", "api_key", "apikey", "credential")):
+            raise ValueError(f"credential field not allowed: {key}")
+        if low == "mode" and str(patch[key]).lower().replace("-", "_") not in {"dry_run"}:
+            raise ValueError("provider mode cannot be set to live in Stage 5")
+        if low == "live_execution_available" and patch[key] not in (False, 0, "false", "False", "0", "no", "off"):
+            raise ValueError("live_execution_available cannot be enabled in Stage 5")
+        if low == "credentials_configured" and patch[key] not in (False, 0, "false", "False", "0", "no", "off"):
+            raise ValueError("credentials_configured cannot be true in Stage 5")
+        if low in {"capabilities", "prohibited_capabilities"}:
+            for cap in patch[key] or []:
+                if str(cap) in FORBIDDEN_LIVE_CAPABILITIES:
+                    raise ValueError(f"cannot enable forbidden capability: {cap}")
     updated = deepcopy(existing)
-    for key, value in (patch or {}).items():
+    for key, value in patch.items():
         if key not in PLANNING_EDITABLE_FIELDS:
             continue
         updated[key] = value
@@ -176,6 +191,11 @@ def sanitize_provider_update(existing: dict[str, Any], patch: dict[str, Any]) ->
     updated["mode"] = "dry_run"
     updated["live_execution_available"] = False
     updated["credentials_configured"] = False
+    # Keep forbidden capabilities forced
+    prohibited = set(updated.get("prohibited_capabilities") or []) | set(FORBIDDEN_LIVE_CAPABILITIES)
+    updated["prohibited_capabilities"] = sorted(prohibited)
+    caps = [c for c in (updated.get("capabilities") or []) if c not in FORBIDDEN_LIVE_CAPABILITIES]
+    updated["capabilities"] = caps
     # Strip any accidental secret keys
     for bad in list(updated.keys()):
         low = str(bad).lower()

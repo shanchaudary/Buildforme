@@ -399,9 +399,16 @@ class Stage6Store:
         actor: str = "system",
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Append an audit event for an existing run only.
+
+        Fail closed: missing run_id raises; never fabricates a placeholder run.
+        """
+        rid = str(run_id or "").strip()
+        if not rid:
+            raise ValueError("run_id required for run event")
         event = {
             "id": new_id("re"),
-            "run_id": run_id,
+            "run_id": rid,
             "event_type": event_type,
             "summary": summary,
             "actor": actor,
@@ -409,31 +416,18 @@ class Stage6Store:
             "created_at": utc_now_iso(),
         }
         with self.db.transaction() as conn:
-            # ensure run exists for FK — if missing, still store event via deferred? require run
-            exists = conn.execute("SELECT id FROM runs WHERE id=?", (run_id,)).fetchone()
+            exists = conn.execute("SELECT id FROM runs WHERE id=?", (rid,)).fetchone()
             if not exists:
-                # create placeholder run shell for events during partial states
-                conn.execute(
-                    """INSERT OR IGNORE INTO runs(id, project_id, provider_id, repository, status, execution_mode, payload_json, created_at, updated_at)
-                       VALUES (?,?,?,?,?,?,?,?,?)""",
-                    (
-                        run_id,
-                        "unknown",
-                        "unknown",
-                        "unknown/unknown",
-                        "draft",
-                        "dry_run",
-                        dumps({"id": run_id, "status": "draft"}),
-                        utc_now_iso(),
-                        utc_now_iso(),
-                    ),
+                raise ValueError(
+                    f"cannot append run event: run not found: {rid} "
+                    "(refusing placeholder run fabrication)"
                 )
             conn.execute(
                 """INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at)
                    VALUES (?,?,?,?,?,?,?)""",
                 (
                     event["id"],
-                    run_id,
+                    rid,
                     event_type,
                     summary,
                     actor,
@@ -1144,42 +1138,44 @@ class Stage6Store:
 
         record.setdefault("saved_at", utc_now_iso())
         record["immutable"] = True
-        rid = str(record.get("run_id") or "")
+        rid = str(record.get("run_id") or "").strip()
+        if not rid:
+            raise ValueError("evidence run_id required (refusing placeholder run fabrication)")
         with self.db.transaction() as conn:
+            # Fail closed: run must already exist — never invent unknown/unknown shells
+            if not conn.execute("SELECT id FROM runs WHERE id=?", (rid,)).fetchone():
+                raise ValueError(
+                    f"cannot save evidence: run not found: {rid} "
+                    "(refusing placeholder run fabrication)"
+                )
             exists = conn.execute("SELECT evidence_id FROM evidence WHERE evidence_id=?", (eid,)).fetchone()
             if exists:
                 raise ValueError(f"evidence mutation forbidden: {eid} is append-only")
+            # Parent evidence (if declared) must belong to this run
+            parent_id = record.get("parent_evidence_id")
+            if parent_id:
+                parent_row = conn.execute(
+                    "SELECT run_id FROM evidence WHERE evidence_id=?",
+                    (str(parent_id),),
+                ).fetchone()
+                if not parent_row:
+                    raise ValueError(f"parent evidence not found: {parent_id}")
+                if str(parent_row[0] or "") != rid:
+                    raise ValueError(
+                        f"parent evidence {parent_id} belongs to run {parent_row[0]!r}, not {rid!r}"
+                    )
             prior = conn.execute(
                 "SELECT COUNT(*) FROM evidence WHERE run_id=?", (rid,)
             ).fetchone()[0]
             record.setdefault("sequence", int(prior) + 1)
             record.setdefault("attempt", record.get("attempt") or record["sequence"])
-            if prior:
+            if prior and not record.get("parent_evidence_id"):
                 parent = conn.execute(
                     "SELECT evidence_id FROM evidence WHERE run_id=? ORDER BY sequence DESC LIMIT 1",
                     (rid,),
                 ).fetchone()
                 if parent:
                     record.setdefault("parent_evidence_id", parent[0])
-            # ensure run row exists for FK
-            if rid and not conn.execute("SELECT id FROM runs WHERE id=?", (rid,)).fetchone():
-                conn.execute(
-                    """INSERT OR IGNORE INTO runs(id, project_id, provider_id, repository, status, execution_mode, payload_json, created_at, updated_at)
-                       VALUES (?,?,?,?,?,?,?,?,?)""",
-                    (
-                        rid,
-                        "unknown",
-                        "unknown",
-                        "unknown/unknown",
-                        "draft",
-                        "dry_run",
-                        dumps({"id": rid}),
-                        utc_now_iso(),
-                        utc_now_iso(),
-                    ),
-                )
-            # Re-check fingerprint after sequence/parent assignment is unnecessary:
-            # those fields are not material. Persist the validated fingerprint as-is.
             conn.execute(
                 """INSERT INTO evidence(evidence_id, run_id, sequence, attempt, parent_evidence_id,
                    payload_json, evidence_fingerprint, saved_at, immutable)
@@ -1679,6 +1675,7 @@ class Stage6Store:
             "preview": {},
             "errors": [],
             "malformed": [],
+            "orphans": [],
             "dry_run": bool(dry_run),
             "cutover": False,
             "integrity": None,
@@ -1727,24 +1724,94 @@ class Stage6Store:
                     report["malformed"].append(f"{name}: non-object item")
             return out
 
+        runs_src = _load("runs.json", "runs")
+        events_src = _load("run_events.json", "events")
+        approvals_src = _load("run_approvals.json", "approvals")
+        evidence_src = _load("run_evidence.json", "evidence")
+        leases_src = _load("constitution_leases.json", "leases")
+        known_run_ids = {
+            str(r.get("id"))
+            for r in runs_src
+            if isinstance(r, dict) and r.get("id")
+        }
+
+        def _orphan(record_type: str, record_id: str, run_id: str, source: str, reason: str) -> None:
+            report["orphans"].append(
+                {
+                    "record_type": record_type,
+                    "record_id": record_id,
+                    "referenced_run_id": run_id,
+                    "source_file": source,
+                    "reason": reason,
+                }
+            )
+
+        for ev in events_src:
+            rid = str(ev.get("run_id") or "")
+            eid = str(ev.get("id") or ev.get("event_id") or "")
+            if not rid:
+                report["malformed"].append("run_event missing run_id")
+                continue
+            if rid not in known_run_ids:
+                _orphan("event", eid or "(no-id)", rid, "run_events.json", "referenced run not in runs.json")
+        for ap in approvals_src:
+            rid = str(ap.get("run_id") or "")
+            aid = str(ap.get("id") or ap.get("approval_id") or "")
+            if not rid:
+                report["malformed"].append("approval missing run_id")
+                continue
+            if rid not in known_run_ids:
+                _orphan(
+                    "approval",
+                    aid or "(no-id)",
+                    rid,
+                    "run_approvals.json",
+                    "referenced run not in runs.json",
+                )
+        for ev in evidence_src:
+            rid = str(ev.get("run_id") or "")
+            evid = str(ev.get("evidence_id") or ev.get("id") or "")
+            if not rid:
+                report["malformed"].append("evidence missing run_id")
+                continue
+            if rid not in known_run_ids:
+                _orphan(
+                    "evidence",
+                    evid or "(no-id)",
+                    rid,
+                    "run_evidence.json",
+                    "referenced run not in runs.json",
+                )
+        for lease in leases_src:
+            rid = str(lease.get("run_id") or "")
+            if rid and rid not in known_run_ids:
+                _orphan(
+                    "lease",
+                    str(lease.get("lease_id") or "(no-id)"),
+                    rid,
+                    "constitution_leases.json",
+                    "referenced run not in runs.json",
+                )
+
         if dry_run:
             report["preview"] = {
-                "runs": len(_load("runs.json", "runs")),
-                "leases": len(_load("constitution_leases.json", "leases")),
+                "runs": len(runs_src),
+                "leases": len(leases_src),
                 "bindings": len(_load("repository_bindings.json", "bindings")),
-                "events": len(_load("run_events.json", "events")),
-                "approvals": len(_load("run_approvals.json", "approvals")),
+                "events": len(events_src),
+                "approvals": len(approvals_src),
                 "task_locks": len(_load("task_locks.json", "locks")),
                 "repository_locks": len(_load("repository_locks.json", "locks")),
-                "evidence": len(_load("run_evidence.json", "evidence")),
+                "evidence": len(evidence_src),
                 "project_controls": len(_load("project_execution_controls.json", "controls")),
+                "orphans": len(report["orphans"]),
             }
             report["db"] = self.db.pragmas()
             return report
 
-        # Runs
+        # Runs first (authority shells)
         count = 0
-        for run in _load("runs.json", "runs"):
+        for run in runs_src:
             if run.get("id"):
                 try:
                     self.save_run(run)
@@ -1753,13 +1820,14 @@ class Stage6Store:
                     report["errors"].append(f"run {run.get('id')}: {exc}")
         report["imported"]["runs"] = count
 
-        # Events (after runs so FK holds)
+        # Events — only for existing runs; never fabricate placeholders
         count = 0
-        for ev in _load("run_events.json", "events"):
+        for ev in events_src:
             rid = str(ev.get("run_id") or "")
             if not rid:
-                report["malformed"].append("run_event missing run_id")
                 continue
+            if rid not in known_run_ids:
+                continue  # already recorded as orphan; not authoritative
             try:
                 self.append_run_event(
                     rid,
@@ -1775,19 +1843,26 @@ class Stage6Store:
 
         # Approvals
         count = 0
-        for ap in _load("run_approvals.json", "approvals"):
-            if ap.get("run_id") and ap.get("requirement_type"):
-                try:
-                    self.save_run_approval(ap)
-                    count += 1
-                except Exception as exc:
-                    report["errors"].append(f"approval: {exc}")
+        for ap in approvals_src:
+            rid = str(ap.get("run_id") or "")
+            if not (rid and ap.get("requirement_type")):
+                continue
+            if rid not in known_run_ids:
+                continue
+            try:
+                self.save_run_approval(ap)
+                count += 1
+            except Exception as exc:
+                report["errors"].append(f"approval: {exc}")
         report["imported"]["approvals"] = count
 
-        # Leases
+        # Leases (run_id optional for some leases)
         count = 0
-        for lease in _load("constitution_leases.json", "leases"):
+        for lease in leases_src:
             if lease.get("lease_id"):
+                rid = str(lease.get("run_id") or "")
+                if rid and rid not in known_run_ids:
+                    continue
                 try:
                     self.save_constitution_lease(lease)
                     count += 1
@@ -1827,26 +1902,26 @@ class Stage6Store:
                 report["errors"].append(f"binding: {exc}")
         report["imported"]["bindings"] = count
 
-        # Evidence
+        # Evidence — only for existing runs; never fabricate placeholders
         count = 0
-        for ev in _load("run_evidence.json", "evidence"):
-            if ev.get("run_id"):
-                try:
-                    # re-key so import can be replayed without mutation errors on second apply
-                    if "evidence_id" in ev:
-                        # only insert if missing
-                        with self.db.transaction() as conn:
-                            exists = conn.execute(
-                                "SELECT evidence_id FROM evidence WHERE evidence_id=?",
-                                (str(ev["evidence_id"]),),
-                            ).fetchone()
-                        if exists:
-                            count += 1
-                            continue
-                    self.save_run_evidence(ev)
-                    count += 1
-                except Exception as exc:
-                    report["errors"].append(f"evidence: {exc}")
+        for ev in evidence_src:
+            rid = str(ev.get("run_id") or "")
+            if not rid or rid not in known_run_ids:
+                continue
+            try:
+                if "evidence_id" in ev:
+                    with self.db.transaction() as conn:
+                        exists = conn.execute(
+                            "SELECT evidence_id FROM evidence WHERE evidence_id=?",
+                            (str(ev["evidence_id"]),),
+                        ).fetchone()
+                    if exists:
+                        count += 1
+                        continue
+                self.save_run_evidence(ev)
+                count += 1
+            except Exception as exc:
+                report["errors"].append(f"evidence: {exc}")
         report["imported"]["evidence"] = count
 
         # Execution control
@@ -1893,11 +1968,26 @@ class Stage6Store:
 
         report["db"] = self.db.pragmas()
         report["integrity"] = report["db"].get("integrity_check")
-        if cutover and not report["errors"]:
+        # Post-condition: no unknown/unknown placeholder runs
+        with self.db.transaction() as conn:
+            placeholders = conn.execute(
+                "SELECT id FROM runs WHERE repository=? OR project_id=?",
+                ("unknown/unknown", "unknown"),
+            ).fetchall()
+        if placeholders:
+            report["errors"].append(
+                f"placeholder runs present after migration: {[p[0] for p in placeholders]}"
+            )
+        if cutover and not report["errors"] and not report["orphans"]:
             self.set_migration_cutover(f"sqlite_authority_{stamp}")
             report["cutover"] = True
             report["cutover_marker"] = self.get_migration_cutover()
-        elif cutover and report["errors"]:
+        elif cutover:
             report["cutover"] = False
-            report["errors"].append("cutover withheld because import reported errors")
+            if report["orphans"]:
+                report["errors"].append(
+                    f"cutover withheld because {len(report['orphans'])} orphan reference(s)"
+                )
+            elif report["errors"]:
+                report["errors"].append("cutover withheld because import reported errors")
         return report

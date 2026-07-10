@@ -48,9 +48,8 @@ RUN_APPROVAL_TYPES = {
     "merge_approval",
     "deployment_approval",
 }
-ACTIVE_RUN_STATUSES = frozenset(
-    {"queued", "starting", "running", "cancel_requested", "awaiting_approval", "approved"}
-)
+# Only in-flight execution statuses count against concurrency (not draft/approval).
+ACTIVE_RUN_STATUSES = frozenset({"queued", "starting", "running", "cancel_requested"})
 
 PROJECT_STATUSES = {"active", "paused", "blocked", "completed", "archived"}
 STAGE_STATUSES = {"not_started", "in_progress", "blocked", "ready_for_review", "complete"}
@@ -433,6 +432,22 @@ class LocalStore:
                 "summary": f"Project {name} ({status})",
             }
         )
+        # Ensure explicit execution-control record exists (fail-closed if ever removed)
+        if not updated:
+            try:
+                existing_ctrl = self.get_project_execution_control(project_id)
+                if not existing_ctrl.get("explicit"):
+                    self.set_project_execution_control(
+                        project_id,
+                        execution_status="enabled" if status == "active" else "locked",
+                        reason="auto-created with project",
+                    )
+            except Exception:
+                self.set_project_execution_control(
+                    project_id,
+                    execution_status="enabled" if status == "active" else "locked",
+                    reason="auto-created with project",
+                )
         return record
 
     def set_project_status(self, project_id: str, status: str) -> dict[str, Any]:
@@ -758,6 +773,8 @@ class LocalStore:
             self.upsert_planned_task({**task, "project_id": project_id})
         for truth in sample.get("truth") or []:
             self.upsert_truth({**truth, "project_id": project_id})
+        # Explicit execution control required (fail-closed otherwise)
+        self.set_project_execution_control(project_id, execution_status="enabled", reason="sample load")
         return saved_project
 
     # —— Stage 5: execution safety ——
@@ -785,14 +802,18 @@ class LocalStore:
         return data
 
     def set_execution_control(self, *, kill_switch_active: bool, reason: str = "", actor: str = "shan") -> dict[str, Any]:
+        from buildforme.governance import parse_bool_strict, validate_actor
+
+        kill = parse_bool_strict(kill_switch_active, field="kill_switch_active")
+        actor = validate_actor(actor)
         previous = self.get_execution_control()
         now = utc_now_iso()
         record = {
             "id": "global",
-            "kill_switch_active": bool(kill_switch_active),
+            "kill_switch_active": kill,
             "reason": str(reason or ""),
-            "activated_by": str(actor or "shan") if kill_switch_active else previous.get("activated_by") or "",
-            "activated_at": now if kill_switch_active else None,
+            "activated_by": actor if kill else previous.get("activated_by") or "",
+            "activated_at": now if kill else None,
             "updated_at": now,
             "previous_kill_switch_active": bool(previous.get("kill_switch_active")),
         }
@@ -816,12 +837,16 @@ class LocalStore:
         )
         for item in data.get("controls") or []:
             if str(item.get("project_id")) == str(project_id):
-                return item
+                out = dict(item)
+                out["explicit"] = True
+                return out
+        # Fail closed: missing control is not enabled.
         return {
             "project_id": project_id,
-            "execution_status": "enabled",
-            "reason": "",
+            "execution_status": "locked",
+            "reason": "no explicit execution-control record",
             "updated_at": utc_now_iso(),
+            "explicit": False,
         }
 
     def set_project_execution_control(
@@ -839,6 +864,7 @@ class LocalStore:
             "execution_status": execution_status,
             "reason": str(reason or ""),
             "updated_at": utc_now_iso(),
+            "explicit": True,
         }
         data = self._load_object(
             self.project_exec_controls_path,
@@ -1090,6 +1116,8 @@ class LocalStore:
         return [a for a in items if str(a.get("run_id")) == str(run_id)]
 
     def save_run_approval(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from buildforme.governance import validate_actor, validate_safe_id
+
         requirement = str(payload.get("requirement_type") or "").strip()
         decision = str(payload.get("decision") or "").strip()
         if requirement not in RUN_APPROVAL_TYPES:
@@ -1101,12 +1129,13 @@ class LocalStore:
         now = utc_now_iso()
         record = {
             "id": str(payload.get("id") or f"rap_{uuid.uuid4().hex[:10]}"),
-            "run_id": str(payload.get("run_id") or ""),
+            "run_id": validate_safe_id(payload.get("run_id"), field="run_id"),
             "requirement_type": requirement,
             "decision": decision,
             "scope": str(payload.get("scope") or ""),
+            "scope_fingerprint": str(payload.get("scope_fingerprint") or payload.get("scope") or ""),
             "note": str(payload.get("note") or ""),
-            "actor": str(payload.get("actor") or "shan"),
+            "actor": validate_actor(payload.get("actor") or "shan"),
             "packet_id": payload.get("packet_id"),
             "task_id": payload.get("task_id"),
             "created_at": now,

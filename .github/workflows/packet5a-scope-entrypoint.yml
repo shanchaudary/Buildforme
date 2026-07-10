@@ -1,5 +1,6 @@
 name: Packet 5A Scope Entrypoint Guard
 
+# Revision 2: stale-scope approval now fails before any approval write.
 on:
   push:
     branches:
@@ -44,7 +45,7 @@ jobs:
 
           if [ "$apply_status" -eq 0 ]; then
             echo '== syntax and diff ==' | tee -a "$report"
-            python -m py_compile buildforme/execution_service.py tests/test_run_mutation_authority_hardening.py 2>&1 | tee -a "$report"
+            python -m py_compile buildforme/execution_service.py tests/test_run_mutation_authority_hardening.py tests/test_run_approval_atomic.py 2>&1 | tee -a "$report"
             syntax_status=${PIPESTATUS[0]}
             if [ "$syntax_status" -eq 0 ]; then
               git diff --check 2>&1 | tee -a "$report"
@@ -56,7 +57,9 @@ jobs:
             contract_status=${PIPESTATUS[0]}
             python -m unittest discover -s tests -p 'test_run_mutation_authority*.py' -v 2>&1 | tee -a "$report"
             authority_status=${PIPESTATUS[0]}
-            if [ "$contract_status" -eq 0 ] && [ "$authority_status" -eq 0 ]; then
+            python -m unittest discover -s tests -p 'test_run_approval_atomic.py' -v 2>&1 | tee -a "$report"
+            approval_status=${PIPESTATUS[0]}
+            if [ "$contract_status" -eq 0 ] && [ "$authority_status" -eq 0 ] && [ "$approval_status" -eq 0 ]; then
               focused_status=0
             else
               focused_status=1
@@ -91,13 +94,13 @@ jobs:
             rm scripts/apply_packet5a_scope_entrypoint_guard.py
             rm .github/workflows/packet5a-scope-entrypoint.yml
             git diff --check
-            git add buildforme/execution_service.py tests/test_run_mutation_authority_hardening.py scripts/apply_packet5a_scope_entrypoint_guard.py .github/workflows/packet5a-scope-entrypoint.yml packet5a_scope_entrypoint_validation.txt
+            git add buildforme/execution_service.py tests/test_run_mutation_authority_hardening.py tests/test_run_approval_atomic.py scripts/apply_packet5a_scope_entrypoint_guard.py .github/workflows/packet5a-scope-entrypoint.yml packet5a_scope_entrypoint_validation.txt
             git commit -m "Enforce bound scope at approval and live execution"
             git push origin HEAD:stage-6-multi-provider-supervised-execution
             exit 0
           fi
 
-          git restore buildforme/execution_service.py tests/test_run_mutation_authority_hardening.py
+          git restore buildforme/execution_service.py tests/test_run_mutation_authority_hardening.py tests/test_run_approval_atomic.py
           git add "$report"
           git commit -m "Record Packet 5A scope-entrypoint validation failure"
           git push origin HEAD:stage-6-multi-provider-supervised-execution

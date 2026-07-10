@@ -34,7 +34,14 @@ jobs:
 
           echo '== apply ==' | tee -a "$report"
           python scripts/apply_packet5a_mode_policy.py 2>&1 | tee -a "$report"
-          apply_status=${PIPESTATUS[0]}
+          primary_apply_status=${PIPESTATUS[0]}
+          python scripts/fix_packet5a_mode_policy_validation.py 2>&1 | tee -a "$report"
+          correction_status=${PIPESTATUS[0]}
+          if [ "$primary_apply_status" -eq 0 ] && [ "$correction_status" -eq 0 ]; then
+            apply_status=0
+          else
+            apply_status=1
+          fi
 
           syntax_status=99
           focused_status=99
@@ -87,11 +94,12 @@ jobs:
           git config user.email "actions@users.noreply.github.com"
 
           if [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status" -eq 0 ] && [ "$full_status" -eq 0 ] && [ "$policy_status" -eq 0 ] && [ "$constitution_status" -eq 0 ]; then
-            rm "$report"
+            rm -f "$report"
             rm scripts/apply_packet5a_mode_policy.py
+            rm scripts/fix_packet5a_mode_policy_validation.py
             rm .github/workflows/packet5a-mode-policy.yml
             git diff --check
-            git add buildforme/execution_store.py tests/test_packet5a_mutation_policy_contract.py tests/test_run_mutation_authority_hardening.py scripts/apply_packet5a_mode_policy.py .github/workflows/packet5a-mode-policy.yml
+            git add buildforme/execution_store.py tests/test_packet5a_mutation_policy_contract.py tests/test_run_mutation_authority_hardening.py scripts/apply_packet5a_mode_policy.py scripts/fix_packet5a_mode_policy_validation.py .github/workflows/packet5a-mode-policy.yml packet5a_mode_validation.txt
             git commit -m "Bind run mutations to admitted execution mode"
             git push origin HEAD:stage-6-multi-provider-supervised-execution
             exit 0

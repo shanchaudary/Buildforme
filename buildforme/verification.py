@@ -85,35 +85,82 @@ def verify_run_result(
     add("worktree_exists", "pass", str(wt))
     st = worktree_status(wt)
     branch = str(st.get("branch") or "")
-    expected_branch = str(run.get("target_branch") or "")
+    expected_branch = str(run.get("execution_branch") or run.get("target_branch") or "")
+    if branch in {"HEAD", ""} or st.get("branch") is None:
+        # Detached HEAD detection via symbolic-ref
+        import subprocess
+
+        sym = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"],
+            cwd=str(wt),
+            capture_output=True,
+            text=True,
+            shell=False,
+            check=False,
+        )
+        if sym.returncode != 0:
+            add("branch_integrity", "fail", "detached HEAD or unresolvable branch")
+        else:
+            branch = (sym.stdout or "").strip()
     if expected_branch and branch and branch != expected_branch:
-        add("branch_integrity", "fail", f"expected {expected_branch}, got {branch}")
+        add("branch_integrity", "fail", f"expected execution_branch {expected_branch}, got {branch}")
     elif branch in {"main", "master"}:
         add("branch_integrity", "fail", "worktree on protected branch")
     else:
         add("branch_integrity", "pass", branch or "unknown")
 
     approved_baseline = str(baseline_commit or run.get("baseline_commit") or "")
-    if approved_baseline and st.get("head_commit"):
-        # HEAD may advance with commits; baseline must still be ancestor or equal for integrity of pin
+    final_head = str(st.get("head_commit") or "")
+    if approved_baseline and final_head:
+        # Prove baseline is ancestor of final HEAD
+        import subprocess
+
+        anc = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", approved_baseline, final_head],
+            cwd=str(wt),
+            capture_output=True,
+            text=True,
+            shell=False,
+            check=False,
+        )
+        if anc.returncode == 0:
+            add(
+                "baseline_ancestry",
+                "pass",
+                f"baseline={approved_baseline[:12]} is ancestor of head={final_head[:12]}",
+            )
+        else:
+            add(
+                "baseline_ancestry",
+                "fail",
+                f"approved baseline {approved_baseline[:12]} is not ancestor of HEAD {final_head[:12]}",
+            )
         add(
             "baseline_recorded",
             "pass",
-            f"baseline={approved_baseline[:12]} head={str(st['head_commit'])[:12]}",
+            f"baseline={approved_baseline[:12]} head={final_head[:12]}",
         )
     else:
         add("baseline_recorded", "fail", "baseline/head incomplete")
+        add("baseline_ancestry", "fail", "cannot prove ancestry without baseline and HEAD")
 
-    # Canonical changed-file collection
+    # Canonical changed-file collection (fail closed)
     try:
         manifest = collect_changed_file_manifest(wt, baseline_commit=approved_baseline or None)
         if not manifest.get("complete"):
-            add("changed_file_manifest", "fail", "manifest incomplete")
+            reasons = "; ".join(manifest.get("blocking_reasons") or ["incomplete"])
+            add("changed_file_manifest", "fail", f"manifest incomplete: {reasons}")
         else:
             add("changed_file_manifest", "pass", f"{manifest.get('file_count')} files")
     except Exception as exc:
         add("changed_file_manifest", "fail", str(exc)[:200])
-        manifest = {"files": [], "files_changed": [], "file_count": 0, "complete": False}
+        manifest = {
+            "files": [],
+            "files_changed": [],
+            "file_count": 0,
+            "complete": False,
+            "blocking_reasons": [str(exc)],
+        }
 
     files_meta = list(manifest.get("files") or [])
     files = list(manifest.get("files_changed") or [])

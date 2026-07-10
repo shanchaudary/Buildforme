@@ -19,6 +19,7 @@ HARD_BLOCK_CHECK_NAMES = frozenset(
         "process_cleanup",
         "symlink_escape",
         "baseline_match",
+        "baseline_ancestry",
         "allowed_path",
     }
 )

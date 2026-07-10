@@ -191,16 +191,23 @@ def create_run(store: LocalStore, payload: dict[str, Any]) -> dict[str, Any]:
     if execution_mode == "live_supervised":
         binding = resolve_registered_repository(store, project=project)
         if canonicalize_repository(str(binding.get("repository"))) != repository:
-            # Project repository is authority
             repository = canonicalize_repository(str(binding.get("repository")))
         repository_local_path = str(binding.get("local_path"))
         pinned = pin_baseline(Path(repository_local_path), baseline_ref=baseline_ref)
         baseline_commit = pinned["baseline_commit"]
         baseline_ref = pinned["baseline_ref"]
     else:
-        # Dry-run may omit local binding; baseline optional
         baseline_commit = payload.get("baseline_commit")
         repository_local_path = payload.get("repository_local_path")
+
+    # Authoritative execution branch established before worktree/approval
+    requested_target_branch = branch
+    if execution_mode == "live_supervised":
+        base_name = branch if branch.startswith("feature/") else f"feature/{branch}"
+        execution_branch = f"{base_name.rstrip('/')}-{run_id[-8:]}"
+        validate_branch(execution_branch)
+    else:
+        execution_branch = branch
 
     now = utc_now_iso()
     run = {
@@ -214,7 +221,9 @@ def create_run(store: LocalStore, payload: dict[str, Any]) -> dict[str, Any]:
         "repository_local_path": repository_local_path,
         "baseline_ref": baseline_ref,
         "baseline_commit": baseline_commit,
-        "target_branch": branch,
+        "requested_target_branch": requested_target_branch,
+        "execution_branch": execution_branch,
+        "target_branch": execution_branch,  # legacy field tracks execution branch for worktree
         "operating_mode": mode,
         "risk": risk,
         "status": "draft",
@@ -739,27 +748,24 @@ def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
 
     root = Path(str(run["repository_local_path"])).resolve()
     approved_baseline = str(run["baseline_commit"])
-    # Unique branch per run to avoid collisions
-    base_branch = str(run.get("target_branch") or "feature/run")
-    if not base_branch.startswith("feature/"):
-        base_branch = f"feature/{base_branch}"
-    run_branch = f"{base_branch.rstrip('/')}-{run_id[-8:]}"
+    run_branch = str(run.get("execution_branch") or "")
+    if not run_branch:
+        raise ValueError("run missing execution_branch established at create time")
 
     worktree_meta = create_isolated_worktree(
         repo_root=root,
         branch=run_branch,
         baseline_commit=approved_baseline,
-        worktrees_root=root / "runtime" / "worktrees",
         run_id=run_id,
         allow_dirty_main=False,
         allow_existing_branch=False,
+        require_clean_parent=True,
     )
-    # Never overwrite approved baseline with a different SHA
     if str(worktree_meta.get("baseline_commit")) != approved_baseline:
         raise ValueError("worktree baseline does not match approved baseline")
     run["worktree"] = worktree_meta
     run["worktree_path"] = worktree_meta.get("worktree_path")
-    run["execution_branch"] = run_branch
+    run["workspace_root"] = worktree_meta.get("workspace_root")
     run["provider_version"] = (prep.get("health") or {}).get("version") or health.get("version")
     run = transition_run(run, "queued", "system", "live supervised queued")
     run = transition_run(run, "starting", "system", "worktree ready at approved baseline")
@@ -773,7 +779,8 @@ def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
         metadata={
             "worktree": worktree_meta.get("worktree_path"),
             "baseline": approved_baseline,
-            "branch": run_branch,
+            "execution_branch": run_branch,
+            "requested_target_branch": run.get("requested_target_branch"),
             "constitution_lease_id": run.get("constitution_lease_id"),
         },
     )
@@ -847,10 +854,34 @@ def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
         _release_run_locks(store, run)
         return {"run": run, "process": process_result, "unavailable": True}
 
-    diff = collect_diff(
-        Path(worktree_meta["worktree_path"]),
-        baseline_commit=approved_baseline,
-    )
+    # Post-run resolution — real HEAD/branch after provider work
+    from buildforme.changed_files import collect_changed_file_manifest, collect_patch_evidence
+    from buildforme.worktree import worktree_status
+
+    wt_path = Path(worktree_meta["worktree_path"])
+    post_status = worktree_status(wt_path)
+    final_head = str(post_status.get("head_commit") or "")
+    final_branch = str(post_status.get("branch") or "")
+    worktree_meta = {
+        **worktree_meta,
+        "head_commit": final_head,
+        "branch": final_branch,
+        "post_run": True,
+    }
+    run["final_head_sha"] = final_head
+    run["head_commit"] = final_head
+
+    diff = collect_diff(wt_path, baseline_commit=approved_baseline)
+    patch_ev = collect_patch_evidence(wt_path, baseline_commit=approved_baseline)
+    if isinstance(diff.get("manifest"), dict):
+        diff["manifest"]["patch_fingerprint"] = patch_ev.get("patch_fingerprint")
+        diff["patch_fingerprint"] = patch_ev.get("patch_fingerprint")
+        if not patch_ev.get("complete"):
+            diff["manifest"]["complete"] = False
+            reasons = list(diff["manifest"].get("blocking_reasons") or [])
+            reasons.extend(patch_ev.get("blocking_reasons") or [])
+            diff["manifest"]["blocking_reasons"] = reasons
+
     try:
         project = store.get_project(str(run.get("project_id")))
     except KeyError:
@@ -860,7 +891,7 @@ def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
         run=run,
         packet=packet,
         project=project,
-        worktree_path=worktree_meta["worktree_path"],
+        worktree_path=str(wt_path),
         baseline_commit=approved_baseline,
         process_result=process_result,
         budget=run.get("budget") if isinstance(run.get("budget"), dict) else None,
@@ -900,6 +931,11 @@ def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
         constitution_result=validation,
         attempt=int(run.get("attempt") or 0) + 1,
     )
+    evidence["approved_baseline_sha"] = approved_baseline
+    evidence["final_head_sha"] = final_head
+    evidence["execution_branch"] = run_branch
+    evidence["patch_fingerprint"] = patch_ev.get("patch_fingerprint")
+    evidence["manifest_fingerprint"] = (diff.get("manifest") or {}).get("manifest_fingerprint")
     saved_evidence = store.save_run_evidence(evidence)
 
     review = build_review_package(
@@ -1026,6 +1062,30 @@ def founder_review_decision(
         redact_text(f"{decision}: {note}"),
         actor=actor,
     )
+    # Append-only decision evidence linked to execution evidence (do not mutate prior)
+    try:
+        decision_ev = {
+            "run_id": run_id,
+            "kind": "founder_decision",
+            "parent_evidence_id": evidence.get("evidence_id"),
+            "decision": decision,
+            "note": note,
+            "actor": actor,
+            "review": result["review"],
+            "execution_evidence_id": evidence.get("evidence_id"),
+            "evidence_fingerprint": None,
+        }
+        from buildforme.evidence import build_evidence_bundle as _beb
+        # Lightweight decision record
+        decision_ev["evidence_fingerprint"] = __import__("hashlib").sha256(
+            __import__("json").dumps(
+                {"run_id": run_id, "decision": decision, "parent": evidence.get("evidence_id")},
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        store.save_run_evidence(decision_ev)
+    except Exception:
+        pass
     if cleanup_worktree and saved.get("worktree_path") and saved.get("repository_local_path"):
         try:
             remove_worktree(

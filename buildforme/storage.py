@@ -150,6 +150,24 @@ class LocalStore:
         self.repo_bindings_path = self.runtime_dir / DEFAULT_REPO_BINDINGS_NAME
         self.founder_sessions_path = self.runtime_dir / DEFAULT_FOUNDER_SESSIONS_NAME
         self._io_lock = __import__("threading").RLock()
+        # Stage 6 transactional authority (SQLite WAL)
+        from buildforme.execution_store import Stage6Store
+
+        self.s6 = Stage6Store(self.runtime_dir / "buildforme_execution.db")
+        self.db_path = self.runtime_dir / "buildforme_execution.db"
+
+    def close(self) -> None:
+        """Release SQLite handles (important for Windows temp cleanup)."""
+        try:
+            self.s6.db.close()
+        except Exception:
+            pass
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     # —— Tasks (existing API) ——
 
@@ -422,6 +440,10 @@ class LocalStore:
             "objective": str(payload.get("objective") or "").strip(),
             "current_stage_id": payload.get("current_stage_id"),
             "sample": bool(payload.get("sample", False)),
+            "primary_language": payload.get("primary_language"),
+            "verification_profile": payload.get("verification_profile"),
+            "metadata": payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+            "local_repository_root": payload.get("local_repository_root"),
             "created_at": now,
             "updated_at": now,
         }
@@ -430,6 +452,13 @@ class LocalStore:
             if str(existing.get("id")) == project_id:
                 record["created_at"] = existing.get("created_at") or now
                 record["updated_at"] = now
+                # Preserve verification_profile/metadata if not provided
+                if record.get("verification_profile") is None:
+                    record["verification_profile"] = existing.get("verification_profile")
+                if not record.get("metadata"):
+                    record["metadata"] = existing.get("metadata") or {}
+                if record.get("local_repository_root") is None:
+                    record["local_repository_root"] = existing.get("local_repository_root")
                 projects[index] = record
                 updated = True
                 break
@@ -793,51 +822,25 @@ class LocalStore:
     # —— Stage 5: execution safety ——
 
     def get_execution_control(self) -> dict[str, Any]:
-        if not self.execution_control_path.exists():
-            record = {
-                "id": "global",
-                "kill_switch_active": False,
-                "reason": "",
-                "activated_by": "",
-                "activated_at": None,
-                "updated_at": utc_now_iso(),
-            }
-            self._atomic_write(self.execution_control_path, record)
-            return record
-        try:
-            data = json.loads(self.execution_control_path.read_text(encoding="utf-8") or "{}")
-        except json.JSONDecodeError:
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
-        data.setdefault("id", "global")
-        data.setdefault("kill_switch_active", False)
-        return data
+        record = self.s6.get_execution_control()
+        record.setdefault("id", "global")
+        return record
 
     def set_execution_control(self, *, kill_switch_active: bool, reason: str = "", actor: str = "shan") -> dict[str, Any]:
         from buildforme.governance import parse_bool_strict, validate_actor
 
         kill = parse_bool_strict(kill_switch_active, field="kill_switch_active")
         actor = validate_actor(actor)
-        previous = self.get_execution_control()
-        now = utc_now_iso()
-        record = {
-            "id": "global",
-            "kill_switch_active": kill,
-            "reason": str(reason or ""),
-            "activated_by": actor if kill else previous.get("activated_by") or "",
-            "activated_at": now if kill else None,
-            "updated_at": now,
-            "previous_kill_switch_active": bool(previous.get("kill_switch_active")),
-        }
-        self._atomic_write(self.execution_control_path, record)
+        record = self.s6.set_execution_control(kill_switch_active=kill, reason=str(reason or ""), actor=actor)
+        record["id"] = "global"
+        record["activated_by"] = actor if kill else ""
         self.append_event(
             {
-                "event_type": "kill_switch_activated" if kill_switch_active else "kill_switch_deactivated",
+                "event_type": "kill_switch_activated" if kill else "kill_switch_deactivated",
                 "project_id": None,
                 "target_type": "execution_control",
                 "target_id": "global",
-                "summary": reason or ("activated" if kill_switch_active else "deactivated"),
+                "summary": reason or ("activated" if kill else "deactivated"),
             }
         )
         return record
@@ -911,32 +914,35 @@ class LocalStore:
         active_only: bool = False,
         repository: str | None = None,
     ) -> list[dict[str, Any]]:
-        data = self._load_object(self.repo_locks_path, default={"locks": []}, list_key="locks")
-        locks = list(data.get("locks") or [])
-        if repository:
-            locks = [lock for lock in locks if str(lock.get("repository")) == str(repository)]
+        locks = self.s6.list_repository_locks(active_only=active_only, repository=repository)
+        # Normalize status field for preflight (active bool → status string)
+        out = []
+        for lock in locks:
+            item = dict(lock)
+            if item.get("active") is False or item.get("released_at"):
+                item["status"] = "released"
+            else:
+                item["status"] = "active"
+                item["active"] = True
+            out.append(item)
         if active_only:
-            locks = [lock for lock in locks if str(lock.get("status")) == "active"]
-        return locks
+            out = [x for x in out if str(x.get("status")) == "active"]
+        return out
 
     def create_repository_lock(self, payload: dict[str, Any]) -> dict[str, Any]:
         repository = _normalize_repo(str(payload.get("repository") or ""))
         scope = str(payload.get("lock_scope") or "all")
         if scope not in LOCK_SCOPES:
             raise ValueError(f"lock_scope must be one of {sorted(LOCK_SCOPES)}")
-        record = {
-            "id": str(payload.get("id") or f"lock-{uuid.uuid4().hex[:10]}"),
-            "repository": repository,
-            "lock_scope": scope,
-            "status": "active",
-            "reason": str(payload.get("reason") or "").strip(),
-            "project_id": payload.get("project_id"),
-            "created_at": utc_now_iso(),
-            "released_at": None,
-        }
-        locks = self.list_repository_locks()
-        locks.append(record)
-        self._atomic_write(self.repo_locks_path, {"locks": locks})
+        record = self.s6.create_repository_lock(
+            {
+                **payload,
+                "repository": repository,
+                "lock_scope": scope,
+                "status": "active",
+            }
+        )
+        record["status"] = "active"
         self.append_event(
             {
                 "event_type": "repository_lock_created",
@@ -949,21 +955,8 @@ class LocalStore:
         return record
 
     def release_repository_lock(self, lock_id: str, *, reason: str = "") -> dict[str, Any]:
-        locks = self.list_repository_locks()
-        found = None
-        for index, item in enumerate(locks):
-            if str(item.get("id")) == str(lock_id):
-                updated = dict(item)
-                updated["status"] = "released"
-                updated["released_at"] = utc_now_iso()
-                if reason:
-                    updated["release_reason"] = reason
-                locks[index] = updated
-                found = updated
-                break
-        if not found:
-            raise KeyError(f"Lock not found: {lock_id}")
-        self._atomic_write(self.repo_locks_path, {"locks": locks})
+        found = self.s6.release_repository_lock(lock_id, reason=reason)
+        found["status"] = "released"
         self.append_event(
             {
                 "event_type": "repository_lock_released",
@@ -981,13 +974,13 @@ class LocalStore:
         if not self.providers_path.exists():
             providers = default_provider_registry()
             self._atomic_write(self.providers_path, {"providers": providers})
-            return providers
-        data = self._load_object(self.providers_path, default={"providers": []}, list_key="providers")
-        providers = list(data.get("providers") or [])
-        if not providers:
-            providers = default_provider_registry()
-            self._atomic_write(self.providers_path, {"providers": providers})
-        # Force dry-run invariants + constitution field defaults
+        else:
+            data = self._load_object(self.providers_path, default={"providers": []}, list_key="providers")
+            providers = list(data.get("providers") or [])
+            if not providers:
+                providers = default_provider_registry()
+                self._atomic_write(self.providers_path, {"providers": providers})
+        # Force dry-run invariants + merge SQLite constitution acks (authoritative)
         for item in providers:
             item["mode"] = "dry_run"
             item["live_execution_available"] = False
@@ -998,6 +991,19 @@ class LocalStore:
             item.setdefault("constitution_hash", None)
             item.setdefault("constitution_last_refresh", None)
             item.setdefault("constitution_acknowledged_at", None)
+            ack = self.s6.get_provider_ack(str(item.get("provider_id")))
+            if ack:
+                for key in (
+                    "constitution_acknowledged",
+                    "constitution_version",
+                    "constitution_hash",
+                    "constitution_last_refresh",
+                    "constitution_acknowledged_at",
+                    "constitution_ack_actor",
+                    "constitution_supported",
+                ):
+                    if key in ack and ack[key] is not None:
+                        item[key] = ack[key]
         return providers
 
     def get_provider_record(self, provider_id: str) -> dict[str, Any]:
@@ -1026,11 +1032,14 @@ class LocalStore:
         return found
 
     def set_provider_constitution_ack(self, provider_id: str, ack: dict[str, Any]) -> dict[str, Any]:
-        """Persist constitution acknowledgement fields only (Stage 5.6).
-
-        Does not accept credentials or live mode. Single authority for provider
-        constitution binding lives in governance.constitution_engine.
-        """
+        """Persist constitution acknowledgement (SQLite authority + provider registry mirror)."""
+        # Ensure provider exists in registry
+        self.get_provider_record(provider_id)
+        s6_ack = self.s6.set_provider_constitution_ack(provider_id, ack or {})
+        # Mirror into providers.json for UI listing compatibility
+        providers = self.list_providers()
+        updated_list = []
+        found = None
         allowed = {
             "constitution_supported",
             "constitution_acknowledged",
@@ -1040,16 +1049,14 @@ class LocalStore:
             "constitution_acknowledged_at",
             "constitution_ack_actor",
         }
-        providers = self.list_providers()
-        updated_list = []
-        found = None
         for item in providers:
             if str(item.get("provider_id")) == str(provider_id):
                 record = dict(item)
-                for key, value in (ack or {}).items():
-                    if key in allowed:
-                        record[key] = value
-                # Hard invariants
+                for key in allowed:
+                    if key in s6_ack:
+                        record[key] = s6_ack[key]
+                    elif key in (ack or {}):
+                        record[key] = ack[key]
                 record["mode"] = "dry_run"
                 record["live_execution_available"] = False
                 record["credentials_configured"] = False
@@ -1062,57 +1069,18 @@ class LocalStore:
         if not found:
             raise KeyError(f"Provider not found: {provider_id}")
         self._atomic_write(self.providers_path, {"providers": updated_list})
+        # Merge s6 + registry
+        found.update({k: s6_ack.get(k, found.get(k)) for k in allowed})
         return found
 
     def save_constitution_lease(self, lease: dict[str, Any]) -> dict[str, Any]:
-        """Persist a constitution lease append-only.
-
-        Existing lease ids may only be replayed with identical immutable
-        content. Mutation attempts raise ValueError (Stage 5.6 / Stage 6 gate).
-        """
-        from governance.constitution_lease import lease_records_equal, validate_lease_integrity
-
-        problems = validate_lease_integrity(lease)
-        if problems:
-            raise ValueError("invalid constitution lease: " + "; ".join(problems))
-
-        data = self._load_object(
-            self.constitution_leases_path, default={"leases": []}, list_key="leases"
-        )
-        leases = list(data.get("leases") or [])
-        lid = str(lease.get("lease_id") or "")
-        if not lid:
-            raise ValueError("lease_id required")
-        record = dict(lease)
-        # Storage-only metadata must not participate in immutability compares.
-        record["stored_at"] = record.get("stored_at") or utc_now_iso()
-        for idx, existing in enumerate(leases):
-            if str(existing.get("lease_id")) == lid:
-                if not lease_records_equal(existing, record):
-                    raise ValueError(
-                        "constitution lease mutation forbidden: "
-                        f"lease_id={lid} is append-only"
-                    )
-                # Identical replay — keep first stored_at
-                return existing
-        leases.insert(0, record)
-        self._atomic_write(self.constitution_leases_path, {"leases": leases[:500]})
-        return record
+        return self.s6.save_constitution_lease(lease)
 
     def list_constitution_leases(self, *, limit: int = 100, run_id: str | None = None) -> list[dict[str, Any]]:
-        data = self._load_object(
-            self.constitution_leases_path, default={"leases": []}, list_key="leases"
-        )
-        leases = list(data.get("leases") or [])
-        if run_id is not None:
-            leases = [x for x in leases if str(x.get("run_id")) == str(run_id)]
-        return leases[: max(1, min(500, int(limit)))]
+        return self.s6.list_constitution_leases(limit=limit, run_id=run_id)
 
     def get_constitution_lease(self, lease_id: str) -> dict[str, Any]:
-        for item in self.list_constitution_leases(limit=500):
-            if str(item.get("lease_id")) == str(lease_id):
-                return item
-        raise KeyError(f"Constitution lease not found: {lease_id}")
+        return self.s6.get_constitution_lease(lease_id)
 
     def append_constitution_violation(self, payload: dict[str, Any]) -> dict[str, Any]:
         data = self._load_object(
@@ -1162,180 +1130,67 @@ class LocalStore:
         return items[: max(1, min(1000, int(limit)))]
 
     def list_task_locks(self, *, active_only: bool = False) -> list[dict[str, Any]]:
-        data = self._load_object(self.task_locks_path, default={"locks": []}, list_key="locks")
-        locks = list(data.get("locks") or [])
-        if active_only:
-            locks = [x for x in locks if x.get("active", True) and not x.get("released_at")]
-        return locks
+        return self.s6.list_task_locks(active_only=active_only)
 
     def create_task_lock(self, payload: dict[str, Any]) -> dict[str, Any]:
-        with self._io_lock:
-            locks = self.list_task_locks()
-            record = {
-                "id": str(payload.get("id") or f"tlock-{uuid.uuid4().hex[:10]}"),
-                "task_key": str(payload.get("task_key") or "").strip(),
-                "project_id": payload.get("project_id"),
-                "run_id": payload.get("run_id"),
-                "reason": str(payload.get("reason") or ""),
-                "active": True,
-                "created_at": utc_now_iso(),
-                "released_at": None,
-            }
-            if not record["task_key"]:
-                raise ValueError("task_key required")
-            for existing in locks:
-                if (
-                    existing.get("active", True)
-                    and not existing.get("released_at")
-                    and str(existing.get("task_key")) == record["task_key"]
-                    and str(existing.get("project_id") or "") == str(record.get("project_id") or "")
-                ):
-                    raise ValueError(f"task lock already active: {record['task_key']}")
-            locks.insert(0, record)
-            self._atomic_write(self.task_locks_path, {"locks": locks[:500]})
-            return record
+        return self.s6.create_task_lock(payload)
 
     def release_task_lock(self, lock_id: str, *, reason: str = "") -> dict[str, Any]:
-        locks = self.list_task_locks()
-        found = None
-        for item in locks:
-            if str(item.get("id")) == str(lock_id):
-                item["active"] = False
-                item["released_at"] = utc_now_iso()
-                item["release_reason"] = reason
-                found = item
-                break
-        if not found:
-            raise KeyError(f"Task lock not found: {lock_id}")
-        self._atomic_write(self.task_locks_path, {"locks": locks})
-        return found
+        return self.s6.release_task_lock(lock_id, reason=reason)
 
     def save_run_evidence(self, evidence: dict[str, Any]) -> dict[str, Any]:
-        """Append-only evidence. Never overwrite an existing evidence_id or prior attempt."""
-        with self._io_lock:
-            data = self._load_object(self.evidence_path, default={"evidence": []}, list_key="evidence")
-            items = list(data.get("evidence") or [])
-            record = dict(evidence)
-            eid = str(record.get("evidence_id") or record.get("id") or f"ev-{uuid.uuid4().hex[:12]}")
-            record["evidence_id"] = eid
-            record["id"] = eid
-            record.setdefault("saved_at", utc_now_iso())
-            record.setdefault("immutable", True)
-            # Reject mutation of existing evidence_id
-            for existing in items:
-                if str(existing.get("evidence_id") or existing.get("id")) == eid:
-                    raise ValueError(f"evidence mutation forbidden: {eid} is append-only")
-            # Sequence per run
-            rid = str(record.get("run_id") or "")
-            prior = [x for x in items if str(x.get("run_id")) == rid]
-            record.setdefault("sequence", len(prior) + 1)
-            record.setdefault("attempt", record.get("attempt") or len(prior) + 1)
-            if prior:
-                record.setdefault(
-                    "parent_evidence_id",
-                    prior[0].get("evidence_id") or prior[0].get("id"),
-                )
-            items.insert(0, record)
-            self._atomic_write(self.evidence_path, {"evidence": items[:1000]})
-            return record
+        return self.s6.save_run_evidence(evidence)
 
     def get_run_evidence(self, run_id: str) -> dict[str, Any]:
-        """Return latest evidence record for run."""
-        items = self.list_run_evidence(run_id=run_id, limit=1)
-        if not items:
-            raise KeyError(f"Evidence not found for run: {run_id}")
-        return items[0]
+        return self.s6.get_run_evidence(run_id)
 
     def list_run_evidence(self, *, run_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
-        data = self._load_object(self.evidence_path, default={"evidence": []}, list_key="evidence")
-        items = list(data.get("evidence") or [])
-        if run_id is not None:
-            items = [x for x in items if str(x.get("run_id")) == str(run_id)]
-        return items[: max(1, min(500, int(limit)))]
+        return self.s6.list_run_evidence(run_id=run_id, limit=limit)
 
     def register_repository_binding(self, payload: dict[str, Any]) -> dict[str, Any]:
-        with self._io_lock:
-            data = self._load_object(
-                self.repo_bindings_path, default={"bindings": []}, list_key="bindings"
-            )
-            bindings = list(data.get("bindings") or [])
-            repo = str(payload.get("repository") or "").strip()
-            local_path = str(payload.get("local_path") or "").strip()
-            if not repo or not local_path:
-                raise ValueError("repository and local_path required")
-            # Dedup by repository — one binding authority
-            record = {
-                "id": str(payload.get("id") or f"rbind-{uuid.uuid4().hex[:10]}"),
-                "repository": repo,
-                "local_path": local_path,
-                "project_id": payload.get("project_id"),
-                "created_at": utc_now_iso(),
-                "updated_at": utc_now_iso(),
-            }
-            out = []
-            replaced = False
-            for item in bindings:
-                if str(item.get("repository")).lower() == repo.lower():
-                    record["id"] = item.get("id") or record["id"]
-                    record["created_at"] = item.get("created_at") or record["created_at"]
-                    out.append(record)
-                    replaced = True
-                else:
-                    # Also reject same path for different repo
-                    if str(item.get("local_path")) == local_path and str(item.get("repository")).lower() != repo.lower():
-                        raise ValueError("local_path already bound to another repository")
-                    out.append(item)
-            if not replaced:
-                out.insert(0, record)
-            self._atomic_write(self.repo_bindings_path, {"bindings": out[:200]})
-            return record
+        return self.s6.register_repository_binding(payload)
 
     def list_repository_bindings(self) -> list[dict[str, Any]]:
-        data = self._load_object(
-            self.repo_bindings_path, default={"bindings": []}, list_key="bindings"
-        )
-        return list(data.get("bindings") or [])
+        return self.s6.list_repository_bindings()
 
     def get_repository_binding(self, repository: str) -> dict[str, Any] | None:
-        key = str(repository or "").strip().lower()
-        for item in self.list_repository_bindings():
-            if str(item.get("repository") or "").strip().lower() == key:
-                return item
-        return None
+        return self.s6.get_repository_binding(repository)
 
-    def create_founder_session(self, *, actor: str = "shan", ttl_seconds: int = 3600) -> dict[str, Any]:
-        with self._io_lock:
-            token = uuid.uuid4().hex
-            record = {
-                "token_hash": __import__("hashlib").sha256(token.encode("utf-8")).hexdigest(),
-                "actor": actor,
-                "created_at": utc_now_iso(),
-                "expires_at_epoch": int(__import__("time").time()) + max(60, int(ttl_seconds)),
-                "active": True,
-            }
-            data = self._load_object(
-                self.founder_sessions_path, default={"sessions": []}, list_key="sessions"
-            )
-            sessions = list(data.get("sessions") or [])
-            sessions.insert(0, {k: v for k, v in record.items()})
-            self._atomic_write(self.founder_sessions_path, {"sessions": sessions[:50]})
-            # Return plaintext token once only
-            return {"token": token, "actor": actor, "expires_in": ttl_seconds}
+    def create_founder_session(
+        self,
+        *,
+        actor: str = "shan",
+        ttl_seconds: int = 3600,
+        admin_secret: str | None = None,
+    ) -> dict[str, Any]:
+        from buildforme.founder_auth import (
+            load_or_create_admin_secret,
+            mint_session_tokens,
+            session_record,
+            verify_admin_secret,
+        )
+
+        if not verify_admin_secret(self.runtime_dir, admin_secret):
+            raise ValueError("invalid admin secret — founder authority cannot be self-minted")
+        token, token_hash, csrf, csrf_hash = mint_session_tokens()
+        record = session_record(
+            actor=actor,
+            token_hash=token_hash,
+            csrf_hash=csrf_hash,
+            ttl_seconds=ttl_seconds,
+        )
+        self.s6.create_founder_session_record(record)
+        # Ensure secret file exists for operators
+        load_or_create_admin_secret(self.runtime_dir)
+        return {
+            "token": token,
+            "csrf_token": csrf,
+            "actor": actor,
+            "expires_in": ttl_seconds,
+        }
 
     def validate_founder_token(self, token: str | None) -> dict[str, Any]:
-        if not token:
-            raise ValueError("founder authorization token required")
-        digest = __import__("hashlib").sha256(str(token).encode("utf-8")).hexdigest()
-        now = int(__import__("time").time())
-        data = self._load_object(
-            self.founder_sessions_path, default={"sessions": []}, list_key="sessions"
-        )
-        for item in data.get("sessions") or []:
-            if str(item.get("token_hash")) == digest and item.get("active", True):
-                if int(item.get("expires_at_epoch") or 0) < now:
-                    raise ValueError("founder authorization token expired")
-                return {"actor": item.get("actor") or "shan", "ok": True}
-        raise ValueError("founder authorization token invalid")
+        return self.s6.validate_founder_token(token)
 
     def get_execution_policy(self) -> dict[str, Any]:
         default = {
@@ -1361,19 +1216,15 @@ class LocalStore:
         return merged
 
     def list_runs(self, *, project_id: str | None = None) -> list[dict[str, Any]]:
-        data = self._load_object(self.runs_path, default={"runs": []}, list_key="runs")
-        runs = list(data.get("runs") or [])
-        if project_id is not None:
-            runs = [r for r in runs if str(r.get("project_id")) == str(project_id)]
-        return runs
+        return self.s6.list_runs(project_id=project_id)
 
     def get_run(self, run_id: str) -> dict[str, Any]:
-        for item in self.list_runs():
-            if str(item.get("id")) == str(run_id):
-                return item
-        raise KeyError(f"Run not found: {run_id}")
+        return self.s6.get_run(run_id)
 
     def save_run(self, run: dict[str, Any]) -> dict[str, Any]:
+        return self.s6.save_run(run)
+
+    def save_run_legacy_json(self, run: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(run, dict) or not run.get("id"):
             raise ValueError("run with id required")
         # Never persist provider secrets
@@ -1418,33 +1269,15 @@ class LocalStore:
         actor: str = "system",
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        event = {
-            "id": f"revt_{uuid.uuid4().hex[:12]}",
-            "run_id": run_id,
-            "event_type": str(event_type),
-            "summary": str(summary or ""),
-            "actor": str(actor or "system"),
-            "metadata": metadata if isinstance(metadata, dict) else {},
-            "created_at": utc_now_iso(),
-        }
-        data = self._load_object(self.run_events_path, default={"events": []}, list_key="events")
-        events = list(data.get("events") or [])
-        events.append(event)
-        if len(events) > 5000:
-            events = events[-5000:]
-        self._atomic_write(self.run_events_path, {"events": events})
-        return event
+        return self.s6.append_run_event(
+            run_id, event_type, summary, actor=actor, metadata=metadata
+        )
 
     def list_run_events(self, run_id: str) -> list[dict[str, Any]]:
-        data = self._load_object(self.run_events_path, default={"events": []}, list_key="events")
-        return [e for e in (data.get("events") or []) if str(e.get("run_id")) == str(run_id)]
+        return self.s6.list_run_events(run_id)
 
     def list_run_approvals(self, run_id: str | None = None) -> list[dict[str, Any]]:
-        data = self._load_object(self.run_approvals_path, default={"approvals": []}, list_key="approvals")
-        items = list(data.get("approvals") or [])
-        if run_id is None:
-            return items
-        return [a for a in items if str(a.get("run_id")) == str(run_id)]
+        return self.s6.list_run_approvals(run_id=run_id)
 
     def save_run_approval(self, payload: dict[str, Any]) -> dict[str, Any]:
         from buildforme.governance import validate_actor, validate_safe_id
@@ -1457,9 +1290,8 @@ class LocalStore:
             raise ValueError(f"decision must be one of {sorted(RUN_APPROVAL_DECISIONS)}")
         if requirement in {"merge_approval", "deployment_approval"} and decision == "approved":
             raise ValueError("merge/deployment approvals cannot be granted in Stage 5")
-        now = utc_now_iso()
         record = {
-            "id": str(payload.get("id") or f"rap_{uuid.uuid4().hex[:10]}"),
+            **payload,
             "run_id": validate_safe_id(payload.get("run_id"), field="run_id"),
             "requirement_type": requirement,
             "decision": decision,
@@ -1469,32 +1301,11 @@ class LocalStore:
             "actor": validate_actor(payload.get("actor") or "shan"),
             "packet_id": payload.get("packet_id"),
             "task_id": payload.get("task_id"),
-            # Stage 5.6 — approvals bind to constitution hash / lease
             "constitution_version": payload.get("constitution_version"),
             "constitution_hash": payload.get("constitution_hash"),
             "constitution_lease_id": payload.get("constitution_lease_id"),
-            "created_at": now,
-            "updated_at": now,
         }
-        if not record["run_id"]:
-            raise ValueError("run_id required")
-        approvals = self.list_run_approvals()
-        # upsert same requirement for run
-        updated = False
-        for index, existing in enumerate(approvals):
-            if (
-                str(existing.get("run_id")) == record["run_id"]
-                and str(existing.get("requirement_type")) == requirement
-            ):
-                record["id"] = existing.get("id") or record["id"]
-                record["created_at"] = existing.get("created_at") or now
-                approvals[index] = record
-                updated = True
-                break
-        if not updated:
-            approvals.append(record)
-        self._atomic_write(self.run_approvals_path, {"approvals": approvals})
-        return record
+        return self.s6.save_run_approval(record)
 
     # —— Internals ——
 

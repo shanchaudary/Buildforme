@@ -74,6 +74,17 @@ def assert_clean_or_allow(repo_root: Path, *, allow_dirty: bool = False) -> dict
     return {"dirty": dirty, "status": status.get("stdout") or ""}
 
 
+def default_workspace_root() -> Path:
+    """Buildforme-owned workspace root — outside supervised repositories."""
+    import os
+
+    override = os.environ.get("BUILDFORME_WORKSPACE_ROOT")
+    if override:
+        return Path(override).resolve()
+    local = os.environ.get("LOCALAPPDATA") or os.environ.get("HOME") or str(Path.home())
+    return (Path(local) / "Buildforme" / "workspaces").resolve()
+
+
 def create_isolated_worktree(
     *,
     repo_root: Path | None = None,
@@ -84,31 +95,28 @@ def create_isolated_worktree(
     run_id: str | None = None,
     allow_dirty_main: bool = False,
     allow_existing_branch: bool = False,
+    require_clean_parent: bool = True,
 ) -> dict[str, Any]:
     """Create a new feature branch worktree pinned to an approved baseline SHA.
 
-    Normal path: create a fresh branch from exact baseline_commit.
+    Workspaces are Buildforme-owned (outside target repos) by default.
     Existing branches fail closed unless allow_existing_branch and SHA matches.
     """
     root = resolve_repo_root(repo_root)
     branch = validate_feature_branch(branch)
-    # Parent tree may be dirty — execution uses an isolated worktree only.
-    # allow_dirty_main=False still records dirtiness but does not block (provider never
-    # mutates the founder working tree). Fail only when explicitly required via env.
-    parent_state = assert_clean_or_allow(root, allow_dirty=True)
-    if (
-        parent_state.get("dirty")
-        and not allow_dirty_main
-        and str(__import__("os").environ.get("BUILDFORME_REQUIRE_CLEAN_PARENT") or "").lower()
-        in {"1", "true", "yes"}
-    ):
+    import os
+
+    if str(os.environ.get("BUILDFORME_ALLOW_DIRTY_PARENT") or "").lower() in {"1", "true", "yes"}:
+        allow_dirty_main = True
+        require_clean_parent = False
+    parent_state = assert_clean_or_allow(root, allow_dirty=not require_clean_parent or allow_dirty_main)
+    if parent_state.get("dirty") and require_clean_parent and not allow_dirty_main:
         raise ValueError("repository working tree is dirty; refuse worktree create (fail closed)")
 
     if baseline_commit:
         if not re.fullmatch(r"[0-9a-f]{7,40}", str(baseline_commit)):
             raise ValueError("baseline_commit must be a full/short git SHA")
         baseline = str(baseline_commit)
-        # Normalize to full SHA
         full = _run_git(["rev-parse", baseline], cwd=root)
         if not full["ok"]:
             raise ValueError(f"baseline commit not found: {baseline}")
@@ -116,17 +124,23 @@ def create_isolated_worktree(
     else:
         baseline = get_baseline_commit(root, baseline_ref)
 
-    wt_root = Path(worktrees_root or (root / "runtime" / "worktrees")).resolve()
-    # Keep worktrees under runtime/
-    try:
-        wt_root.relative_to((root / "runtime").resolve())
-    except ValueError:
-        # Allow explicit runtime worktrees path even if different spelling
-        if "worktrees" not in str(wt_root):
-            raise ValueError("worktrees_root must be under repository runtime/worktrees")
+    # Buildforme-owned workspace outside the supervised repository
+    if worktrees_root is None:
+        repo_key = re.sub(r"[^A-Za-z0-9._-]+", "-", str(root).lower())[:48]
+        wt_root = default_workspace_root() / repo_key / str(run_id or uuid.uuid4().hex[:12])
+    else:
+        wt_root = Path(worktrees_root).resolve()
+        # Refuse putting workspaces inside the supervised repo
+        try:
+            wt_root.relative_to(root)
+            raise ValueError("worktrees_root must be outside the supervised repository")
+        except ValueError as exc:
+            if "outside the supervised" in str(exc):
+                raise
+            # relative_to failed → path is outside root — OK
+            pass
     wt_root.mkdir(parents=True, exist_ok=True)
-    rid = re.sub(r"[^A-Za-z0-9._-]", "-", str(run_id or uuid.uuid4().hex[:10]))[:40]
-    worktree_path = wt_root / f"{rid}-{branch.replace('/', '-')}"
+    worktree_path = wt_root / "worktree"
     if worktree_path.exists():
         raise ValueError(f"worktree path already exists: {worktree_path}")
 
@@ -172,6 +186,8 @@ def create_isolated_worktree(
         "on_main": False,
         "fresh_branch": not branch_exists["ok"],
         "parent_dirty": bool(parent_state.get("dirty")),
+        "workspace_root": str(wt_root),
+        "buildforme_owned_workspace": True,
     }
 
 

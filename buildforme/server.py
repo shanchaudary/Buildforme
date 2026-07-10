@@ -696,6 +696,7 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
                 return
+            auth = self._require_founder_mutation(payload)
             from buildforme.governance import parse_bool_strict
 
             control = self._store().set_execution_control(
@@ -703,7 +704,7 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
                     payload.get("kill_switch_active"), field="kill_switch_active"
                 ),
                 reason=str(payload.get("reason") or ""),
-                actor=str(payload.get("actor") or "shan"),
+                actor=str(payload.get("actor") or auth.get("actor") or "shan"),
             )
             self._json(HTTPStatus.OK, {"control": control})
         except Exception as exc:  # noqa: BLE001
@@ -731,6 +732,7 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
                 return
+            self._require_founder_mutation(payload)
             lock = self._store().create_repository_lock(payload)
             self._json(HTTPStatus.OK, {"lock": lock})
         except (json.JSONDecodeError, ValueError) as exc:
@@ -884,15 +886,11 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
 
     def _register_repository_binding(self) -> None:
         try:
-            if not self._same_origin_or_local():
-                self._json(HTTPStatus.FORBIDDEN, {"error": "cross-origin repository binding blocked"})
-                return
             payload = self._read_json()
             if not isinstance(payload, dict):
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
                 return
-            token = payload.get("founder_token") or self.headers.get("X-Buildforme-Founder-Token")
-            self._store().validate_founder_token(str(token) if token else None)
+            self._require_founder_mutation(payload)
             binding = self._store().register_repository_binding(payload)
             self._json(HTTPStatus.OK, {"binding": binding})
         except (ValueError, json.JSONDecodeError) as exc:
@@ -900,32 +898,65 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
 
     def _create_founder_session(self) -> None:
         try:
-            if not self._same_origin_or_local():
-                self._json(HTTPStatus.FORBIDDEN, {"error": "cross-origin founder session blocked"})
-                return
+            self._assert_loopback_host()
             payload = self._read_json() if int(self.headers.get("Content-Length") or 0) else {}
             if not isinstance(payload, dict):
                 payload = {}
-            # Local-only control plane: session mint requires explicit local actor claim
             actor = str(payload.get("actor") or "shan")
-            session = self._store().create_founder_session(actor=actor, ttl_seconds=int(payload.get("ttl_seconds") or 3600))
-            self._json(HTTPStatus.OK, {"session": session, "note": "token shown once; not stored in plaintext"})
+            admin_secret = payload.get("admin_secret") or self.headers.get("X-Buildforme-Admin-Secret")
+            session = self._store().create_founder_session(
+                actor=actor,
+                ttl_seconds=int(payload.get("ttl_seconds") or 3600),
+                admin_secret=str(admin_secret) if admin_secret else None,
+            )
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "session": session,
+                    "note": "token and csrf_token shown once; admin secret never returned",
+                },
+            )
         except (ValueError, json.JSONDecodeError) as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
+    def _assert_loopback_host(self) -> None:
+        from buildforme.founder_auth import validate_loopback_host, validate_origin
+
+        port = int(getattr(self.server, "server_port", 8787) or 8787)
+        host = self.headers.get("Host")
+        validate_loopback_host(host, configured_port=port)
+        origin = self.headers.get("Origin")
+        referer = self.headers.get("Referer")
+        if origin or referer:
+            validate_origin(origin, referer, host_header=host or "", configured_port=port)
+
+    def _require_founder_mutation(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Founder session + CSRF for execution-authority mutations."""
+        from buildforme.founder_auth import require_mutation_headers
+
+        self._assert_loopback_host()
+        payload = payload or {}
+        token = (
+            payload.get("founder_token")
+            or self.headers.get("X-Buildforme-Founder-Token")
+            or ""
+        )
+        auth = self._store().validate_founder_token(str(token) if token else None)
+        csrf = payload.get("csrf_token") or self.headers.get("X-Buildforme-CSRF")
+        require_mutation_headers(
+            content_type=self.headers.get("Content-Type"),
+            method=self.command,
+            csrf_header=str(csrf) if csrf else None,
+            session_csrf_hash=auth.get("csrf_token_hash"),
+        )
+        return auth
+
     def _same_origin_or_local(self) -> bool:
-        """Basic cross-origin protection for local mutating endpoints."""
-        origin = self.headers.get("Origin") or ""
-        referer = self.headers.get("Referer") or ""
-        host = self.headers.get("Host") or "127.0.0.1:8787"
-        if not origin and not referer:
-            # CLI / same-machine tools without browser Origin are allowed on loopback only
-            return host.startswith("127.0.0.1") or host.startswith("localhost")
-        allowed_prefixes = (f"http://{host}", f"https://{host}", "http://127.0.0.1", "http://localhost")
-        for value in (origin, referer):
-            if value and any(value.startswith(p) for p in allowed_prefixes):
-                return True
-        return False
+        try:
+            self._assert_loopback_host()
+            return True
+        except ValueError:
+            return False
 
     def _create_run(self) -> None:
         try:
@@ -957,6 +988,32 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 payload = {}
             store = self._store()
+            auth: dict[str, Any] = {"actor": "shan"}
+            # Founder gate for all execution-authority mutations (dry_run mode dry-run is exempt)
+            needs_founder = action in {
+                "preflight",
+                "approve",
+                "reject",
+                "execute",
+                "supervised",
+                "review",
+                "cancel",
+                "retry",
+                "dry-run",
+            }
+            if action == "dry-run":
+                try:
+                    peek = store.get_run(run_id)
+                    if str(peek.get("execution_mode") or "dry_run") == "dry_run":
+                        needs_founder = False
+                except KeyError:
+                    pass
+            if needs_founder:
+                try:
+                    auth = self._require_founder_mutation(payload)
+                except ValueError as exc:
+                    self._json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
+                    return
             if action == "preflight":
                 result = run_preflight(store, run_id)
                 self._json(HTTPStatus.OK, result)
@@ -968,7 +1025,7 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
                     requirement_type=str(payload.get("requirement_type") or "shan_task_approval"),
                     decision="approved",
                     note=str(payload.get("note") or ""),
-                    actor=str(payload.get("actor") or "shan"),
+                    actor=str(payload.get("actor") or auth.get("actor") or "shan"),
                 )
                 self._json(HTTPStatus.OK, result)
                 return
@@ -979,7 +1036,7 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
                     requirement_type=str(payload.get("requirement_type") or "shan_task_approval"),
                     decision="rejected",
                     note=str(payload.get("note") or ""),
-                    actor=str(payload.get("actor") or "shan"),
+                    actor=str(payload.get("actor") or auth.get("actor") or "shan"),
                 )
                 self._json(HTTPStatus.OK, result)
                 return
@@ -988,17 +1045,6 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.OK, result)
                 return
             if action in {"execute", "supervised"}:
-                # Local mutating execution requires founder authorization token
-                token = (
-                    payload.get("founder_token")
-                    or self.headers.get("X-Buildforme-Founder-Token")
-                    or ""
-                )
-                try:
-                    store.validate_founder_token(str(token) if token else None)
-                except ValueError as exc:
-                    self._json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
-                    return
                 if payload.get("repo_root") or payload.get("local_path"):
                     self._json(
                         HTTPStatus.BAD_REQUEST,
@@ -1011,16 +1057,6 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.OK, result)
                 return
             if action == "review":
-                token = (
-                    payload.get("founder_token")
-                    or self.headers.get("X-Buildforme-Founder-Token")
-                    or ""
-                )
-                try:
-                    auth = store.validate_founder_token(str(token) if token else None)
-                except ValueError as exc:
-                    self._json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
-                    return
                 result = founder_review_decision(
                     store,
                     run_id,
@@ -1035,7 +1071,7 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
                 run = cancel_run(
                     store,
                     run_id,
-                    actor=str(payload.get("actor") or "shan"),
+                    actor=str(payload.get("actor") or auth.get("actor") or "shan"),
                     reason=str(payload.get("reason") or ""),
                 )
                 self._json(HTTPStatus.OK, {"run": run})

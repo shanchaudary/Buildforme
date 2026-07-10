@@ -467,7 +467,7 @@ def run_execute_command(args: argparse.Namespace) -> int:
     from buildforme.execution_service import execute_supervised
     from buildforme.storage import LocalStore
 
-    result = execute_supervised(LocalStore(args.state), args.run_id, repo_root=args.repo)
+    result = execute_supervised(LocalStore(args.state), args.run_id)
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
     return 0 if result.get("run", {}).get("status") in {"needs_review", "completed"} else 2
 
@@ -497,6 +497,21 @@ def run_evidence_command(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     print(json.dumps(evidence, indent=2, sort_keys=True, default=str))
+    return 0
+
+
+def register_repo_command(args: argparse.Namespace) -> int:
+    from buildforme.storage import LocalStore
+
+    store = LocalStore(args.state)
+    binding = store.register_repository_binding(
+        {
+            "repository": args.repository,
+            "local_path": args.path,
+            "project_id": args.project,
+        }
+    )
+    print(json.dumps(binding, indent=2, sort_keys=True))
     return 0
 
 
@@ -638,8 +653,14 @@ def build_parser() -> argparse.ArgumentParser:
     rexe = subparsers.add_parser("run-execute", help="Execute approved live_supervised run in isolated worktree")
     rexe.add_argument("run_id")
     rexe.add_argument("--state", default="runtime/buildforme_state.json")
-    rexe.add_argument("--repo", default=None, help="Repository root (default: cwd git root)")
     rexe.set_defaults(func=run_execute_command)
+
+    rbind = subparsers.add_parser("register-repo", help="Register local path for a project repository identity")
+    rbind.add_argument("--repository", required=True, help="owner/name")
+    rbind.add_argument("--path", required=True, help="absolute local git path")
+    rbind.add_argument("--project", default=None)
+    rbind.add_argument("--state", default="runtime/buildforme_state.json")
+    rbind.set_defaults(func=register_repo_command)
 
     rrev = subparsers.add_parser("run-review", help="Founder review decision after supervised execution")
     rrev.add_argument("run_id")

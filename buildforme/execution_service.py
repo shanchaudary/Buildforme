@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any  # noqa: I001
 
 from buildforme.adapters.dry_run import DryRunAdapter
 from buildforme.adapters.registry import get_adapter
@@ -26,7 +26,10 @@ from buildforme.governance import (
     validate_capabilities,
     validate_safe_id,
 )
+from buildforme.provider_discovery import health_check_provider
 from buildforme.providers import get_provider
+from buildforme.redaction import redact_event, redact_text
+from buildforme.repository_binding import pin_baseline, resolve_registered_repository
 from buildforme.review_gate import apply_founder_review_decision, build_review_package
 from buildforme.run_state import can_transition, is_terminal, transition_run
 from buildforme.storage import LocalStore, utc_now_iso
@@ -35,7 +38,6 @@ from buildforme.worktree import (
     collect_diff,
     create_isolated_worktree,
     remove_worktree,
-    resolve_repo_root,
 )
 from governance.constitution_binding_guard import validate_approval_binding
 from governance.constitution_engine import get_engine
@@ -153,6 +155,11 @@ def create_run(store: LocalStore, payload: dict[str, Any]) -> dict[str, Any]:
     branch = validate_branch(
         payload.get("target_branch") or (packet or {}).get("target_branch") or ""
     )
+    # Reject untrusted filesystem path authority from payload
+    if payload.get("repo_root") or payload.get("repository_root") or payload.get("local_path"):
+        raise ValueError(
+            "repo_root/local_path cannot authorize execution; register repository binding on the project"
+        )
 
     requested = payload.get("requested_capabilities")
     if not isinstance(requested, list) or not requested:
@@ -177,6 +184,24 @@ def create_run(store: LocalStore, payload: dict[str, Any]) -> dict[str, Any]:
     run_id = str(payload.get("id") or f"run-{uuid.uuid4().hex[:12]}")
     validate_safe_id(run_id, field="run_id")
 
+    # Pin repository + baseline BEFORE lease/scope/approval (Stage 6 hard requirement)
+    repository_local_path = None
+    baseline_commit = None
+    baseline_ref = str(payload.get("baseline_ref") or "HEAD")
+    if execution_mode == "live_supervised":
+        binding = resolve_registered_repository(store, project=project)
+        if canonicalize_repository(str(binding.get("repository"))) != repository:
+            # Project repository is authority
+            repository = canonicalize_repository(str(binding.get("repository")))
+        repository_local_path = str(binding.get("local_path"))
+        pinned = pin_baseline(Path(repository_local_path), baseline_ref=baseline_ref)
+        baseline_commit = pinned["baseline_commit"]
+        baseline_ref = pinned["baseline_ref"]
+    else:
+        # Dry-run may omit local binding; baseline optional
+        baseline_commit = payload.get("baseline_commit")
+        repository_local_path = payload.get("repository_local_path")
+
     now = utc_now_iso()
     run = {
         "id": run_id,
@@ -186,6 +211,9 @@ def create_run(store: LocalStore, payload: dict[str, Any]) -> dict[str, Any]:
         "packet": packet,
         "provider_id": provider_id,
         "repository": repository,
+        "repository_local_path": repository_local_path,
+        "baseline_ref": baseline_ref,
+        "baseline_commit": baseline_commit,
         "target_branch": branch,
         "operating_mode": mode,
         "risk": risk,
@@ -215,6 +243,7 @@ def create_run(store: LocalStore, payload: dict[str, Any]) -> dict[str, Any]:
         "verification": None,
         "review": None,
         "task_lock_id": None,
+        "evidence_ids": [],
     }
     # Task lock only for live supervised runs (duplicate work protection)
     if execution_mode == "live_supervised" and (payload.get("task_id") or packet_id):
@@ -634,10 +663,11 @@ def execute_dry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
     }
 
 
-def execute_supervised(store: LocalStore, run_id: str, *, repo_root: str | Path | None = None) -> dict[str, Any]:
+def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
     """Stage 6 live supervised provider execution in an isolated worktree.
 
-    Provider cannot mark final acceptance. Ends in needs_review with evidence + verification.
+    Repository root comes only from registered project binding + approved baseline SHA.
+    Provider cannot mark final acceptance.
     """
     run_id = validate_safe_id(run_id, field="run_id")
     run = store.get_run(run_id)
@@ -645,8 +675,19 @@ def execute_supervised(store: LocalStore, run_id: str, *, repo_root: str | Path 
         raise ValueError("run execution_mode must be live_supervised (use run-dry-run for dry_run)")
     if str(run.get("status")) not in {"approved", "queued"}:
         raise ValueError(f"run must be approved before supervised execution (status={run.get('status')})")
+    if not run.get("baseline_commit"):
+        raise ValueError("run missing approved baseline_commit — recreate run to pin baseline before approval")
+    if not run.get("repository_local_path"):
+        raise ValueError("run missing repository_local_path binding")
 
     _require_canonical_run_lease(store, run)
+    # Re-validate approvals against current scope (includes baseline SHA)
+    current_fp = compute_run_scope_fingerprint(
+        run, run.get("packet") if isinstance(run.get("packet"), dict) else None
+    )
+    if run.get("scope_fingerprint") and str(run.get("scope_fingerprint")) != current_fp:
+        raise ValueError("approval scope stale: run scope fingerprint changed (baseline/packet/provider)")
+
     pre = evaluate_run_preflight(run, store)
     if not pre.get("passed"):
         if can_transition(str(run.get("status")), "blocked"):
@@ -659,12 +700,8 @@ def execute_supervised(store: LocalStore, run_id: str, *, repo_root: str | Path 
     if control.get("kill_switch_active"):
         raise ValueError("kill switch active")
 
-    # Approvals revalidation
     required = list(run.get("approval_requirements") or [])
     if required:
-        current_fp = compute_run_scope_fingerprint(
-            run, run.get("packet") if isinstance(run.get("packet"), dict) else None
-        )
         approvals = store.list_run_approvals(run_id=run_id)
         approved = _current_approved_types(approvals, run, current_fp, fail_on_invalid=True)
         missing = [r for r in required if r not in approved]
@@ -681,6 +718,13 @@ def execute_supervised(store: LocalStore, run_id: str, *, repo_root: str | Path 
     if not ack["valid"]:
         raise ValueError("provider constitution acknowledgement invalid: " + "; ".join(ack["problems"]))
 
+    # Live-ready requires verified auth (unknown is not enough)
+    health = health_check_provider(provider_id, provider)
+    if not health.get("live_ready"):
+        raise ValueError(
+            "provider not live-ready: " + "; ".join(health.get("unsupported_reasons") or ["unavailable"])
+        )
+
     packet = run.get("packet") if isinstance(run.get("packet"), dict) else {}
     if not packet and run.get("packet_id"):
         try:
@@ -693,55 +737,69 @@ def execute_supervised(store: LocalStore, run_id: str, *, repo_root: str | Path 
     if not prep.get("prepared"):
         raise ValueError("adapter prepare failed: " + "; ".join(prep.get("problems") or ["unknown"]))
 
-    # Worktree isolation
-    root = resolve_repo_root(repo_root) if repo_root else resolve_repo_root()
+    root = Path(str(run["repository_local_path"])).resolve()
+    approved_baseline = str(run["baseline_commit"])
+    # Unique branch per run to avoid collisions
+    base_branch = str(run.get("target_branch") or "feature/run")
+    if not base_branch.startswith("feature/"):
+        base_branch = f"feature/{base_branch}"
+    run_branch = f"{base_branch.rstrip('/')}-{run_id[-8:]}"
+
     worktree_meta = create_isolated_worktree(
         repo_root=root,
-        branch=str(run.get("target_branch")),
-        baseline_ref="HEAD",
+        branch=run_branch,
+        baseline_commit=approved_baseline,
         worktrees_root=root / "runtime" / "worktrees",
         run_id=run_id,
         allow_dirty_main=False,
+        allow_existing_branch=False,
     )
+    # Never overwrite approved baseline with a different SHA
+    if str(worktree_meta.get("baseline_commit")) != approved_baseline:
+        raise ValueError("worktree baseline does not match approved baseline")
     run["worktree"] = worktree_meta
-    run["baseline_commit"] = worktree_meta.get("baseline_commit")
     run["worktree_path"] = worktree_meta.get("worktree_path")
-    run["provider_version"] = (prep.get("health") or {}).get("version")
+    run["execution_branch"] = run_branch
+    run["provider_version"] = (prep.get("health") or {}).get("version") or health.get("version")
     run = transition_run(run, "queued", "system", "live supervised queued")
-    run = transition_run(run, "starting", "system", "worktree ready")
+    run = transition_run(run, "starting", "system", "worktree ready at approved baseline")
     run = transition_run(run, "running", "system", "provider launching")
     store.save_run(run)
     store.append_run_event(
         run_id,
         "supervised_started",
-        f"Live supervised execution via {provider_id}",
+        redact_text(f"Live supervised execution via {provider_id}"),
         actor="system",
         metadata={
             "worktree": worktree_meta.get("worktree_path"),
-            "baseline": worktree_meta.get("baseline_commit"),
+            "baseline": approved_baseline,
+            "branch": run_branch,
             "constitution_lease_id": run.get("constitution_lease_id"),
         },
     )
 
     def on_event(event: dict[str, Any]) -> None:
-        # Re-check kill switch during execution
         if store.get_execution_control().get("kill_switch_active"):
             try:
                 adapter.cancel(run_id)
             except Exception:
                 pass
         try:
+            cleaned = redact_event(event if isinstance(event, dict) else {"message": str(event)})
             store.append_run_event(
                 run_id,
-                str(event.get("type") or "process_event"),
-                str(event.get("message") or "")[:500],
+                str(cleaned.get("type") or "process_event"),
+                redact_text(str(cleaned.get("message") or ""))[:500],
                 actor="system",
-                metadata={k: v for k, v in event.items() if k not in {"message", "type"} and k != "stdout"},
+                metadata={
+                    k: v
+                    for k, v in cleaned.items()
+                    if k not in {"message", "type"} and k != "stdout"
+                },
             )
         except Exception:
             pass
 
-    process_result: dict[str, Any]
     try:
         if store.get_execution_control().get("kill_switch_active"):
             raise ValueError("kill switch active during start")
@@ -753,45 +811,45 @@ def execute_supervised(store: LocalStore, run_id: str, *, repo_root: str | Path 
         )
     except Exception as exc:
         run = store.get_run(run_id)
-        run = transition_run(run, "failed", "system", str(exc)[:300])
+        if can_transition(str(run.get("status")), "failed"):
+            run = transition_run(run, "failed", "system", redact_text(str(exc)[:300]))
         store.save_run(run)
-        store.append_run_event(run_id, "supervised_failed", str(exc)[:500], actor="system")
+        store.append_run_event(run_id, "supervised_failed", redact_text(str(exc)[:500]), actor="system")
         _release_run_locks(store, run)
         raise
 
     run = store.get_run(run_id)
     if process_result.get("cancelled") or str(run.get("status")) == "cancel_requested":
-        if can_transition(str(run.get("status")), "cancelled") or str(run.get("status")) == "running":
-            if str(run.get("status")) == "running":
-                run = transition_run(run, "cancel_requested", "system", "cancelled during execution")
-            if can_transition(str(run.get("status")), "cancelled"):
-                run = transition_run(run, "cancelled", "system", "provider process cancelled")
+        if str(run.get("status")) == "running" and can_transition("running", "cancel_requested"):
+            run = transition_run(run, "cancel_requested", "system", "cancelled during execution")
+        if can_transition(str(run.get("status")), "cancelled"):
+            run = transition_run(run, "cancelled", "system", "provider process cancelled")
         run["process_result"] = process_result
         store.save_run(run)
         _release_run_locks(store, run)
         return {"run": run, "process": process_result, "cancelled": True}
 
     if process_result.get("timed_out"):
-        run = transition_run(run, "timed_out", "system", "provider timeout")
+        if can_transition(str(run.get("status")), "timed_out"):
+            run = transition_run(run, "timed_out", "system", "provider timeout")
         run["process_result"] = process_result
         store.save_run(run)
         _release_run_locks(store, run)
         return {"run": run, "process": process_result, "timed_out": True}
 
     if process_result.get("unavailable"):
-        run = transition_run(run, "failed", "system", process_result.get("error") or "provider unavailable")
+        if can_transition(str(run.get("status")), "failed"):
+            run = transition_run(
+                run, "failed", "system", process_result.get("error") or "provider unavailable"
+            )
         run["process_result"] = process_result
         store.save_run(run)
         _release_run_locks(store, run)
         return {"run": run, "process": process_result, "unavailable": True}
 
-    if not process_result.get("ok") and process_result.get("exit_code") not in (0, None):
-        # Still collect evidence / verification for review
-        pass
-
     diff = collect_diff(
         Path(worktree_meta["worktree_path"]),
-        baseline_commit=worktree_meta.get("baseline_commit"),
+        baseline_commit=approved_baseline,
     )
     try:
         project = store.get_project(str(run.get("project_id")))
@@ -803,27 +861,14 @@ def execute_supervised(store: LocalStore, run_id: str, *, repo_root: str | Path 
         packet=packet,
         project=project,
         worktree_path=worktree_meta["worktree_path"],
-        baseline_commit=worktree_meta.get("baseline_commit"),
+        baseline_commit=approved_baseline,
         process_result=process_result,
         budget=run.get("budget") if isinstance(run.get("budget"), dict) else None,
     )
-    evidence = build_evidence_bundle(
-        run=run,
-        packet=packet,
-        process_result=process_result,
-        worktree=worktree_meta,
-        diff=diff,
-        provider_health=process_result.get("health") or prep.get("health") or {},
-        verification=verification,
-        events=store.list_run_events(run_id),
-    )
-    store.save_run_evidence(evidence)
-
-    # Constitutional validation of output claims
     validation = engine.validate_output(
         {
-            "summary": process_result.get("stdout", "")[:2000],
-            "text": (process_result.get("stdout") or "")[:4000],
+            "summary": redact_text((process_result.get("stdout") or "")[:2000]),
+            "text": redact_text((process_result.get("stdout") or "")[:4000]),
             "claims_complete": bool(process_result.get("ok")),
             "evidence": ["process_supervisor", "worktree_diff", "verification"],
             "tests": ["deterministic_verification"],
@@ -843,12 +888,27 @@ def execute_supervised(store: LocalStore, run_id: str, *, repo_root: str | Path 
             lease_id=str(run.get("constitution_lease_id") or "") or None,
         )
 
+    evidence = build_evidence_bundle(
+        run=run,
+        packet=packet,
+        process_result=process_result,
+        worktree=worktree_meta,
+        diff=diff,
+        provider_health=process_result.get("health") or prep.get("health") or health,
+        verification=verification,
+        events=store.list_run_events(run_id),
+        constitution_result=validation,
+        attempt=int(run.get("attempt") or 0) + 1,
+    )
+    saved_evidence = store.save_run_evidence(evidence)
+
     review = build_review_package(
         run=run,
-        evidence=evidence,
+        evidence=saved_evidence,
         verification=verification,
         constitution_validation=validation,
     )
+    # Attach review into a follow-up evidence record is optional; keep one primary record
 
     run = store.get_run(run_id)
     _require_canonical_run_lease(store, run)
@@ -860,15 +920,23 @@ def execute_supervised(store: LocalStore, run_id: str, *, repo_root: str | Path 
         "ok": process_result.get("ok"),
         "truncated_stdout": process_result.get("truncated_stdout"),
         "truncated_stderr": process_result.get("truncated_stderr"),
+        "cleanup_ok": process_result.get("cleanup_ok"),
+        "env_names": process_result.get("env_names") or [],
     }
     run["evidence"] = {
-        "evidence_fingerprint": evidence.get("evidence_fingerprint"),
-        "files_changed": evidence.get("files_changed"),
-        "file_count": evidence.get("file_count"),
+        "evidence_id": saved_evidence.get("evidence_id"),
+        "evidence_fingerprint": saved_evidence.get("evidence_fingerprint"),
+        "files_changed": saved_evidence.get("files_changed"),
+        "file_count": saved_evidence.get("file_count"),
+        "changed_file_manifest": saved_evidence.get("changed_file_manifest"),
+        "process": saved_evidence.get("process"),
     }
+    ids = list(run.get("evidence_ids") or [])
+    ids.append(saved_evidence.get("evidence_id"))
+    run["evidence_ids"] = ids
     run["verification"] = verification
     run["review"] = review
-    run["result_summary"] = (
+    run["result_summary"] = redact_text(
         f"Supervised run finished exit={process_result.get('exit_code')} "
         f"verify_passed={verification.get('passed')} review={review.get('status')}"
     )
@@ -882,16 +950,8 @@ def execute_supervised(store: LocalStore, run_id: str, *, repo_root: str | Path 
         lease=run.get("constitution_lease") if isinstance(run.get("constitution_lease"), dict) else None,
     )
 
-    # Provider cannot self-complete: always needs_review (or failed/blocked)
-    if not verification.get("passed") or not validation.get("passed", True):
-        if process_result.get("ok") is False and process_result.get("exit_code") not in (0, None):
-            if can_transition(str(run.get("status")), "failed"):
-                # Prefer needs_review so founder sees evidence even on failure
-                pass
-        run = transition_run(run, "needs_review", "system", "verification or constitution issues — review required")
-    else:
+    if str(run.get("status")) == "running" and can_transition("running", "needs_review"):
         run = transition_run(run, "needs_review", "system", "provider finished — founder review required")
-
     saved = store.save_run(run)
     store.append_run_event(
         run_id,
@@ -902,13 +962,13 @@ def execute_supervised(store: LocalStore, run_id: str, *, repo_root: str | Path 
             "verification_passed": verification.get("passed"),
             "review_status": review.get("status"),
             "files_changed": evidence.get("file_count"),
+            "evidence_id": saved_evidence.get("evidence_id"),
         },
     )
-    # Keep worktree for review; do not auto-remove (cleanup is explicit)
     return {
         "run": saved,
         "process": process_result,
-        "evidence": evidence,
+        "evidence": saved_evidence,
         "verification": verification,
         "review": review,
         "constitution_validation": validation,
@@ -924,32 +984,59 @@ def founder_review_decision(
     actor: str = "shan",
     cleanup_worktree: bool = False,
 ) -> dict[str, Any]:
-    """Founder decision after Stage 6 review. Never merges or deploys."""
+    """Founder decision after Stage 6 review. Never merges or deploys. Hard blocks reject accept."""
     run = store.get_run(validate_safe_id(run_id, field="run_id"))
     actor = validate_actor(actor)
     if str(run.get("status")) not in {"needs_review", "completed", "blocked"}:
         if is_terminal(str(run.get("status"))) and str(run.get("status")) != "completed":
             raise ValueError(f"cannot decide terminal status {run.get('status')}")
-    result = apply_founder_review_decision(run, decision=decision, note=note, actor=actor)
+
+    evidence = run.get("evidence") if isinstance(run.get("evidence"), dict) else {}
+    try:
+        evidence = store.get_run_evidence(run_id)
+    except KeyError:
+        pass
+    verification = run.get("verification") if isinstance(run.get("verification"), dict) else {}
+
+    result = apply_founder_review_decision(
+        run,
+        decision=decision,
+        note=note,
+        actor=actor,
+        evidence=evidence,
+        verification=verification,
+    )
     run["review"] = result["review"]
     next_status = result["next_status"]
     current = str(run.get("status"))
     if next_status != current and can_transition(current, next_status):
         run = transition_run(run, next_status, actor, note or decision)
-    elif next_status == "completed" and current == "needs_review" and can_transition("needs_review", "completed"):
+    elif next_status == "completed" and current == "needs_review" and can_transition(
+        "needs_review", "completed"
+    ):
         run = transition_run(run, "completed", actor, note or decision)
     elif next_status == "rejected" and can_transition(current, "rejected"):
         run = transition_run(run, "rejected", actor, note or decision)
     elif next_status == "blocked" and can_transition(current, "blocked"):
         run = transition_run(run, "blocked", actor, note or decision)
     saved = store.save_run(run)
-    store.append_run_event(run_id, "founder_review_decision", f"{decision}: {note}", actor=actor)
-    if cleanup_worktree and saved.get("worktree_path"):
+    store.append_run_event(
+        run_id,
+        "founder_review_decision",
+        redact_text(f"{decision}: {note}"),
+        actor=actor,
+    )
+    if cleanup_worktree and saved.get("worktree_path") and saved.get("repository_local_path"):
         try:
-            root = resolve_repo_root()
-            remove_worktree(repo_root=root, worktree_path=Path(str(saved["worktree_path"])), force=True)
+            remove_worktree(
+                repo_root=Path(str(saved["repository_local_path"])),
+                worktree_path=Path(str(saved["worktree_path"])),
+                force=True,
+            )
         except Exception as exc:
-            store.append_run_event(run_id, "worktree_cleanup_failed", str(exc)[:300], actor="system")
+            store.append_run_event(
+                run_id, "worktree_cleanup_failed", redact_text(str(exc)[:300]), actor="system"
+            )
     _release_run_locks(store, saved)
     return {"run": store.get_run(run_id), "decision": decision}
 

@@ -128,6 +128,9 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/providers":
             self._json(HTTPStatus.OK, {"providers": self._store().list_providers()})
             return
+        if path == "/api/repository-bindings":
+            self._json(HTTPStatus.OK, {"bindings": self._store().list_repository_bindings()})
+            return
         if path == "/api/providers/health":
             from buildforme.provider_discovery import discover_all_providers
 
@@ -327,6 +330,12 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/runs":
             self._create_run()
+            return
+        if path == "/api/repository-bindings":
+            self._register_repository_binding()
+            return
+        if path == "/api/founder/session":
+            self._create_founder_session()
             return
         if path.startswith("/api/runs/") and path.endswith("/preflight"):
             self._run_action(path, "preflight")
@@ -873,6 +882,51 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
+    def _register_repository_binding(self) -> None:
+        try:
+            if not self._same_origin_or_local():
+                self._json(HTTPStatus.FORBIDDEN, {"error": "cross-origin repository binding blocked"})
+                return
+            payload = self._read_json()
+            if not isinstance(payload, dict):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
+                return
+            token = payload.get("founder_token") or self.headers.get("X-Buildforme-Founder-Token")
+            self._store().validate_founder_token(str(token) if token else None)
+            binding = self._store().register_repository_binding(payload)
+            self._json(HTTPStatus.OK, {"binding": binding})
+        except (ValueError, json.JSONDecodeError) as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def _create_founder_session(self) -> None:
+        try:
+            if not self._same_origin_or_local():
+                self._json(HTTPStatus.FORBIDDEN, {"error": "cross-origin founder session blocked"})
+                return
+            payload = self._read_json() if int(self.headers.get("Content-Length") or 0) else {}
+            if not isinstance(payload, dict):
+                payload = {}
+            # Local-only control plane: session mint requires explicit local actor claim
+            actor = str(payload.get("actor") or "shan")
+            session = self._store().create_founder_session(actor=actor, ttl_seconds=int(payload.get("ttl_seconds") or 3600))
+            self._json(HTTPStatus.OK, {"session": session, "note": "token shown once; not stored in plaintext"})
+        except (ValueError, json.JSONDecodeError) as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def _same_origin_or_local(self) -> bool:
+        """Basic cross-origin protection for local mutating endpoints."""
+        origin = self.headers.get("Origin") or ""
+        referer = self.headers.get("Referer") or ""
+        host = self.headers.get("Host") or "127.0.0.1:8787"
+        if not origin and not referer:
+            # CLI / same-machine tools without browser Origin are allowed on loopback only
+            return host.startswith("127.0.0.1") or host.startswith("localhost")
+        allowed_prefixes = (f"http://{host}", f"https://{host}", "http://127.0.0.1", "http://localhost")
+        for value in (origin, referer):
+            if value and any(value.startswith(p) for p in allowed_prefixes):
+                return True
+        return False
+
     def _create_run(self) -> None:
         try:
             payload = self._read_json()
@@ -934,16 +988,45 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.OK, result)
                 return
             if action in {"execute", "supervised"}:
-                result = execute_supervised(store, run_id, repo_root=payload.get("repo_root"))
+                # Local mutating execution requires founder authorization token
+                token = (
+                    payload.get("founder_token")
+                    or self.headers.get("X-Buildforme-Founder-Token")
+                    or ""
+                )
+                try:
+                    store.validate_founder_token(str(token) if token else None)
+                except ValueError as exc:
+                    self._json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
+                    return
+                if payload.get("repo_root") or payload.get("local_path"):
+                    self._json(
+                        HTTPStatus.BAD_REQUEST,
+                        {
+                            "error": "repo_root is not accepted; runs use registered repository bindings only",
+                        },
+                    )
+                    return
+                result = execute_supervised(store, run_id)
                 self._json(HTTPStatus.OK, result)
                 return
             if action == "review":
+                token = (
+                    payload.get("founder_token")
+                    or self.headers.get("X-Buildforme-Founder-Token")
+                    or ""
+                )
+                try:
+                    auth = store.validate_founder_token(str(token) if token else None)
+                except ValueError as exc:
+                    self._json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
+                    return
                 result = founder_review_decision(
                     store,
                     run_id,
                     decision=str(payload.get("decision") or ""),
                     note=str(payload.get("note") or ""),
-                    actor=str(payload.get("actor") or "shan"),
+                    actor=str(payload.get("actor") or auth.get("actor") or "shan"),
                     cleanup_worktree=bool(payload.get("cleanup_worktree")),
                 )
                 self._json(HTTPStatus.OK, result)

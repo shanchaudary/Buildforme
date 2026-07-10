@@ -155,7 +155,9 @@ class CliProviderAdapter:
                 argv=argv,
                 cwd=worktree_path,
                 timeout_seconds=max(30, timeout_min * 60),
+                provider_id=self.provider_id,
                 on_event=on_event,
+                use_provider_env_allowlist=True,
             )
             result["provider_id"] = self.provider_id
             result["transport"] = "cli"

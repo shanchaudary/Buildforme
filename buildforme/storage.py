@@ -38,6 +38,8 @@ DEFAULT_CONSTITUTION_LEASES_NAME = "constitution_leases.json"
 DEFAULT_CONSTITUTION_VIOLATIONS_NAME = "constitution_violations.json"
 DEFAULT_TASK_LOCKS_NAME = "task_locks.json"
 DEFAULT_EVIDENCE_NAME = "run_evidence.json"
+DEFAULT_REPO_BINDINGS_NAME = "repository_bindings.json"
+DEFAULT_FOUNDER_SESSIONS_NAME = "founder_sessions.json"
 
 LOCK_SCOPES = {"all", "write", "merge", "production", "branch"}
 PROJECT_EXEC_STATUSES = {"enabled", "paused", "locked"}
@@ -145,6 +147,9 @@ class LocalStore:
         self.constitution_violations_path = self.runtime_dir / DEFAULT_CONSTITUTION_VIOLATIONS_NAME
         self.task_locks_path = self.runtime_dir / DEFAULT_TASK_LOCKS_NAME
         self.evidence_path = self.runtime_dir / DEFAULT_EVIDENCE_NAME
+        self.repo_bindings_path = self.runtime_dir / DEFAULT_REPO_BINDINGS_NAME
+        self.founder_sessions_path = self.runtime_dir / DEFAULT_FOUNDER_SESSIONS_NAME
+        self._io_lock = __import__("threading").RLock()
 
     # —— Tasks (existing API) ——
 
@@ -1164,30 +1169,31 @@ class LocalStore:
         return locks
 
     def create_task_lock(self, payload: dict[str, Any]) -> dict[str, Any]:
-        locks = self.list_task_locks()
-        record = {
-            "id": str(payload.get("id") or f"tlock-{uuid.uuid4().hex[:10]}"),
-            "task_key": str(payload.get("task_key") or "").strip(),
-            "project_id": payload.get("project_id"),
-            "run_id": payload.get("run_id"),
-            "reason": str(payload.get("reason") or ""),
-            "active": True,
-            "created_at": utc_now_iso(),
-            "released_at": None,
-        }
-        if not record["task_key"]:
-            raise ValueError("task_key required")
-        for existing in locks:
-            if (
-                existing.get("active", True)
-                and not existing.get("released_at")
-                and str(existing.get("task_key")) == record["task_key"]
-                and str(existing.get("project_id") or "") == str(record.get("project_id") or "")
-            ):
-                raise ValueError(f"task lock already active: {record['task_key']}")
-        locks.insert(0, record)
-        self._atomic_write(self.task_locks_path, {"locks": locks[:500]})
-        return record
+        with self._io_lock:
+            locks = self.list_task_locks()
+            record = {
+                "id": str(payload.get("id") or f"tlock-{uuid.uuid4().hex[:10]}"),
+                "task_key": str(payload.get("task_key") or "").strip(),
+                "project_id": payload.get("project_id"),
+                "run_id": payload.get("run_id"),
+                "reason": str(payload.get("reason") or ""),
+                "active": True,
+                "created_at": utc_now_iso(),
+                "released_at": None,
+            }
+            if not record["task_key"]:
+                raise ValueError("task_key required")
+            for existing in locks:
+                if (
+                    existing.get("active", True)
+                    and not existing.get("released_at")
+                    and str(existing.get("task_key")) == record["task_key"]
+                    and str(existing.get("project_id") or "") == str(record.get("project_id") or "")
+                ):
+                    raise ValueError(f"task lock already active: {record['task_key']}")
+            locks.insert(0, record)
+            self._atomic_write(self.task_locks_path, {"locks": locks[:500]})
+            return record
 
     def release_task_lock(self, lock_id: str, *, reason: str = "") -> dict[str, Any]:
         locks = self.list_task_locks()
@@ -1205,31 +1211,131 @@ class LocalStore:
         return found
 
     def save_run_evidence(self, evidence: dict[str, Any]) -> dict[str, Any]:
-        data = self._load_object(self.evidence_path, default={"evidence": []}, list_key="evidence")
-        items = list(data.get("evidence") or [])
-        record = dict(evidence)
-        record.setdefault("id", f"ev-{uuid.uuid4().hex[:12]}")
-        record.setdefault("saved_at", utc_now_iso())
-        # upsert by run_id
-        rid = str(record.get("run_id") or "")
-        replaced = False
-        if rid:
-            for idx, existing in enumerate(items):
-                if str(existing.get("run_id")) == rid:
-                    items[idx] = record
-                    replaced = True
-                    break
-        if not replaced:
+        """Append-only evidence. Never overwrite an existing evidence_id or prior attempt."""
+        with self._io_lock:
+            data = self._load_object(self.evidence_path, default={"evidence": []}, list_key="evidence")
+            items = list(data.get("evidence") or [])
+            record = dict(evidence)
+            eid = str(record.get("evidence_id") or record.get("id") or f"ev-{uuid.uuid4().hex[:12]}")
+            record["evidence_id"] = eid
+            record["id"] = eid
+            record.setdefault("saved_at", utc_now_iso())
+            record.setdefault("immutable", True)
+            # Reject mutation of existing evidence_id
+            for existing in items:
+                if str(existing.get("evidence_id") or existing.get("id")) == eid:
+                    raise ValueError(f"evidence mutation forbidden: {eid} is append-only")
+            # Sequence per run
+            rid = str(record.get("run_id") or "")
+            prior = [x for x in items if str(x.get("run_id")) == rid]
+            record.setdefault("sequence", len(prior) + 1)
+            record.setdefault("attempt", record.get("attempt") or len(prior) + 1)
+            if prior:
+                record.setdefault(
+                    "parent_evidence_id",
+                    prior[0].get("evidence_id") or prior[0].get("id"),
+                )
             items.insert(0, record)
-        self._atomic_write(self.evidence_path, {"evidence": items[:500]})
-        return record
+            self._atomic_write(self.evidence_path, {"evidence": items[:1000]})
+            return record
 
     def get_run_evidence(self, run_id: str) -> dict[str, Any]:
+        """Return latest evidence record for run."""
+        items = self.list_run_evidence(run_id=run_id, limit=1)
+        if not items:
+            raise KeyError(f"Evidence not found for run: {run_id}")
+        return items[0]
+
+    def list_run_evidence(self, *, run_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         data = self._load_object(self.evidence_path, default={"evidence": []}, list_key="evidence")
-        for item in data.get("evidence") or []:
-            if str(item.get("run_id")) == str(run_id):
+        items = list(data.get("evidence") or [])
+        if run_id is not None:
+            items = [x for x in items if str(x.get("run_id")) == str(run_id)]
+        return items[: max(1, min(500, int(limit)))]
+
+    def register_repository_binding(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._io_lock:
+            data = self._load_object(
+                self.repo_bindings_path, default={"bindings": []}, list_key="bindings"
+            )
+            bindings = list(data.get("bindings") or [])
+            repo = str(payload.get("repository") or "").strip()
+            local_path = str(payload.get("local_path") or "").strip()
+            if not repo or not local_path:
+                raise ValueError("repository and local_path required")
+            # Dedup by repository — one binding authority
+            record = {
+                "id": str(payload.get("id") or f"rbind-{uuid.uuid4().hex[:10]}"),
+                "repository": repo,
+                "local_path": local_path,
+                "project_id": payload.get("project_id"),
+                "created_at": utc_now_iso(),
+                "updated_at": utc_now_iso(),
+            }
+            out = []
+            replaced = False
+            for item in bindings:
+                if str(item.get("repository")).lower() == repo.lower():
+                    record["id"] = item.get("id") or record["id"]
+                    record["created_at"] = item.get("created_at") or record["created_at"]
+                    out.append(record)
+                    replaced = True
+                else:
+                    # Also reject same path for different repo
+                    if str(item.get("local_path")) == local_path and str(item.get("repository")).lower() != repo.lower():
+                        raise ValueError("local_path already bound to another repository")
+                    out.append(item)
+            if not replaced:
+                out.insert(0, record)
+            self._atomic_write(self.repo_bindings_path, {"bindings": out[:200]})
+            return record
+
+    def list_repository_bindings(self) -> list[dict[str, Any]]:
+        data = self._load_object(
+            self.repo_bindings_path, default={"bindings": []}, list_key="bindings"
+        )
+        return list(data.get("bindings") or [])
+
+    def get_repository_binding(self, repository: str) -> dict[str, Any] | None:
+        key = str(repository or "").strip().lower()
+        for item in self.list_repository_bindings():
+            if str(item.get("repository") or "").strip().lower() == key:
                 return item
-        raise KeyError(f"Evidence not found for run: {run_id}")
+        return None
+
+    def create_founder_session(self, *, actor: str = "shan", ttl_seconds: int = 3600) -> dict[str, Any]:
+        with self._io_lock:
+            token = uuid.uuid4().hex
+            record = {
+                "token_hash": __import__("hashlib").sha256(token.encode("utf-8")).hexdigest(),
+                "actor": actor,
+                "created_at": utc_now_iso(),
+                "expires_at_epoch": int(__import__("time").time()) + max(60, int(ttl_seconds)),
+                "active": True,
+            }
+            data = self._load_object(
+                self.founder_sessions_path, default={"sessions": []}, list_key="sessions"
+            )
+            sessions = list(data.get("sessions") or [])
+            sessions.insert(0, {k: v for k, v in record.items()})
+            self._atomic_write(self.founder_sessions_path, {"sessions": sessions[:50]})
+            # Return plaintext token once only
+            return {"token": token, "actor": actor, "expires_in": ttl_seconds}
+
+    def validate_founder_token(self, token: str | None) -> dict[str, Any]:
+        if not token:
+            raise ValueError("founder authorization token required")
+        digest = __import__("hashlib").sha256(str(token).encode("utf-8")).hexdigest()
+        now = int(__import__("time").time())
+        data = self._load_object(
+            self.founder_sessions_path, default={"sessions": []}, list_key="sessions"
+        )
+        for item in data.get("sessions") or []:
+            if str(item.get("token_hash")) == digest and item.get("active", True):
+                if int(item.get("expires_at_epoch") or 0) < now:
+                    raise ValueError("founder authorization token expired")
+                return {"actor": item.get("actor") or "shan", "ok": True}
+        raise ValueError("founder authorization token invalid")
 
     def get_execution_policy(self) -> dict[str, Any]:
         default = {

@@ -8,9 +8,11 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
+from buildforme.changed_files import collect_changed_file_manifest
+from buildforme.redaction import contains_secret_marker, redact_text
 from buildforme.storage import utc_now_iso
 from buildforme.verification_profile import profile_from_project
-from buildforme.worktree import collect_diff, worktree_status
+from buildforme.worktree import worktree_status
 
 SECRET_PATTERNS = [
     re.compile(r"(?i)api[_-]?key\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{16,}"),
@@ -19,6 +21,8 @@ SECRET_PATTERNS = [
     re.compile(r"-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----"),
     re.compile(r"(?i)ghp_[A-Za-z0-9]{20,}"),
     re.compile(r"(?i)xox[baprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bsk-ant-[A-Za-z0-9\-_]{20,}\b"),
 ]
 
 FAKE_SUCCESS_MARKERS = [
@@ -44,7 +48,7 @@ def verify_run_result(
     process_result: dict[str, Any] | None,
     budget: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Independently inspect repo state and run configured checks."""
+    """Independently inspect repo state using the canonical changed-file manifest."""
     packet = packet or {}
     process_result = process_result or {}
     budget = budget or run.get("budget") or {}
@@ -60,11 +64,12 @@ def verify_run_result(
         elif status == "warning":
             warnings.append(f"{name}: {detail}")
 
-    # Process outcome
     if process_result.get("cancelled"):
         add("process_exit", "fail", "process was cancelled")
     elif process_result.get("timed_out"):
         add("process_exit", "fail", "process timed out")
+    elif process_result.get("cleanup_ok") is False:
+        add("process_cleanup", "fail", "process-tree cleanup incomplete")
     elif process_result.get("exit_code") not in (0, None) and process_result.get("exit_code") is not None:
         add("process_exit", "fail", f"nonzero exit {process_result.get('exit_code')}")
     elif process_result.get("exit_code") == 0:
@@ -72,7 +77,6 @@ def verify_run_result(
     else:
         add("process_exit", "warning", "no process result")
 
-    # Worktree / branch integrity
     wt = Path(worktree_path) if worktree_path else None
     if not wt or not wt.exists():
         add("worktree_exists", "fail", "worktree path missing")
@@ -89,23 +93,37 @@ def verify_run_result(
     else:
         add("branch_integrity", "pass", branch or "unknown")
 
-    if baseline_commit and st.get("head_commit"):
-        add("baseline_recorded", "pass", f"baseline={baseline_commit[:12]} head={str(st['head_commit'])[:12]}")
+    approved_baseline = str(baseline_commit or run.get("baseline_commit") or "")
+    if approved_baseline and st.get("head_commit"):
+        # HEAD may advance with commits; baseline must still be ancestor or equal for integrity of pin
+        add(
+            "baseline_recorded",
+            "pass",
+            f"baseline={approved_baseline[:12]} head={str(st['head_commit'])[:12]}",
+        )
     else:
-        add("baseline_recorded", "warning", "baseline/head incomplete")
+        add("baseline_recorded", "fail", "baseline/head incomplete")
 
-    diff = collect_diff(wt, baseline_commit=baseline_commit)
-    files = list(diff.get("files_changed") or [])
-    # Also dirty unstaged already included in collect_diff
+    # Canonical changed-file collection
+    try:
+        manifest = collect_changed_file_manifest(wt, baseline_commit=approved_baseline or None)
+        if not manifest.get("complete"):
+            add("changed_file_manifest", "fail", "manifest incomplete")
+        else:
+            add("changed_file_manifest", "pass", f"{manifest.get('file_count')} files")
+    except Exception as exc:
+        add("changed_file_manifest", "fail", str(exc)[:200])
+        manifest = {"files": [], "files_changed": [], "file_count": 0, "complete": False}
 
-    # Provider claimed completion without diff
+    files_meta = list(manifest.get("files") or [])
+    files = list(manifest.get("files_changed") or [])
+
     claims_complete = bool(run.get("provider_claims_complete") or process_result.get("claims_complete"))
     if claims_complete and not files and process_result.get("exit_code") == 0:
         add("completion_without_diff", "fail", "provider claims complete but no files changed")
     else:
         add("completion_without_diff", "pass", f"files_changed={len(files)}")
 
-    # Scope / path policy
     allowed = list(packet.get("allowed_files") or ["**"])
     forbidden = list(packet.get("forbidden_files") or profile.get("forbidden_paths") or [])
     for path in files:
@@ -118,26 +136,32 @@ def verify_run_result(
     if not any(c["name"] == "allowed_path" and c["status"] == "fail" for c in checks):
         add("allowed_path", "pass", "paths within scope or unrestricted")
 
-    # Diff limits / budget
     max_files = int(budget.get("max_files_changed") or 50)
     if len(files) > max_files:
         add("diff_budget", "fail", f"{len(files)} files > max {max_files}")
     else:
         add("diff_budget", "pass", f"{len(files)}/{max_files} files")
 
-    # Secret detection in changed files (bounded)
     secret_hits = []
-    for rel in files[:80]:
+    for rec in files_meta[:120]:
+        rel = str(rec.get("path") or "")
         full = wt / rel
-        if not full.is_file():
+        if rec.get("symlink_escapes"):
+            add("symlink_escape", "fail", f"symlink escapes worktree: {rel}")
+        if not full.is_file() and not full.is_symlink():
+            continue
+        if full.is_symlink():
             continue
         try:
             text = full.read_text(encoding="utf-8", errors="replace")[:200_000]
         except OSError:
             continue
+        if contains_secret_marker(text):
+            secret_hits.append(rel)
         for pat in SECRET_PATTERNS:
             if pat.search(text):
-                secret_hits.append(rel)
+                if rel not in secret_hits:
+                    secret_hits.append(rel)
                 break
         for pat in FAKE_SUCCESS_MARKERS:
             if pat.search(text):
@@ -152,35 +176,41 @@ def verify_run_result(
     else:
         add("secret_detection", "pass", "no secret patterns in sampled changed files")
 
-    # Symlink escape (worktree-local)
-    for rel in files[:80]:
-        full = wt / rel
-        try:
-            if full.is_symlink():
-                target = full.resolve()
-                if not str(target).startswith(str(wt.resolve())):
-                    add("symlink_escape", "fail", f"symlink escapes worktree: {rel}")
-        except OSError:
-            pass
     if not any(c["name"] == "symlink_escape" and c["status"] == "fail" for c in checks):
         add("symlink_escape", "pass", "no symlink escape detected")
 
-    # Dependency change awareness
-    dep_files = [f for f in files if Path(f).name in {
-        "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
-        "requirements.txt", "pyproject.toml", "Pipfile", "Pipfile.lock", "go.mod", "go.sum",
-        "Cargo.toml", "Cargo.lock",
-    }]
+    dep_files = [
+        f
+        for f in files
+        if Path(f).name
+        in {
+            "package.json",
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "requirements.txt",
+            "pyproject.toml",
+            "Pipfile",
+            "Pipfile.lock",
+            "go.mod",
+            "go.sum",
+            "Cargo.toml",
+            "Cargo.lock",
+        }
+    ]
     if dep_files:
         add("dependency_changes", "warning", f"dependency manifests changed: {', '.join(dep_files)}")
     else:
         add("dependency_changes", "pass", "no dependency manifests changed")
 
-    # Run repository verification commands from profile (generic)
     test_cmd = profile.get("test_command")
     test_result = None
     if test_cmd:
-        test_result = _run_command(list(test_cmd), cwd=wt, timeout=min(600, int(run.get("timeout_minutes") or 30) * 60))
+        test_result = _run_command(
+            list(test_cmd),
+            cwd=wt,
+            timeout=min(600, int(run.get("timeout_minutes") or 30) * 60),
+        )
         if test_result["ok"]:
             add("tests", "pass", "test_command exited 0")
         else:
@@ -203,7 +233,6 @@ def verify_run_result(
         else:
             add(label, "fail", f"{key} failed exit={res.get('exit_code')}")
 
-    # Provider refusal / malformed heuristics
     stderr = str(process_result.get("stderr") or "")
     stdout = str(process_result.get("stdout") or "")
     combined = (stdout + "\n" + stderr).lower()
@@ -215,7 +244,25 @@ def verify_run_result(
     if process_result.get("truncated_stdout") or process_result.get("truncated_stderr"):
         add("output_truncation", "warning", "process output hit capture limits (marked, not silent)")
 
-    return _result(checks, blocking, warnings, diff, profile, test_result=test_result)
+    # Baseline mismatch if required
+    if approved_baseline and run.get("baseline_commit") and str(run.get("baseline_commit")) != approved_baseline:
+        add("baseline_match", "fail", "run baseline does not match verification baseline")
+
+    return _result(
+        checks,
+        blocking,
+        warnings,
+        {
+            "files_changed": files,
+            "file_count": len(files),
+            "diff_stat": manifest.get("diff_stat") or "",
+            "manifest": manifest,
+            "manifest_fingerprint": manifest.get("manifest_fingerprint"),
+            "complete": bool(manifest.get("complete")),
+        },
+        profile,
+        test_result=test_result,
+    )
 
 
 def _result(
@@ -233,10 +280,12 @@ def _result(
         "blocking_reasons": blocking,
         "warnings": warnings,
         "diff": diff,
+        "changed_file_manifest": diff.get("manifest") if isinstance(diff, dict) else None,
         "profile_id": profile.get("profile_id"),
         "test_result": test_result,
         "verified_at": utc_now_iso(),
         "independent_of_provider_claims": True,
+        "hard_block": not passed,
     }
 
 
@@ -248,8 +297,12 @@ def _matches_any(path: str, globs: list[str]) -> bool:
             return True
         if fnmatch(path, g) or fnmatch(path, g.lstrip("/")):
             return True
-        # prefix directory style "docs/**"
-        if g.endswith("/**") and path.startswith(g[:-3]):
+        if g.endswith("/**") and (path.startswith(g[:-3]) or path.startswith(g[:-3].lstrip("./"))):
+            return True
+        # basename match for .env style
+        if g.startswith("**/") and fnmatch(path, g[3:]):
+            return True
+        if Path(path).name == g or Path(path).name == g.lstrip("*/"):
             return True
     return False
 
@@ -270,11 +323,11 @@ def _run_command(argv: list[str], *, cwd: Path, timeout: int) -> dict[str, Any]:
         return {
             "ok": proc.returncode == 0,
             "exit_code": proc.returncode,
-            "stdout_preview": (proc.stdout or "")[:2000],
-            "stderr_preview": (proc.stderr or "")[:2000],
-            "argv": argv,
+            "stdout_preview": redact_text((proc.stdout or "")[:2000]),
+            "stderr_preview": redact_text((proc.stderr or "")[:2000]),
+            "argv": list(argv),
         }
     except subprocess.TimeoutExpired:
-        return {"ok": False, "exit_code": 124, "error": "timeout", "argv": argv}
+        return {"ok": False, "exit_code": 124, "error": "timeout", "argv": list(argv)}
     except OSError as exc:
-        return {"ok": False, "exit_code": None, "error": str(exc), "argv": argv}
+        return {"ok": False, "exit_code": None, "error": str(exc), "argv": list(argv)}

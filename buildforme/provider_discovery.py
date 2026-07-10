@@ -118,18 +118,14 @@ def health_check_provider(
     constitution_ack = bool(record.get("constitution_acknowledged"))
     auth_ready = _auth_readiness(pid, disc.get("executable"))
 
-    # Live readiness: executable + version probe + enabled + constitution ack
-    # Authentication may be unknown without claiming configured secrets.
+    # Live readiness requires proven auth readiness — unknown is NOT live-ready.
     live_ready = bool(
         disc["available"]
         and version.get("version_ok")
         and enabled
         and constitution_ack
-        and auth_ready.get("status") in {"ready", "unknown"}
+        and auth_ready.get("status") == "ready"
     )
-    # unknown auth still allows attempt if CLI present; missing auth is not ready
-    if auth_ready.get("status") == "missing":
-        live_ready = False
 
     unsupported_reasons: list[str] = []
     if not disc["available"]:
@@ -142,10 +138,15 @@ def health_check_provider(
         unsupported_reasons.append("constitution not acknowledged")
     if auth_ready.get("status") == "missing":
         unsupported_reasons.append("authentication not ready")
+    elif auth_ready.get("status") == "unknown":
+        unsupported_reasons.append("authentication unknown (not treated as live-ready)")
 
-    status = "available" if live_ready else ("discovered" if disc["available"] else "unavailable")
-    if unsupported_reasons and disc["available"]:
-        status = "degraded" if live_ready else "unavailable"
+    if live_ready:
+        status = "available"
+    elif disc["available"]:
+        status = "discovered"
+    else:
+        status = "unavailable"
 
     return {
         "provider_id": pid,
@@ -183,25 +184,32 @@ def discover_all_providers(
 
 
 def _auth_readiness(provider_id: str, executable: str | None) -> dict[str, Any]:
-    """Coarse auth readiness without secret material.
+    """Auth readiness without secret material.
 
-    Stage 6: if executable exists we report unknown (CLI may use OS keychain).
-    If missing, report missing. Never store or echo credentials.
+    ready   = approved env marker present (value never stored)
+    missing = no executable
+    unknown = executable present but auth not verified — NOT live-ready
     """
     if not executable:
         return {"status": "missing", "detail": "no executable to authenticate"}
-    # Optional env presence checks (boolean only — never values)
     env_hints = {
         "codex": ["OPENAI_API_KEY", "CODEX_API_KEY"],
         "claude": ["ANTHROPIC_API_KEY"],
         "grok": ["XAI_API_KEY", "GROK_API_KEY"],
         "glm": ["ZHIPUAI_API_KEY", "GLM_API_KEY"],
     }
-    present = any(os.environ.get(k) for k in env_hints.get(provider_id, []))
+    present = any(bool(os.environ.get(k)) for k in env_hints.get(provider_id, []))
     if present:
-        return {"status": "ready", "detail": "auth environment marker present (value not read into storage)"}
-    # CLI may use interactive/login cache — honest unknown
-    return {"status": "unknown", "detail": "no env auth marker; CLI login cache may still work"}
+        return {
+            "status": "ready",
+            "detail": "auth environment marker present (value not read into storage)",
+            "marker_names": [k for k in env_hints.get(provider_id, []) if os.environ.get(k)],
+        }
+    return {
+        "status": "unknown",
+        "detail": "no verified auth marker; CLI login cache not accepted as live-ready",
+        "marker_names": [],
+    }
 
 
 def _looks_secret(line: str) -> bool:

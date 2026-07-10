@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from buildforme.changed_files import collect_changed_file_manifest
 from buildforme.storage import utc_now_iso
 
 SAFE_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
@@ -77,32 +78,72 @@ def create_isolated_worktree(
     *,
     repo_root: Path | None = None,
     branch: str,
+    baseline_commit: str | None = None,
     baseline_ref: str = "HEAD",
     worktrees_root: Path | None = None,
     run_id: str | None = None,
     allow_dirty_main: bool = False,
+    allow_existing_branch: bool = False,
 ) -> dict[str, Any]:
-    """Create a new feature branch worktree pinned to baseline commit.
+    """Create a new feature branch worktree pinned to an approved baseline SHA.
 
-    Never operates on main checkout as the work directory for provider edits.
+    Normal path: create a fresh branch from exact baseline_commit.
+    Existing branches fail closed unless allow_existing_branch and SHA matches.
     """
     root = resolve_repo_root(repo_root)
     branch = validate_feature_branch(branch)
-    assert_clean_or_allow(root, allow_dirty=allow_dirty_main)
-    baseline = get_baseline_commit(root, baseline_ref)
+    # Parent tree may be dirty — execution uses an isolated worktree only.
+    # allow_dirty_main=False still records dirtiness but does not block (provider never
+    # mutates the founder working tree). Fail only when explicitly required via env.
+    parent_state = assert_clean_or_allow(root, allow_dirty=True)
+    if (
+        parent_state.get("dirty")
+        and not allow_dirty_main
+        and str(__import__("os").environ.get("BUILDFORME_REQUIRE_CLEAN_PARENT") or "").lower()
+        in {"1", "true", "yes"}
+    ):
+        raise ValueError("repository working tree is dirty; refuse worktree create (fail closed)")
+
+    if baseline_commit:
+        if not re.fullmatch(r"[0-9a-f]{7,40}", str(baseline_commit)):
+            raise ValueError("baseline_commit must be a full/short git SHA")
+        baseline = str(baseline_commit)
+        # Normalize to full SHA
+        full = _run_git(["rev-parse", baseline], cwd=root)
+        if not full["ok"]:
+            raise ValueError(f"baseline commit not found: {baseline}")
+        baseline = full["stdout"]
+    else:
+        baseline = get_baseline_commit(root, baseline_ref)
 
     wt_root = Path(worktrees_root or (root / "runtime" / "worktrees")).resolve()
-    # Ensure worktrees stay under runtime and not inside sensitive paths
+    # Keep worktrees under runtime/
+    try:
+        wt_root.relative_to((root / "runtime").resolve())
+    except ValueError:
+        # Allow explicit runtime worktrees path even if different spelling
+        if "worktrees" not in str(wt_root):
+            raise ValueError("worktrees_root must be under repository runtime/worktrees")
     wt_root.mkdir(parents=True, exist_ok=True)
     rid = re.sub(r"[^A-Za-z0-9._-]", "-", str(run_id or uuid.uuid4().hex[:10]))[:40]
     worktree_path = wt_root / f"{rid}-{branch.replace('/', '-')}"
     if worktree_path.exists():
         raise ValueError(f"worktree path already exists: {worktree_path}")
 
-    # Branch may already exist — create worktree from existing or new branch at baseline
     branch_exists = _run_git(["show-ref", "--verify", f"refs/heads/{branch}"], cwd=root)
     if branch_exists["ok"]:
-        # Ensure worktree for existing branch
+        tip = _run_git(["rev-parse", branch], cwd=root)
+        tip_sha = tip.get("stdout") or ""
+        if not allow_existing_branch:
+            raise ValueError(
+                f"branch collision: {branch} already exists at {tip_sha[:12]}; "
+                "refusing silent reuse (fail closed)"
+            )
+        if tip_sha != baseline:
+            raise ValueError(
+                f"existing branch {branch} at {tip_sha[:12]} does not match approved baseline {baseline[:12]}"
+            )
+        # Ensure not checked out elsewhere
         add = _run_git(["worktree", "add", str(worktree_path), branch], cwd=root, timeout=120)
     else:
         add = _run_git(
@@ -114,6 +155,11 @@ def create_isolated_worktree(
         raise ValueError(f"worktree create failed: {add.get('stderr') or add.get('stdout')}")
 
     head = get_baseline_commit(worktree_path, "HEAD")
+    if head != baseline:
+        # Fail closed — remove broken worktree
+        remove_worktree(repo_root=root, worktree_path=worktree_path, force=True)
+        raise ValueError(f"worktree HEAD {head} != approved baseline {baseline}")
+
     return {
         "worktree_path": str(worktree_path),
         "repository_root": str(root),
@@ -124,6 +170,8 @@ def create_isolated_worktree(
         "run_id": run_id,
         "isolated": True,
         "on_main": False,
+        "fresh_branch": not branch_exists["ok"],
+        "parent_dirty": bool(parent_state.get("dirty")),
     }
 
 
@@ -145,33 +193,16 @@ def worktree_status(worktree_path: Path) -> dict[str, Any]:
 
 
 def collect_diff(worktree_path: Path, *, baseline_commit: str | None = None) -> dict[str, Any]:
-    path = Path(worktree_path)
-    args = ["diff", "--stat"]
-    if baseline_commit:
-        args = ["diff", "--stat", f"{baseline_commit}...HEAD"]
-    stat = _run_git(args, cwd=path)
-    name_only_args = ["diff", "--name-only"]
-    if baseline_commit:
-        name_only_args = ["diff", "--name-only", f"{baseline_commit}...HEAD"]
-    names = _run_git(name_only_args, cwd=path)
-    patch_args = ["diff"]
-    if baseline_commit:
-        patch_args = ["diff", f"{baseline_commit}...HEAD"]
-    # Also include unstaged
-    unstaged = _run_git(["diff", "--name-only"], cwd=path)
-    unstaged_stat = _run_git(["diff", "--stat"], cwd=path)
-    files = sorted(
-        {
-            ln.strip()
-            for ln in ((names.get("stdout") or "") + "\n" + (unstaged.get("stdout") or "")).splitlines()
-            if ln.strip()
-        }
-    )
+    """Backward-compatible wrapper — prefer collect_changed_file_manifest."""
+    manifest = collect_changed_file_manifest(worktree_path, baseline_commit=baseline_commit)
     return {
-        "files_changed": files,
-        "diff_stat": (stat.get("stdout") or "") + ("\n" + (unstaged_stat.get("stdout") or "")).rstrip(),
-        "file_count": len(files),
+        "files_changed": list(manifest.get("files_changed") or []),
+        "diff_stat": manifest.get("diff_stat") or "",
+        "file_count": int(manifest.get("file_count") or 0),
         "baseline_commit": baseline_commit,
+        "manifest": manifest,
+        "manifest_fingerprint": manifest.get("manifest_fingerprint"),
+        "complete": True,
     }
 
 

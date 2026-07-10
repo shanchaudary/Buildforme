@@ -9,11 +9,19 @@ from buildforme.execution_store import (
     PROTECTED_AUTHORITY_FIELDS,
     _MUTATION_ALLOWED_EDGES,
     _MUTATION_ALLOWED_EXECUTION_MODES,
+    _MUTATION_ALLOWED_STATUSES,
     _MUTATION_ALLOW_SAME_STATE,
 )
 
 
 class Packet5AMutationPolicyContractTests(unittest.TestCase):
+    def test_policy_tables_cover_exactly_the_same_mutation_types(self):
+        mutation_types = set(MUTATION_METADATA_ALLOWLISTS)
+        self.assertEqual(set(_MUTATION_ALLOWED_STATUSES), mutation_types)
+        self.assertEqual(set(_MUTATION_ALLOWED_EDGES), mutation_types)
+        self.assertEqual(set(_MUTATION_ALLOWED_EXECUTION_MODES), mutation_types)
+        self.assertLessEqual(set(_MUTATION_ALLOW_SAME_STATE), mutation_types)
+
     def test_no_mutation_allowlist_contains_protected_authority(self):
         for mutation_type, allowed_fields in MUTATION_METADATA_ALLOWLISTS.items():
             overlap = set(allowed_fields) & set(PROTECTED_AUTHORITY_FIELDS)

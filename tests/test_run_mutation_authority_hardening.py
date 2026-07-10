@@ -326,5 +326,71 @@ class RunMutationAuthorityHardeningTests(unittest.TestCase):
             )
 
 
+    def test_metadata_mutation_types_cannot_claim_completion_edges(self):
+        cases = {
+            "process_result": ("process_result", {"ok": True}),
+            "verification_result": ("verification", {"passed": True}),
+            "execution_evidence_link": ("evidence", {"evidence_id": "ev"}),
+            "review_package": ("review", {"status": "review_required"}),
+        }
+        for index, (mutation_type, (field, value)) in enumerate(cases.items()):
+            run_id = f"run-edge-policy-{index}"
+            self._make_run(run_id, status="running")
+            run = self.store.get_run(run_id)
+            version = run["row_version"]
+            run[field] = value
+            run["status"] = "completed"
+            with self.assertRaisesRegex(ValueError, "does not authorize transition edge"):
+                self._commit(run, mutation_type=mutation_type)
+            stored = self.store.get_run(run_id)
+            self.assertEqual(stored["status"], "running")
+            self.assertEqual(stored["row_version"], version)
+            self.assertEqual(self.store.list_run_events(run_id), [])
+
+    def test_generic_status_transition_cannot_bypass_review(self):
+        self._make_run("run-generic-edge", status="running")
+        run = self.store.get_run("run-generic-edge")
+        version = run["row_version"]
+        run["status"] = "completed"
+        with self.assertRaisesRegex(ValueError, "does not authorize transition edge"):
+            self._commit(run, mutation_type="status_transition")
+        stored = self.store.get_run("run-generic-edge")
+        self.assertEqual(stored["status"], "running")
+        self.assertEqual(stored["row_version"], version)
+        self.assertEqual(self.store.list_run_events("run-generic-edge"), [])
+
+    def test_transition_only_mutation_cannot_be_used_same_state(self):
+        self._make_run("run-transition-same", status="draft", started_at=None)
+        run = self.store.get_run("run-transition-same")
+        with self.assertRaisesRegex(ValueError, "requires an authorized status transition"):
+            self._commit(run, mutation_type="status_transition")
+
+    def test_failure_and_cancel_edges_remain_authorized(self):
+        self._make_run("run-failure-edge", status="running")
+        failed = self.store.get_run("run-failure-edge")
+        failed["status"] = "failed"
+        failed["process_result"] = {"ok": False, "error": "provider failed"}
+        failed = self._commit(
+            failed,
+            mutation_type="failure_detail",
+            event_type="supervised_failed",
+        )
+        self.assertEqual(failed["status"], "failed")
+        self.assertTrue(failed["finished_at"])
+
+        self._make_run("run-cancel-edge", status="running")
+        cancelled = self.store.get_run("run-cancel-edge")
+        cancelled["status"] = "cancelled"
+        cancelled["process_result"] = {"cancelled": True}
+        cancelled = self._commit(
+            cancelled,
+            mutation_type="cancel",
+            event_type="supervised_cancelled",
+            transition_path=["running", "cancel_requested", "cancelled"],
+        )
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(len(cancelled["status_history"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -175,6 +175,86 @@ _MUTATION_ALLOWED_STATUSES: dict[str, frozenset[str]] = {
     ),
 }
 
+# A mutation type authorizes only its own lifecycle edges. Passing a valid
+# mutation label must never become a generic state-transition capability.
+_MUTATION_ALLOWED_EDGES: dict[str, frozenset[tuple[str, str]]] = {
+    "preflight_result": frozenset(
+        {
+            ("awaiting_preflight", "preflight_failed"),
+            ("awaiting_preflight", "awaiting_approval"),
+            ("awaiting_preflight", "approved"),
+            ("awaiting_preflight", "blocked"),
+            ("awaiting_approval", "approved"),
+            ("awaiting_approval", "blocked"),
+            ("approved", "blocked"),
+            ("queued", "blocked"),
+        }
+    ),
+    "worktree_prepared": frozenset(),
+    "process_started": frozenset(
+        {
+            ("approved", "queued"),
+            ("queued", "starting"),
+            ("starting", "running"),
+        }
+    ),
+    "process_result": frozenset(),
+    "verification_result": frozenset(),
+    "execution_evidence_link": frozenset(),
+    "review_package": frozenset(),
+    "constitution_compliance": frozenset(),
+    "failure_detail": frozenset(
+        {
+            ("approved", "blocked"),
+            ("queued", "failed"),
+            ("starting", "failed"),
+            ("running", "failed"),
+            ("running", "timed_out"),
+            ("cancel_requested", "failed"),
+        }
+    ),
+    "supervised_finished": frozenset({("running", "needs_review")}),
+    "dry_run_finished": frozenset(
+        {
+            ("running", "needs_review"),
+            ("needs_review", "completed"),
+        }
+    ),
+    "status_transition": frozenset({("draft", "awaiting_preflight")}),
+    "cancel": frozenset(
+        {
+            ("draft", "rejected"),
+            ("draft", "blocked"),
+            ("awaiting_preflight", "blocked"),
+            ("awaiting_approval", "rejected"),
+            ("awaiting_approval", "blocked"),
+            ("approved", "rejected"),
+            ("approved", "blocked"),
+            ("queued", "cancel_requested"),
+            ("starting", "cancel_requested"),
+            ("running", "cancel_requested"),
+            ("cancel_requested", "cancelled"),
+            ("needs_review", "rejected"),
+            ("needs_review", "blocked"),
+        }
+    ),
+}
+
+# Metadata-only mutation classes that may commit without a state edge.
+_MUTATION_ALLOW_SAME_STATE: frozenset[str] = frozenset(
+    {
+        "preflight_result",
+        "worktree_prepared",
+        "process_result",
+        "verification_result",
+        "execution_evidence_link",
+        "review_package",
+        "constitution_compliance",
+        "failure_detail",
+    }
+)
+
+
 def _values_equal(left: Any, right: Any) -> bool:
     if left is right:
         return True
@@ -443,6 +523,23 @@ class Stage6Store:
                     edges.append((db_status, new_status))
             elif transition_path is not None:
                 raise ValueError("transition_path is forbidden for a same-state mutation")
+
+            if edges:
+                allowed_edges = _MUTATION_ALLOWED_EDGES[mutation_type]
+                forbidden_edges = [edge for edge in edges if edge not in allowed_edges]
+                if forbidden_edges:
+                    rendered = ", ".join(
+                        f"{previous} → {resulting}"
+                        for previous, resulting in forbidden_edges
+                    )
+                    raise ValueError(
+                        f"mutation_type {mutation_type!r} does not authorize "
+                        f"transition edge(s): {rendered}"
+                    )
+            elif mutation_type not in _MUTATION_ALLOW_SAME_STATE:
+                raise ValueError(
+                    f"mutation_type {mutation_type!r} requires an authorized status transition"
+                )
 
             # Apply a change set to canonical storage state; never replace the
             # database payload with the caller snapshot.

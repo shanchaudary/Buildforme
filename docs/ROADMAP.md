@@ -129,54 +129,45 @@ Objective:
 - Append-only run events, approvals, budgets/timeouts
 - No live provider calls
 
-## Stage 6 — Supervised Live Agent Adapter Pilot
+## Stage 5.6 — AI Constitution & Governance Engine
 
-Next. One provider only, GREEN/YELLOW, feature branch, no merge/deploy.
+Status: implemented on main.
 
-## Stage 7 — Approval Queue and Expanded Kill Switch
+## Stage 6 — Multi-Provider Supervised Execution
 
-Objective:
+Status: in progress on `stage-6-multi-provider-supervised-execution`.
 
-- Give the owner a dashboard that clearly separates auto-runnable work from blocked human decisions.
+**Complete integrated stage** (not pilot-only / not one-provider-only):
 
-Tasks:
+- Provider discovery, health, recommendation for Codex / Claude / Grok / GLM CLI
+- Provider-neutral adapter contract + real adapter modules for all four
+- Isolated worktrees, locks, process supervision, cancellation, timeouts
+- Constitutional binding (append-only leases)
+- Evidence + deterministic verification + review-required outcomes
+- CLI / API / UI integration
+- Adversarial and failure-path tests
 
-- Add approval queue views.
-- Add `PAUSED` repository state.
-- Add kill-switch state file.
-- Block all non-read-only work when paused.
-- Add digest output.
+Boundaries: no merge, deploy, production mutation, secret exposure, or Stage 7 multi-agent review claims.
 
-## Stage 6 — Hosted, Authenticated Control Plane
+See `docs/STAGE_6_MULTI_PROVIDER_EXECUTION.md` and `docs/COMPLETE_BUILD_DIRECTIVE.md`.
 
-Objective:
+## Stage 7 — Independent Multi-Agent Review Loop
 
-- Deploy Buildforme behind owner authentication.
+Next after Stage 6 acceptance. Reviewer independence, structured findings, repair loop, re-verification.
 
-Required gates:
+## Stage 8 — Founder Briefings and Decision Control
 
-- Authentication.
-- Authorization.
-- Secret manager.
-- HTTPS.
-- Audit logging.
-- Backup/restore plan.
-- No provider secrets shown in UI.
+Cross-project evidence-backed briefings and required founder decisions.
 
-## Stage 7 — Scheduled Supervision
+## Stage 9 — Multi-Company Control Plane
 
-Objective:
+Project/company isolation with singular global Constitution.
 
-- Let Buildforme prepare daily summaries and safe next-task packets while the owner is away.
+## Stage 10 — Controlled Autonomous Company
 
-Tasks:
+Governed continuous operation with kill switches, budgets, and founder gates. Not unrestricted autonomy.
 
-- Scheduled digest.
-- PR review digest.
-- CI failure digest.
-- Blocked approval digest.
-
-Forbidden until explicitly approved:
+Forbidden without explicit founder policy:
 
 - automatic merge
 - production writes

@@ -122,16 +122,15 @@ class ConstitutionBindingAdversarialTests(unittest.TestCase):
             joined,
         )
 
-    def test_low_level_stored_lease_tamper_is_detected_at_preflight(self) -> None:
+    def test_low_level_stored_lease_tamper_is_rejected_append_only(self) -> None:
         run = self.create_bound_run()
         tampered = seal_lease(dict(run["constitution_lease"], packet_id="other-packet"))
-        # Simulate hostile/manual runtime-file replacement through the low-level store.
-        self.store.save_constitution_lease(tampered)
-
-        result = run_preflight(self.store, run["id"])
-        self.assertFalse(result["preflight"]["passed"])
-        joined = " ".join(result["preflight"]["blocking_reasons"])
-        self.assertIn("constitution_lease", joined)
+        # Low-level store must refuse mutation of an existing lease id (Stage 6 gate).
+        with self.assertRaisesRegex(ValueError, "mutation forbidden|append-only|collision|invalid"):
+            self.store.save_constitution_lease(tampered)
+        # Canonical stored lease remains the original sealed record
+        stored = self.store.get_constitution_lease(run["constitution_lease_id"])
+        self.assertEqual(stored.get("packet_id"), run["constitution_lease"].get("packet_id"))
 
     def test_stale_or_forged_packet_binding_is_rejected_at_run_creation(self) -> None:
         stale = dict(self.packet)

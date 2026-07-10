@@ -36,6 +36,8 @@ DEFAULT_RUN_APPROVALS_NAME = "run_approvals.json"
 DEFAULT_EXECUTION_POLICIES_NAME = "execution_policies.json"
 DEFAULT_CONSTITUTION_LEASES_NAME = "constitution_leases.json"
 DEFAULT_CONSTITUTION_VIOLATIONS_NAME = "constitution_violations.json"
+DEFAULT_TASK_LOCKS_NAME = "task_locks.json"
+DEFAULT_EVIDENCE_NAME = "run_evidence.json"
 
 LOCK_SCOPES = {"all", "write", "merge", "production", "branch"}
 PROJECT_EXEC_STATUSES = {"enabled", "paused", "locked"}
@@ -141,6 +143,8 @@ class LocalStore:
         self.execution_policies_path = self.runtime_dir / DEFAULT_EXECUTION_POLICIES_NAME
         self.constitution_leases_path = self.runtime_dir / DEFAULT_CONSTITUTION_LEASES_NAME
         self.constitution_violations_path = self.runtime_dir / DEFAULT_CONSTITUTION_VIOLATIONS_NAME
+        self.task_locks_path = self.runtime_dir / DEFAULT_TASK_LOCKS_NAME
+        self.evidence_path = self.runtime_dir / DEFAULT_EVIDENCE_NAME
 
     # —— Tasks (existing API) ——
 
@@ -1056,6 +1060,17 @@ class LocalStore:
         return found
 
     def save_constitution_lease(self, lease: dict[str, Any]) -> dict[str, Any]:
+        """Persist a constitution lease append-only.
+
+        Existing lease ids may only be replayed with identical immutable
+        content. Mutation attempts raise ValueError (Stage 5.6 / Stage 6 gate).
+        """
+        from governance.constitution_lease import lease_records_equal, validate_lease_integrity
+
+        problems = validate_lease_integrity(lease)
+        if problems:
+            raise ValueError("invalid constitution lease: " + "; ".join(problems))
+
         data = self._load_object(
             self.constitution_leases_path, default={"leases": []}, list_key="leases"
         )
@@ -1064,15 +1079,18 @@ class LocalStore:
         if not lid:
             raise ValueError("lease_id required")
         record = dict(lease)
-        record["updated_at"] = utc_now_iso()
-        replaced = False
+        # Storage-only metadata must not participate in immutability compares.
+        record["stored_at"] = record.get("stored_at") or utc_now_iso()
         for idx, existing in enumerate(leases):
             if str(existing.get("lease_id")) == lid:
-                leases[idx] = record
-                replaced = True
-                break
-        if not replaced:
-            leases.insert(0, record)
+                if not lease_records_equal(existing, record):
+                    raise ValueError(
+                        "constitution lease mutation forbidden: "
+                        f"lease_id={lid} is append-only"
+                    )
+                # Identical replay — keep first stored_at
+                return existing
+        leases.insert(0, record)
         self._atomic_write(self.constitution_leases_path, {"leases": leases[:500]})
         return record
 
@@ -1137,6 +1155,81 @@ class LocalStore:
         if run_id is not None:
             items = [x for x in items if str(x.get("run_id")) == str(run_id)]
         return items[: max(1, min(1000, int(limit)))]
+
+    def list_task_locks(self, *, active_only: bool = False) -> list[dict[str, Any]]:
+        data = self._load_object(self.task_locks_path, default={"locks": []}, list_key="locks")
+        locks = list(data.get("locks") or [])
+        if active_only:
+            locks = [x for x in locks if x.get("active", True) and not x.get("released_at")]
+        return locks
+
+    def create_task_lock(self, payload: dict[str, Any]) -> dict[str, Any]:
+        locks = self.list_task_locks()
+        record = {
+            "id": str(payload.get("id") or f"tlock-{uuid.uuid4().hex[:10]}"),
+            "task_key": str(payload.get("task_key") or "").strip(),
+            "project_id": payload.get("project_id"),
+            "run_id": payload.get("run_id"),
+            "reason": str(payload.get("reason") or ""),
+            "active": True,
+            "created_at": utc_now_iso(),
+            "released_at": None,
+        }
+        if not record["task_key"]:
+            raise ValueError("task_key required")
+        for existing in locks:
+            if (
+                existing.get("active", True)
+                and not existing.get("released_at")
+                and str(existing.get("task_key")) == record["task_key"]
+                and str(existing.get("project_id") or "") == str(record.get("project_id") or "")
+            ):
+                raise ValueError(f"task lock already active: {record['task_key']}")
+        locks.insert(0, record)
+        self._atomic_write(self.task_locks_path, {"locks": locks[:500]})
+        return record
+
+    def release_task_lock(self, lock_id: str, *, reason: str = "") -> dict[str, Any]:
+        locks = self.list_task_locks()
+        found = None
+        for item in locks:
+            if str(item.get("id")) == str(lock_id):
+                item["active"] = False
+                item["released_at"] = utc_now_iso()
+                item["release_reason"] = reason
+                found = item
+                break
+        if not found:
+            raise KeyError(f"Task lock not found: {lock_id}")
+        self._atomic_write(self.task_locks_path, {"locks": locks})
+        return found
+
+    def save_run_evidence(self, evidence: dict[str, Any]) -> dict[str, Any]:
+        data = self._load_object(self.evidence_path, default={"evidence": []}, list_key="evidence")
+        items = list(data.get("evidence") or [])
+        record = dict(evidence)
+        record.setdefault("id", f"ev-{uuid.uuid4().hex[:12]}")
+        record.setdefault("saved_at", utc_now_iso())
+        # upsert by run_id
+        rid = str(record.get("run_id") or "")
+        replaced = False
+        if rid:
+            for idx, existing in enumerate(items):
+                if str(existing.get("run_id")) == rid:
+                    items[idx] = record
+                    replaced = True
+                    break
+        if not replaced:
+            items.insert(0, record)
+        self._atomic_write(self.evidence_path, {"evidence": items[:500]})
+        return record
+
+    def get_run_evidence(self, run_id: str) -> dict[str, Any]:
+        data = self._load_object(self.evidence_path, default={"evidence": []}, list_key="evidence")
+        for item in data.get("evidence") or []:
+            if str(item.get("run_id")) == str(run_id):
+                return item
+        raise KeyError(f"Evidence not found for run: {run_id}")
 
     def get_execution_policy(self) -> dict[str, Any]:
         default = {

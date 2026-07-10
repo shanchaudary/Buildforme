@@ -188,6 +188,7 @@ def run_create_command(args: argparse.Namespace) -> int:
             "provider_id": args.provider,
             "packet_id": args.packet_id,
             "target_branch": args.branch,
+            "execution_mode": getattr(args, "execution_mode", None) or "dry_run",
         },
     )
     print(json.dumps(run, indent=2, sort_keys=True))
@@ -406,7 +407,7 @@ def governance_validate_command(args: argparse.Namespace) -> int:
         "stage": "5.5",
         "checks": checks,
         "passed": all(c["status"] == "pass" for c in checks),
-        "stage_6_admission": "HOLD — Stage 6 not authorized by governance-validate alone",
+        "stage_6_admission": "Stage 6 multi-provider supervised execution is authorized by stage roadmap; use provider-health / run-execute",
         "doc": "docs/STAGE_5_5_GOVERNANCE_VALIDATION.md",
     }
     if args.json:
@@ -418,6 +419,85 @@ def governance_validate_command(args: argparse.Namespace) -> int:
         print(f"Overall: {'PASS' if payload['passed'] else 'FAIL'}")
         print(f"Stage 6 admission: {payload['stage_6_admission']}")
     return 0 if payload["passed"] else 2
+
+
+def provider_health_command(args: argparse.Namespace) -> int:
+    from buildforme.provider_discovery import discover_all_providers
+    from buildforme.storage import LocalStore
+
+    store = LocalStore(args.state)
+    health = discover_all_providers(store.list_providers())
+    if args.json:
+        print(json.dumps({"providers": health}, indent=2, sort_keys=True))
+    else:
+        for item in health:
+            print(
+                f"{item.get('provider_id')}: status={item.get('status')} "
+                f"available={item.get('available')} live_ready={item.get('live_ready')} "
+                f"version={item.get('version')!r} reasons={item.get('unsupported_reasons')}"
+            )
+    return 0
+
+
+def provider_recommend_command(args: argparse.Namespace) -> int:
+    from buildforme.provider_discovery import discover_all_providers
+    from buildforme.provider_recommend import recommend_provider
+    from buildforme.storage import LocalStore
+
+    store = LocalStore(args.state)
+    health = discover_all_providers(store.list_providers())
+    caps = [c.strip() for c in (args.capabilities or "").split(",") if c.strip()]
+    prefs = {}
+    if args.prefer:
+        prefs["preferred_provider"] = args.prefer
+    result = recommend_provider(
+        health=health,
+        risk=args.risk,
+        operating_mode=args.mode,
+        requested_capabilities=caps or ["read_repository", "edit_repository", "run_tests", "produce_patch"],
+        task_type=args.task_type,
+        language=args.language,
+        founder_preferences=prefs,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def run_execute_command(args: argparse.Namespace) -> int:
+    from buildforme.execution_service import execute_supervised
+    from buildforme.storage import LocalStore
+
+    result = execute_supervised(LocalStore(args.state), args.run_id, repo_root=args.repo)
+    print(json.dumps(result, indent=2, sort_keys=True, default=str))
+    return 0 if result.get("run", {}).get("status") in {"needs_review", "completed"} else 2
+
+
+def run_review_command(args: argparse.Namespace) -> int:
+    from buildforme.execution_service import founder_review_decision
+    from buildforme.storage import LocalStore
+
+    result = founder_review_decision(
+        LocalStore(args.state),
+        args.run_id,
+        decision=args.decision,
+        note=args.note or "",
+        cleanup_worktree=bool(args.cleanup),
+    )
+    print(json.dumps(result, indent=2, sort_keys=True, default=str))
+    return 0
+
+
+def run_evidence_command(args: argparse.Namespace) -> int:
+    from buildforme.storage import LocalStore
+
+    store = LocalStore(args.state)
+    try:
+        evidence = store.get_run_evidence(args.run_id)
+    except KeyError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps(evidence, indent=2, sort_keys=True, default=str))
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -482,6 +562,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_create.add_argument("--project", required=True)
     run_create.add_argument("--provider", default="codex")
     run_create.add_argument("--branch", required=True)
+    run_create.add_argument(
+        "--execution-mode",
+        default="dry_run",
+        choices=["dry_run", "live_supervised"],
+        help="dry_run (default) or live_supervised Stage 6",
+    )
     run_create.add_argument("--state", default="runtime/buildforme_state.json")
     run_create.set_defaults(func=run_create_command)
 
@@ -533,6 +619,40 @@ def build_parser() -> argparse.ArgumentParser:
     c_exp.add_argument("--format", default="json", choices=["json", "markdown", "reminder"])
     c_exp.add_argument("--output", default=None, help="Optional file path")
     c_exp.set_defaults(func=constitution_export_command)
+
+    ph = subparsers.add_parser("provider-health", help="Discover provider CLIs and health (no secrets)")
+    ph.add_argument("--state", default="runtime/buildforme_state.json")
+    ph.add_argument("--json", action="store_true")
+    ph.set_defaults(func=provider_health_command)
+
+    pr = subparsers.add_parser("provider-recommend", help="Recommend a provider for a task shape")
+    pr.add_argument("--state", default="runtime/buildforme_state.json")
+    pr.add_argument("--risk", default="YELLOW")
+    pr.add_argument("--mode", default="IMPLEMENTATION")
+    pr.add_argument("--task-type", default="implementation")
+    pr.add_argument("--language", default=None)
+    pr.add_argument("--capabilities", default="")
+    pr.add_argument("--prefer", default=None, help="Founder preferred provider id")
+    pr.set_defaults(func=provider_recommend_command)
+
+    rexe = subparsers.add_parser("run-execute", help="Execute approved live_supervised run in isolated worktree")
+    rexe.add_argument("run_id")
+    rexe.add_argument("--state", default="runtime/buildforme_state.json")
+    rexe.add_argument("--repo", default=None, help="Repository root (default: cwd git root)")
+    rexe.set_defaults(func=run_execute_command)
+
+    rrev = subparsers.add_parser("run-review", help="Founder review decision after supervised execution")
+    rrev.add_argument("run_id")
+    rrev.add_argument("--decision", required=True, choices=["accept_for_pr_prep", "reject", "request_changes", "block"])
+    rrev.add_argument("--note", default="")
+    rrev.add_argument("--cleanup", action="store_true", help="Remove worktree after decision")
+    rrev.add_argument("--state", default="runtime/buildforme_state.json")
+    rrev.set_defaults(func=run_review_command)
+
+    rev = subparsers.add_parser("run-evidence", help="Show evidence bundle for a run")
+    rev.add_argument("run_id")
+    rev.add_argument("--state", default="runtime/buildforme_state.json")
+    rev.set_defaults(func=run_evidence_command)
     return parser
 
 

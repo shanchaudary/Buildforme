@@ -21,6 +21,8 @@ from buildforme.execution_service import (
     cancel_run,
     create_run,
     execute_dry_run,
+    execute_supervised,
+    founder_review_decision,
     record_run_approval,
     retry_run,
     run_preflight,
@@ -38,7 +40,7 @@ SAMPLE_PROJECT_PATH = PROJECT_ROOT / "data" / "sample_project.json"
 
 
 class BuildformeRequestHandler(BaseHTTPRequestHandler):
-    server_version = "BuildformeMVP/0.6.5"
+    server_version = "BuildformeMVP/0.7.0"
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urllib.parse.urlparse(self.path)
@@ -126,6 +128,32 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/providers":
             self._json(HTTPStatus.OK, {"providers": self._store().list_providers()})
             return
+        if path == "/api/providers/health":
+            from buildforme.provider_discovery import discover_all_providers
+
+            health = discover_all_providers(self._store().list_providers())
+            self._json(HTTPStatus.OK, {"providers": health})
+            return
+        if path == "/api/providers/recommend":
+            from buildforme.provider_discovery import discover_all_providers
+            from buildforme.provider_recommend import recommend_provider
+
+            risk = _first_query_value(parsed, "risk") or "YELLOW"
+            mode = _first_query_value(parsed, "mode") or "IMPLEMENTATION"
+            prefer = _first_query_value(parsed, "prefer")
+            caps_raw = _first_query_value(parsed, "capabilities") or ""
+            caps = [c.strip() for c in caps_raw.split(",") if c.strip()]
+            health = discover_all_providers(self._store().list_providers())
+            result = recommend_provider(
+                health=health,
+                risk=risk,
+                operating_mode=mode,
+                requested_capabilities=caps
+                or ["read_repository", "edit_repository", "run_tests", "produce_patch"],
+                founder_preferences={"preferred_provider": prefer} if prefer else {},
+            )
+            self._json(HTTPStatus.OK, result)
+            return
         if path.startswith("/api/providers/"):
             provider_id = path.removeprefix("/api/providers/").strip("/")
             if provider_id.endswith("/acknowledge-constitution"):
@@ -182,16 +210,29 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             run_id = path.removeprefix("/api/runs/").removesuffix("/events").strip("/")
             self._json(HTTPStatus.OK, {"events": self._store().list_run_events(run_id)})
             return
+        if path.startswith("/api/runs/") and path.endswith("/evidence"):
+            run_id = path.removeprefix("/api/runs/").removesuffix("/evidence").strip("/")
+            try:
+                self._json(HTTPStatus.OK, {"evidence": self._store().get_run_evidence(run_id)})
+            except KeyError as exc:
+                self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            return
         if path.startswith("/api/runs/"):
             run_id = path.removeprefix("/api/runs/").strip("/")
             try:
                 run = self._store().get_run(run_id)
+                evidence = None
+                try:
+                    evidence = self._store().get_run_evidence(run_id)
+                except KeyError:
+                    evidence = None
                 self._json(
                     HTTPStatus.OK,
                     {
                         "run": run,
                         "events": self._store().list_run_events(run_id),
                         "approvals": self._store().list_run_approvals(run_id),
+                        "evidence": evidence,
                     },
                 )
             except KeyError as exc:
@@ -298,6 +339,12 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/runs/") and path.endswith("/dry-run"):
             self._run_action(path, "dry-run")
+            return
+        if path.startswith("/api/runs/") and path.endswith("/execute"):
+            self._run_action(path, "execute")
+            return
+        if path.startswith("/api/runs/") and path.endswith("/review"):
+            self._run_action(path, "review")
             return
         if path.startswith("/api/runs/") and path.endswith("/cancel"):
             self._run_action(path, "cancel")
@@ -833,11 +880,16 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
                 return
             run = create_run(self._store(), payload)
+            mode = run.get("execution_mode") or run.get("mode") or "dry_run"
             self._json(
                 HTTPStatus.OK,
                 {
                     "run": run,
-                    "note": "Draft supervised run created. Dry-run only. No live provider execution.",
+                    "note": (
+                        "Draft supervised run created (live_supervised). No merge/deploy authority."
+                        if mode == "live_supervised"
+                        else "Draft supervised run created. Dry-run default. No merge/deploy authority."
+                    ),
                 },
             )
         except (KeyError, ValueError, json.JSONDecodeError) as exc:
@@ -879,6 +931,21 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
                 return
             if action == "dry-run":
                 result = execute_dry_run(store, run_id)
+                self._json(HTTPStatus.OK, result)
+                return
+            if action in {"execute", "supervised"}:
+                result = execute_supervised(store, run_id, repo_root=payload.get("repo_root"))
+                self._json(HTTPStatus.OK, result)
+                return
+            if action == "review":
+                result = founder_review_decision(
+                    store,
+                    run_id,
+                    decision=str(payload.get("decision") or ""),
+                    note=str(payload.get("note") or ""),
+                    actor=str(payload.get("actor") or "shan"),
+                    cleanup_worktree=bool(payload.get("cleanup_worktree")),
+                )
                 self._json(HTTPStatus.OK, result)
                 return
             if action == "cancel":

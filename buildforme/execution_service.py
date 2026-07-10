@@ -1,15 +1,19 @@
-"""Supervised run orchestration for Stage 5 (dry-run only).
+"""Supervised run orchestration for Stage 5 dry-run + Stage 6 live CLI.
 
 Stage 5.5: fail-closed gates, scope fingerprints, revalidation at action time.
 Stage 5.6: canonical Constitution leases and approval binding.
+Stage 6: multi-provider supervised execution, worktrees, evidence, verification, review.
 """
 
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 from typing import Any
 
 from buildforme.adapters.dry_run import DryRunAdapter
+from buildforme.adapters.registry import get_adapter
+from buildforme.evidence import build_evidence_bundle
 from buildforme.execution_preflight import evaluate_run_preflight
 from buildforme.governance import (
     canonicalize_repository,
@@ -23,8 +27,16 @@ from buildforme.governance import (
     validate_safe_id,
 )
 from buildforme.providers import get_provider
+from buildforme.review_gate import apply_founder_review_decision, build_review_package
 from buildforme.run_state import can_transition, is_terminal, transition_run
 from buildforme.storage import LocalStore, utc_now_iso
+from buildforme.verification import verify_run_result
+from buildforme.worktree import (
+    collect_diff,
+    create_isolated_worktree,
+    remove_worktree,
+    resolve_repo_root,
+)
 from governance.constitution_binding_guard import validate_approval_binding
 from governance.constitution_engine import get_engine
 from governance.constitution_lease import (
@@ -89,8 +101,15 @@ def create_run(store: LocalStore, payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Unknown provider: {provider_id}")
     if not provider.get("enabled"):
         raise ValueError(f"Provider disabled: {provider_id}")
-    if str(provider.get("mode")) != "dry_run" or provider.get("live_execution_available"):
-        raise ValueError("provider must be dry_run only")
+    execution_mode = str(payload.get("execution_mode") or "dry_run").strip().lower().replace("-", "_")
+    if execution_mode not in {"dry_run", "live_supervised"}:
+        raise ValueError("execution_mode must be dry_run or live_supervised")
+    # Registry may still say dry_run; live admission is gated at execute time by discovery.
+    provider_mode = str(provider.get("mode") or "dry_run").lower().replace("-", "_")
+    if provider_mode not in {"dry_run", "live_supervised"}:
+        raise ValueError("provider mode invalid")
+    if provider_mode not in {"dry_run", "live_supervised"}:
+        raise ValueError("provider must not enable unrestricted live mode")
 
     engine = get_engine()
     provider = engine.attach_to_provider(provider)
@@ -187,9 +206,32 @@ def create_run(store: LocalStore, payload: dict[str, Any]) -> dict[str, Any]:
         "updated_at": now,
         "started_at": None,
         "finished_at": None,
-        "live_execution": False,
-        "mode": "dry_run",
+        "live_execution": execution_mode == "live_supervised",
+        "mode": execution_mode,
+        "execution_mode": execution_mode,
+        "transport": "cli" if execution_mode == "live_supervised" else "dry_run",
+        "worktree": None,
+        "evidence": None,
+        "verification": None,
+        "review": None,
+        "task_lock_id": None,
     }
+    # Task lock only for live supervised runs (duplicate work protection)
+    if execution_mode == "live_supervised" and (payload.get("task_id") or packet_id):
+        lock_key = str(payload.get("task_id") or packet_id or run_id)
+        existing_locks = store.list_task_locks(active_only=True)
+        for lock in existing_locks:
+            if str(lock.get("task_key")) == lock_key and str(lock.get("project_id")) == project_id:
+                raise ValueError(f"task lock active for {lock_key}: {lock.get('id')}")
+        task_lock = store.create_task_lock(
+            {
+                "task_key": lock_key,
+                "project_id": project_id,
+                "run_id": run_id,
+                "reason": "live supervised run create",
+            }
+        )
+        run["task_lock_id"] = task_lock.get("id")
     run = engine.attach_to_run(run, actor="system")
     persist_lease_append_only(store, run["constitution_lease"])
     _require_canonical_run_lease(store, run)
@@ -592,6 +634,326 @@ def execute_dry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
     }
 
 
+def execute_supervised(store: LocalStore, run_id: str, *, repo_root: str | Path | None = None) -> dict[str, Any]:
+    """Stage 6 live supervised provider execution in an isolated worktree.
+
+    Provider cannot mark final acceptance. Ends in needs_review with evidence + verification.
+    """
+    run_id = validate_safe_id(run_id, field="run_id")
+    run = store.get_run(run_id)
+    if str(run.get("execution_mode") or run.get("mode") or "dry_run") != "live_supervised":
+        raise ValueError("run execution_mode must be live_supervised (use run-dry-run for dry_run)")
+    if str(run.get("status")) not in {"approved", "queued"}:
+        raise ValueError(f"run must be approved before supervised execution (status={run.get('status')})")
+
+    _require_canonical_run_lease(store, run)
+    pre = evaluate_run_preflight(run, store)
+    if not pre.get("passed"):
+        if can_transition(str(run.get("status")), "blocked"):
+            run = transition_run(run, "blocked", "system", "preflight failed before live execution")
+        run["preflight"] = pre
+        store.save_run(run)
+        raise ValueError("preflight failed: " + "; ".join(pre.get("blocking_reasons") or []))
+
+    control = store.get_execution_control()
+    if control.get("kill_switch_active"):
+        raise ValueError("kill switch active")
+
+    # Approvals revalidation
+    required = list(run.get("approval_requirements") or [])
+    if required:
+        current_fp = compute_run_scope_fingerprint(
+            run, run.get("packet") if isinstance(run.get("packet"), dict) else None
+        )
+        approvals = store.list_run_approvals(run_id=run_id)
+        approved = _current_approved_types(approvals, run, current_fp, fail_on_invalid=True)
+        missing = [r for r in required if r not in approved]
+        if missing:
+            raise ValueError(f"missing valid approvals: {', '.join(missing)}")
+
+    provider_id = str(run.get("provider_id") or "")
+    provider = get_provider(store.list_providers(), provider_id)
+    if not provider:
+        raise ValueError("provider missing")
+    engine = get_engine()
+    provider = engine.attach_to_provider(provider)
+    ack = engine.validate_provider(provider)
+    if not ack["valid"]:
+        raise ValueError("provider constitution acknowledgement invalid: " + "; ".join(ack["problems"]))
+
+    packet = run.get("packet") if isinstance(run.get("packet"), dict) else {}
+    if not packet and run.get("packet_id"):
+        try:
+            packet = store.get_packet(str(run["packet_id"]))
+        except KeyError:
+            packet = {}
+
+    adapter = get_adapter(provider_id, mode="live_supervised", provider_record=provider)
+    prep = adapter.prepare_execution(run, packet)
+    if not prep.get("prepared"):
+        raise ValueError("adapter prepare failed: " + "; ".join(prep.get("problems") or ["unknown"]))
+
+    # Worktree isolation
+    root = resolve_repo_root(repo_root) if repo_root else resolve_repo_root()
+    worktree_meta = create_isolated_worktree(
+        repo_root=root,
+        branch=str(run.get("target_branch")),
+        baseline_ref="HEAD",
+        worktrees_root=root / "runtime" / "worktrees",
+        run_id=run_id,
+        allow_dirty_main=False,
+    )
+    run["worktree"] = worktree_meta
+    run["baseline_commit"] = worktree_meta.get("baseline_commit")
+    run["worktree_path"] = worktree_meta.get("worktree_path")
+    run["provider_version"] = (prep.get("health") or {}).get("version")
+    run = transition_run(run, "queued", "system", "live supervised queued")
+    run = transition_run(run, "starting", "system", "worktree ready")
+    run = transition_run(run, "running", "system", "provider launching")
+    store.save_run(run)
+    store.append_run_event(
+        run_id,
+        "supervised_started",
+        f"Live supervised execution via {provider_id}",
+        actor="system",
+        metadata={
+            "worktree": worktree_meta.get("worktree_path"),
+            "baseline": worktree_meta.get("baseline_commit"),
+            "constitution_lease_id": run.get("constitution_lease_id"),
+        },
+    )
+
+    def on_event(event: dict[str, Any]) -> None:
+        # Re-check kill switch during execution
+        if store.get_execution_control().get("kill_switch_active"):
+            try:
+                adapter.cancel(run_id)
+            except Exception:
+                pass
+        try:
+            store.append_run_event(
+                run_id,
+                str(event.get("type") or "process_event"),
+                str(event.get("message") or "")[:500],
+                actor="system",
+                metadata={k: v for k, v in event.items() if k not in {"message", "type"} and k != "stdout"},
+            )
+        except Exception:
+            pass
+
+    process_result: dict[str, Any]
+    try:
+        if store.get_execution_control().get("kill_switch_active"):
+            raise ValueError("kill switch active during start")
+        process_result = adapter.execute(
+            run,
+            packet,
+            worktree_path=worktree_meta["worktree_path"],
+            on_event=on_event,
+        )
+    except Exception as exc:
+        run = store.get_run(run_id)
+        run = transition_run(run, "failed", "system", str(exc)[:300])
+        store.save_run(run)
+        store.append_run_event(run_id, "supervised_failed", str(exc)[:500], actor="system")
+        _release_run_locks(store, run)
+        raise
+
+    run = store.get_run(run_id)
+    if process_result.get("cancelled") or str(run.get("status")) == "cancel_requested":
+        if can_transition(str(run.get("status")), "cancelled") or str(run.get("status")) == "running":
+            if str(run.get("status")) == "running":
+                run = transition_run(run, "cancel_requested", "system", "cancelled during execution")
+            if can_transition(str(run.get("status")), "cancelled"):
+                run = transition_run(run, "cancelled", "system", "provider process cancelled")
+        run["process_result"] = process_result
+        store.save_run(run)
+        _release_run_locks(store, run)
+        return {"run": run, "process": process_result, "cancelled": True}
+
+    if process_result.get("timed_out"):
+        run = transition_run(run, "timed_out", "system", "provider timeout")
+        run["process_result"] = process_result
+        store.save_run(run)
+        _release_run_locks(store, run)
+        return {"run": run, "process": process_result, "timed_out": True}
+
+    if process_result.get("unavailable"):
+        run = transition_run(run, "failed", "system", process_result.get("error") or "provider unavailable")
+        run["process_result"] = process_result
+        store.save_run(run)
+        _release_run_locks(store, run)
+        return {"run": run, "process": process_result, "unavailable": True}
+
+    if not process_result.get("ok") and process_result.get("exit_code") not in (0, None):
+        # Still collect evidence / verification for review
+        pass
+
+    diff = collect_diff(
+        Path(worktree_meta["worktree_path"]),
+        baseline_commit=worktree_meta.get("baseline_commit"),
+    )
+    try:
+        project = store.get_project(str(run.get("project_id")))
+    except KeyError:
+        project = None
+
+    verification = verify_run_result(
+        run=run,
+        packet=packet,
+        project=project,
+        worktree_path=worktree_meta["worktree_path"],
+        baseline_commit=worktree_meta.get("baseline_commit"),
+        process_result=process_result,
+        budget=run.get("budget") if isinstance(run.get("budget"), dict) else None,
+    )
+    evidence = build_evidence_bundle(
+        run=run,
+        packet=packet,
+        process_result=process_result,
+        worktree=worktree_meta,
+        diff=diff,
+        provider_health=process_result.get("health") or prep.get("health") or {},
+        verification=verification,
+        events=store.list_run_events(run_id),
+    )
+    store.save_run_evidence(evidence)
+
+    # Constitutional validation of output claims
+    validation = engine.validate_output(
+        {
+            "summary": process_result.get("stdout", "")[:2000],
+            "text": (process_result.get("stdout") or "")[:4000],
+            "claims_complete": bool(process_result.get("ok")),
+            "evidence": ["process_supervisor", "worktree_diff", "verification"],
+            "tests": ["deterministic_verification"],
+        },
+        context={
+            "verified_capabilities": list(run.get("requested_capabilities") or []),
+            "acceptance_criteria": packet.get("acceptance_criteria") or [],
+        },
+    )
+    if not validation.get("passed", True):
+        engine.record_validation_violations(
+            store,
+            validation,
+            run_id=run_id,
+            packet_id=str(run.get("packet_id") or "") or None,
+            provider_id=provider_id,
+            lease_id=str(run.get("constitution_lease_id") or "") or None,
+        )
+
+    review = build_review_package(
+        run=run,
+        evidence=evidence,
+        verification=verification,
+        constitution_validation=validation,
+    )
+
+    run = store.get_run(run_id)
+    _require_canonical_run_lease(store, run)
+    run["process_result"] = {
+        "exit_code": process_result.get("exit_code"),
+        "timed_out": process_result.get("timed_out"),
+        "cancelled": process_result.get("cancelled"),
+        "duration_seconds": process_result.get("duration_seconds"),
+        "ok": process_result.get("ok"),
+        "truncated_stdout": process_result.get("truncated_stdout"),
+        "truncated_stderr": process_result.get("truncated_stderr"),
+    }
+    run["evidence"] = {
+        "evidence_fingerprint": evidence.get("evidence_fingerprint"),
+        "files_changed": evidence.get("files_changed"),
+        "file_count": evidence.get("file_count"),
+    }
+    run["verification"] = verification
+    run["review"] = review
+    run["result_summary"] = (
+        f"Supervised run finished exit={process_result.get('exit_code')} "
+        f"verify_passed={verification.get('passed')} review={review.get('status')}"
+    )
+    run["constitution_compliance"] = {
+        "status": "compliant" if validation.get("passed", True) else "violations",
+        "violations": validation.get("violations") or [],
+        "validated_at": utc_now_iso(),
+    }
+    run["constitution_reminder"] = engine.reminder(
+        phase="review",
+        lease=run.get("constitution_lease") if isinstance(run.get("constitution_lease"), dict) else None,
+    )
+
+    # Provider cannot self-complete: always needs_review (or failed/blocked)
+    if not verification.get("passed") or not validation.get("passed", True):
+        if process_result.get("ok") is False and process_result.get("exit_code") not in (0, None):
+            if can_transition(str(run.get("status")), "failed"):
+                # Prefer needs_review so founder sees evidence even on failure
+                pass
+        run = transition_run(run, "needs_review", "system", "verification or constitution issues — review required")
+    else:
+        run = transition_run(run, "needs_review", "system", "provider finished — founder review required")
+
+    saved = store.save_run(run)
+    store.append_run_event(
+        run_id,
+        "supervised_finished",
+        saved.get("result_summary") or "finished",
+        actor="system",
+        metadata={
+            "verification_passed": verification.get("passed"),
+            "review_status": review.get("status"),
+            "files_changed": evidence.get("file_count"),
+        },
+    )
+    # Keep worktree for review; do not auto-remove (cleanup is explicit)
+    return {
+        "run": saved,
+        "process": process_result,
+        "evidence": evidence,
+        "verification": verification,
+        "review": review,
+        "constitution_validation": validation,
+    }
+
+
+def founder_review_decision(
+    store: LocalStore,
+    run_id: str,
+    *,
+    decision: str,
+    note: str = "",
+    actor: str = "shan",
+    cleanup_worktree: bool = False,
+) -> dict[str, Any]:
+    """Founder decision after Stage 6 review. Never merges or deploys."""
+    run = store.get_run(validate_safe_id(run_id, field="run_id"))
+    actor = validate_actor(actor)
+    if str(run.get("status")) not in {"needs_review", "completed", "blocked"}:
+        if is_terminal(str(run.get("status"))) and str(run.get("status")) != "completed":
+            raise ValueError(f"cannot decide terminal status {run.get('status')}")
+    result = apply_founder_review_decision(run, decision=decision, note=note, actor=actor)
+    run["review"] = result["review"]
+    next_status = result["next_status"]
+    current = str(run.get("status"))
+    if next_status != current and can_transition(current, next_status):
+        run = transition_run(run, next_status, actor, note or decision)
+    elif next_status == "completed" and current == "needs_review" and can_transition("needs_review", "completed"):
+        run = transition_run(run, "completed", actor, note or decision)
+    elif next_status == "rejected" and can_transition(current, "rejected"):
+        run = transition_run(run, "rejected", actor, note or decision)
+    elif next_status == "blocked" and can_transition(current, "blocked"):
+        run = transition_run(run, "blocked", actor, note or decision)
+    saved = store.save_run(run)
+    store.append_run_event(run_id, "founder_review_decision", f"{decision}: {note}", actor=actor)
+    if cleanup_worktree and saved.get("worktree_path"):
+        try:
+            root = resolve_repo_root()
+            remove_worktree(repo_root=root, worktree_path=Path(str(saved["worktree_path"])), force=True)
+        except Exception as exc:
+            store.append_run_event(run_id, "worktree_cleanup_failed", str(exc)[:300], actor="system")
+    _release_run_locks(store, saved)
+    return {"run": store.get_run(run_id), "decision": decision}
+
+
 def cancel_run(
     store: LocalStore,
     run_id: str,
@@ -605,6 +967,18 @@ def cancel_run(
     if is_terminal(status):
         raise ValueError("cannot cancel terminal run")
     note = reason or "cancel requested"
+    # Signal process supervisor for live runs
+    try:
+        from buildforme.process_supervisor import get_process_supervisor
+
+        get_process_supervisor().cancel(run_id)
+        adapter = get_adapter(
+            str(run.get("provider_id") or "codex"),
+            mode=str(run.get("execution_mode") or "dry_run"),
+        )
+        adapter.cancel(run_id)
+    except Exception:
+        pass
     if status in {"running", "starting", "queued"}:
         run = transition_run(run, "cancel_requested", actor, note)
         store.save_run(run)
@@ -618,7 +992,18 @@ def cancel_run(
         raise ValueError(f"cannot cancel from status {status}")
     saved = store.save_run(run)
     store.append_run_event(run_id, "run_cancelled", note, actor=actor)
+    _release_run_locks(store, saved)
     return saved
+
+
+def _release_run_locks(store: LocalStore, run: dict[str, Any]) -> None:
+    lock_id = run.get("task_lock_id")
+    if lock_id:
+        try:
+            store.release_task_lock(str(lock_id), reason=f"run {run.get('id')} finished")
+        except Exception:
+            pass
+
 
 
 def retry_run(store: LocalStore, run_id: str) -> dict[str, Any]:

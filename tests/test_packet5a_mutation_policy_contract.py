@@ -8,6 +8,7 @@ from buildforme.execution_store import (
     MUTATION_METADATA_ALLOWLISTS,
     PROTECTED_AUTHORITY_FIELDS,
     _MUTATION_ALLOWED_EDGES,
+    _MUTATION_ALLOWED_EXECUTION_MODES,
     _MUTATION_ALLOW_SAME_STATE,
 )
 
@@ -44,6 +45,16 @@ class Packet5AMutationPolicyContractTests(unittest.TestCase):
             frozenset({("draft", "awaiting_preflight")}),
         )
         self.assertNotIn("status_transition", _MUTATION_ALLOW_SAME_STATE)
+
+    def test_completion_mutations_are_bound_to_execution_mode(self):
+        self.assertEqual(
+            _MUTATION_ALLOWED_EXECUTION_MODES["dry_run_finished"],
+            frozenset({"dry_run"}),
+        )
+        self.assertEqual(
+            _MUTATION_ALLOWED_EXECUTION_MODES["supervised_finished"],
+            frozenset({"live_supervised"}),
+        )
 
     def test_completion_requires_designated_mutation_classes(self):
         completion_edges = {

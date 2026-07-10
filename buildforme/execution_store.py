@@ -254,6 +254,24 @@ _MUTATION_ALLOW_SAME_STATE: frozenset[str] = frozenset(
     }
 )
 
+# Mutation classes are also bound to the admitted execution mode. A live run
+# must never complete through the dry-run authority path, or vice versa.
+_MUTATION_ALLOWED_EXECUTION_MODES: dict[str, frozenset[str]] = {
+    "preflight_result": frozenset({"dry_run", "live_supervised"}),
+    "worktree_prepared": frozenset({"live_supervised"}),
+    "process_started": frozenset({"dry_run", "live_supervised"}),
+    "process_result": frozenset({"dry_run", "live_supervised"}),
+    "verification_result": frozenset({"live_supervised"}),
+    "execution_evidence_link": frozenset({"live_supervised"}),
+    "review_package": frozenset({"live_supervised"}),
+    "constitution_compliance": frozenset({"dry_run", "live_supervised"}),
+    "failure_detail": frozenset({"dry_run", "live_supervised"}),
+    "supervised_finished": frozenset({"live_supervised"}),
+    "dry_run_finished": frozenset({"dry_run"}),
+    "status_transition": frozenset({"dry_run", "live_supervised"}),
+    "cancel": frozenset({"dry_run", "live_supervised"}),
+}
+
 
 def _values_equal(left: Any, right: Any) -> bool:
     if left is right:
@@ -430,6 +448,7 @@ class Stage6Store:
         now = utc_now_iso()
         allow = MUTATION_METADATA_ALLOWLISTS[mutation_type]
         allowed_statuses = _MUTATION_ALLOWED_STATUSES[mutation_type]
+        allowed_execution_modes = _MUTATION_ALLOWED_EXECUTION_MODES[mutation_type]
 
         with self.db.transaction() as conn:
             existing = conn.execute(
@@ -451,7 +470,15 @@ class Stage6Store:
                 raise ValueError(f"run payload is not an object: run_id={rid}")
             db_status = str(existing[3] or db_payload.get("status") or "")
             new_status = str(proposed.get("status") or db_status)
+            execution_mode = str(
+                db_payload.get("execution_mode") or db_payload.get("mode") or "dry_run"
+            ).strip().lower().replace("-", "_")
 
+            if execution_mode not in allowed_execution_modes:
+                raise ValueError(
+                    f"mutation_type {mutation_type!r} not permitted for "
+                    f"execution_mode {execution_mode!r}"
+                )
             if db_status not in allowed_statuses:
                 raise ValueError(
                     f"mutation_type {mutation_type!r} not permitted from status {db_status!r}"
@@ -539,6 +566,16 @@ class Stage6Store:
             elif mutation_type not in _MUTATION_ALLOW_SAME_STATE:
                 raise ValueError(
                     f"mutation_type {mutation_type!r} requires an authorized status transition"
+                )
+
+            if (
+                mutation_type == "preflight_result"
+                and "approval_requirements" in changed
+                and not edges
+            ):
+                raise ValueError(
+                    "approval_requirements may change only with an authorized "
+                    "preflight state edge"
                 )
 
             # Apply a change set to canonical storage state; never replace the

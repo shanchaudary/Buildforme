@@ -199,7 +199,13 @@ class RunMutationAuthorityHardeningTests(unittest.TestCase):
             )
 
     def test_terminal_path_derives_finished_at(self):
-        self._make_run("run-terminal-path", status="running")
+        self._make_run(
+            "run-terminal-path",
+            status="running",
+            execution_mode="dry_run",
+            mode="dry_run",
+            transport="dry_run",
+        )
         run = self.store.get_run("run-terminal-path")
         run["status"] = "completed"
         run["dry_run_result"] = {"ok": True}
@@ -390,6 +396,81 @@ class RunMutationAuthorityHardeningTests(unittest.TestCase):
         )
         self.assertEqual(cancelled["status"], "cancelled")
         self.assertEqual(len(cancelled["status_history"]), 2)
+
+
+    def test_live_run_cannot_complete_through_dry_run_mutation(self):
+        self._make_run("run-live-dry-bypass", status="running")
+        run = self.store.get_run("run-live-dry-bypass")
+        version = run["row_version"]
+        run["status"] = "completed"
+        run["dry_run_result"] = {"ok": True}
+        with self.assertRaisesRegex(ValueError, "not permitted for execution_mode"):
+            self._commit(
+                run,
+                mutation_type="dry_run_finished",
+                transition_path=["running", "needs_review", "completed"],
+            )
+        stored = self.store.get_run("run-live-dry-bypass")
+        self.assertEqual(stored["status"], "running")
+        self.assertEqual(stored["row_version"], version)
+        self.assertEqual(self.store.list_run_events("run-live-dry-bypass"), [])
+
+    def test_dry_run_cannot_use_supervised_completion_mutation(self):
+        self._make_run(
+            "run-dry-live-bypass",
+            status="running",
+            execution_mode="dry_run",
+            mode="dry_run",
+            transport="dry_run",
+        )
+        run = self.store.get_run("run-dry-live-bypass")
+        version = run["row_version"]
+        run["status"] = "needs_review"
+        run["review"] = {"status": "review_required"}
+        with self.assertRaisesRegex(ValueError, "not permitted for execution_mode"):
+            self._commit(run, mutation_type="supervised_finished")
+        stored = self.store.get_run("run-dry-live-bypass")
+        self.assertEqual(stored["status"], "running")
+        self.assertEqual(stored["row_version"], version)
+        self.assertEqual(self.store.list_run_events("run-dry-live-bypass"), [])
+
+    def test_same_state_preflight_cannot_rewrite_approval_requirements(self):
+        self._make_run(
+            "run-approved-requirements",
+            status="approved",
+            approval_requirements=["shan_task_approval"],
+        )
+        run = self.store.get_run("run-approved-requirements")
+        version = run["row_version"]
+        run["approval_requirements"] = []
+        run["preflight"] = {"passed": True, "required_approvals": []}
+        with self.assertRaisesRegex(ValueError, "authorized preflight state edge"):
+            self._commit(run, mutation_type="preflight_result")
+        stored = self.store.get_run("run-approved-requirements")
+        self.assertEqual(stored["approval_requirements"], ["shan_task_approval"])
+        self.assertEqual(stored["row_version"], version)
+        self.assertEqual(self.store.list_run_events("run-approved-requirements"), [])
+
+    def test_initial_preflight_edge_may_set_approval_requirements(self):
+        self._make_run(
+            "run-initial-requirements",
+            status="awaiting_preflight",
+            approval_requirements=[],
+        )
+        run = self.store.get_run("run-initial-requirements")
+        run["status"] = "awaiting_approval"
+        run["approval_requirements"] = ["shan_task_approval"]
+        run["preflight"] = {
+            "passed": True,
+            "required_approvals": ["shan_task_approval"],
+        }
+        saved = self._commit(
+            run,
+            mutation_type="preflight_result",
+            event_type="preflight_passed",
+        )
+        self.assertEqual(saved["status"], "awaiting_approval")
+        self.assertEqual(saved["approval_requirements"], ["shan_task_approval"])
 
 
 if __name__ == "__main__":

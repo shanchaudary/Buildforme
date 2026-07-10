@@ -59,6 +59,14 @@ tests = replace_once(
 ''',
     label="dry-run terminal fixture",
 )
+tests = replace_once(
+    tests,
+    '''        with self.assertRaisesRegex(ValueError, "authorized preflight admission edge"):
+''',
+    '''        with self.assertRaisesRegex(ValueError, "authorized preflight state edge"):
+''',
+    label="preflight requirement assertion",
+)
 test_path.write_text(tests, encoding="utf-8")
 
 print("Packet 5A mode-policy validation corrections applied")

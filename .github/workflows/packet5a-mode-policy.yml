@@ -25,46 +25,80 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Apply execution-mode and approval policy
-        run: python scripts/apply_packet5a_mode_policy.py
-
-      - name: Check syntax and patch cleanliness
+      - name: Apply, validate, and publish only verified code
+        shell: bash
         run: |
-          python -m py_compile buildforme/execution_store.py tests/test_packet5a_mutation_policy_contract.py tests/test_run_mutation_authority_hardening.py
-          git diff --check
+          set +e
+          report=packet5a_mode_validation.txt
+          : > "$report"
 
-      - name: Run focused Packet 5A tests
-        run: |
-          python -m unittest discover -s tests -p 'test_packet5a_mutation_policy_contract.py' -v
-          python -m unittest discover -s tests -p 'test_run_mutation_authority*.py' -v
+          echo '== apply ==' | tee -a "$report"
+          python scripts/apply_packet5a_mode_policy.py 2>&1 | tee -a "$report"
+          apply_status=${PIPESTATUS[0]}
 
-      - name: Run full test suite
-        run: python -m unittest discover -s tests -p 'test_*.py'
+          syntax_status=99
+          focused_status=99
+          full_status=99
+          policy_status=99
+          constitution_status=99
 
-      - name: Run policy smoke check
-        run: python -m buildforme.cli classify data/sample_task.json
+          if [ "$apply_status" -eq 0 ]; then
+            echo '== syntax and diff ==' | tee -a "$report"
+            python -m py_compile buildforme/execution_store.py tests/test_packet5a_mutation_policy_contract.py tests/test_run_mutation_authority_hardening.py 2>&1 | tee -a "$report"
+            syntax_status=${PIPESTATUS[0]}
+            if [ "$syntax_status" -eq 0 ]; then
+              git diff --check 2>&1 | tee -a "$report"
+              syntax_status=${PIPESTATUS[0]}
+            fi
 
-      - name: Run Constitution validation
-        run: |
-          python - <<'PY'
+            echo '== focused tests ==' | tee -a "$report"
+            python -m unittest discover -s tests -p 'test_packet5a_mutation_policy_contract.py' -v 2>&1 | tee -a "$report"
+            contract_status=${PIPESTATUS[0]}
+            python -m unittest discover -s tests -p 'test_run_mutation_authority*.py' -v 2>&1 | tee -a "$report"
+            authority_status=${PIPESTATUS[0]}
+            if [ "$contract_status" -eq 0 ] && [ "$authority_status" -eq 0 ]; then
+              focused_status=0
+            else
+              focused_status=1
+            fi
+
+            echo '== full suite ==' | tee -a "$report"
+            python -m unittest discover -s tests -p 'test_*.py' 2>&1 | tee -a "$report"
+            full_status=${PIPESTATUS[0]}
+
+            echo '== policy smoke ==' | tee -a "$report"
+            python -m buildforme.cli classify data/sample_task.json 2>&1 | tee -a "$report"
+            policy_status=${PIPESTATUS[0]}
+
+            echo '== constitution ==' | tee -a "$report"
+            python - <<'PY' 2>&1 | tee -a "$report"
           from governance.constitution_engine import get_engine
           result = get_engine().full_validation_suite()
           print(result)
           if not result.get("passed"):
               raise SystemExit(1)
           PY
+            constitution_status=${PIPESTATUS[0]}
+          fi
 
-      - name: Remove temporary remediation machinery
-        run: |
-          rm scripts/apply_packet5a_mode_policy.py
-          rm .github/workflows/packet5a-mode-policy.yml
-          git diff --check
+          echo "statuses apply=$apply_status syntax=$syntax_status focused=$focused_status full=$full_status policy=$policy_status constitution=$constitution_status" | tee -a "$report"
 
-      - name: Commit verified mode policy
-        run: |
           git config user.name "Buildforme Governance Bot"
           git config user.email "actions@users.noreply.github.com"
-          git add buildforme/execution_store.py tests/test_packet5a_mutation_policy_contract.py tests/test_run_mutation_authority_hardening.py scripts/apply_packet5a_mode_policy.py .github/workflows/packet5a-mode-policy.yml
-          git status --short
-          git commit -m "Bind run mutations to admitted execution mode"
+
+          if [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status" -eq 0 ] && [ "$full_status" -eq 0 ] && [ "$policy_status" -eq 0 ] && [ "$constitution_status" -eq 0 ]; then
+            rm "$report"
+            rm scripts/apply_packet5a_mode_policy.py
+            rm .github/workflows/packet5a-mode-policy.yml
+            git diff --check
+            git add buildforme/execution_store.py tests/test_packet5a_mutation_policy_contract.py tests/test_run_mutation_authority_hardening.py scripts/apply_packet5a_mode_policy.py .github/workflows/packet5a-mode-policy.yml
+            git commit -m "Bind run mutations to admitted execution mode"
+            git push origin HEAD:stage-6-multi-provider-supervised-execution
+            exit 0
+          fi
+
+          git restore buildforme/execution_store.py tests/test_packet5a_mutation_policy_contract.py tests/test_run_mutation_authority_hardening.py
+          git add "$report"
+          git commit -m "Record Packet 5A mode-policy validation failure"
           git push origin HEAD:stage-6-multi-provider-supervised-execution
+          exit 1

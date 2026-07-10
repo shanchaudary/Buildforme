@@ -1070,71 +1070,105 @@ def founder_review_decision(
     actor: str = "shan",
     cleanup_worktree: bool = False,
 ) -> dict[str, Any]:
-    """Founder decision after Stage 6 review. Never merges or deploys. Hard blocks reject accept."""
-    run = store.get_run(validate_safe_id(run_id, field="run_id"))
-    actor = validate_actor(actor)
-    if str(run.get("status")) not in {"needs_review", "completed", "blocked"}:
-        if is_terminal(str(run.get("status"))) and str(run.get("status")) != "completed":
-            raise ValueError(f"cannot decide terminal status {run.get('status')}")
+    """Founder decision after Stage 6 review. Never merges or deploys.
 
-    evidence = run.get("evidence") if isinstance(run.get("evidence"), dict) else {}
+    Hard blocks reject accept. Run status, event, and decision evidence commit
+    in one transaction — evidence failure cannot leave the run completed.
+    """
+    from buildforme.evidence import build_founder_decision_evidence
+
+    run_id = validate_safe_id(run_id, field="run_id")
+    run = store.get_run(run_id)
+    actor = validate_actor(actor)
+    current = str(run.get("status") or "")
+    if current not in {"needs_review"}:
+        # Only needs_review may receive a new founder decision (no silent re-decide)
+        raise ValueError(
+            f"founder decision only allowed from needs_review (status={current})"
+        )
+
+    expected_version = int(run.get("row_version") or 1)
+
+    # Load parent execution evidence — required for live decisions
     try:
-        evidence = store.get_run_evidence(run_id)
-    except KeyError:
-        pass
+        parent_evidence = store.get_latest_execution_evidence(run_id)
+    except KeyError as exc:
+        raise ValueError(
+            "founder decision requires persisted execution evidence for this run"
+        ) from exc
+
+    if str(parent_evidence.get("run_id") or "") != run_id:
+        raise ValueError("parent execution evidence run_id mismatch")
+    if not parent_evidence.get("evidence_id") or not parent_evidence.get(
+        "evidence_fingerprint"
+    ):
+        raise ValueError("parent execution evidence missing id or fingerprint")
+
     verification = run.get("verification") if isinstance(run.get("verification"), dict) else {}
 
+    # Review gate — pure computation, no persistence
     result = apply_founder_review_decision(
         run,
         decision=decision,
         note=note,
         actor=actor,
-        evidence=evidence,
+        evidence=parent_evidence,
         verification=verification,
     )
-    run["review"] = result["review"]
-    next_status = result["next_status"]
-    current = str(run.get("status"))
-    if next_status != current and can_transition(current, next_status):
-        run = transition_run(run, next_status, actor, note or decision)
-    elif next_status == "completed" and current == "needs_review" and can_transition(
-        "needs_review", "completed"
-    ):
-        run = transition_run(run, "completed", actor, note or decision)
-    elif next_status == "rejected" and can_transition(current, "rejected"):
-        run = transition_run(run, "rejected", actor, note or decision)
-    elif next_status == "blocked" and can_transition(current, "blocked"):
-        run = transition_run(run, "blocked", actor, note or decision)
-    saved = store.save_run(run)
-    store.append_run_event(
-        run_id,
-        "founder_review_decision",
-        redact_text(f"{decision}: {note}"),
+    next_status = str(result["next_status"])
+    hard_blocks = list(result.get("hard_blocks") or [])
+    review = dict(result["review"])
+
+    # Fixed immutable decision timestamp before fingerprinting
+    decision_timestamp = utc_now_iso()
+    review["decided_at"] = decision_timestamp
+
+    if next_status != current:
+        if not can_transition(current, next_status):
+            raise ValueError(f"invalid founder transition {current} → {next_status}")
+        run_after = transition_run(run, next_status, actor, note or decision)
+    else:
+        # request_changes may keep needs_review
+        run_after = dict(run)
+        run_after["updated_at"] = utc_now_iso()
+    run_after["review"] = review
+
+    decision_ev = build_founder_decision_evidence(
+        run=run_after,
+        parent_evidence=parent_evidence,
+        decision=decision,
         actor=actor,
+        note=note,
+        review=review,
+        hard_blocks=hard_blocks,
+        previous_status=current,
+        resulting_status=str(run_after.get("status") or next_status),
+        previous_row_version=expected_version,
+        decision_timestamp=decision_timestamp,
+        cleanup_requested=bool(cleanup_worktree),
+        verification=verification,
     )
-    # Append-only decision evidence linked to execution evidence (do not mutate prior).
-    # Not full execution evidence — uses evidence_kind so storage applies fingerprint match only.
-    try:
-        import uuid as _uuid
 
-        from buildforme.evidence import compute_evidence_fingerprint
-
-        decision_ev = {
-            "schema": "buildforme.evidence.founder_decision.v1",
-            "evidence_kind": "founder_decision",
-            "evidence_id": f"ev-fd-{_uuid.uuid4().hex[:16]}",
-            "run_id": run_id,
-            "parent_evidence_id": evidence.get("evidence_id"),
+    # Single atomic commit: evidence + run transition + event (fail closed)
+    committed = store.commit_founder_decision(
+        run=run_after,
+        expected_row_version=expected_version,
+        decision_evidence=decision_ev,
+        event_type="founder_review_decision",
+        event_summary=redact_text(f"{decision}: {note}"),
+        event_actor=actor,
+        event_metadata={
             "decision": decision,
-            "note": note,
-            "actor": actor,
-            "review": result["review"],
-            "execution_evidence_id": evidence.get("evidence_id"),
-        }
-        decision_ev["evidence_fingerprint"] = compute_evidence_fingerprint(decision_ev)
-        store.save_run_evidence(decision_ev)
-    except Exception:
-        pass
+            "resulting_status": run_after.get("status"),
+            "previous_status": current,
+            "parent_evidence_id": parent_evidence.get("evidence_id"),
+            "hard_blocks": hard_blocks,
+            "decision_timestamp": decision_timestamp,
+        },
+    )
+    saved = committed["run"]
+    decision_saved = committed["decision_evidence"]
+
     if cleanup_worktree and saved.get("worktree_path") and saved.get("repository_local_path"):
         try:
             remove_worktree(
@@ -1143,11 +1177,19 @@ def founder_review_decision(
                 force=True,
             )
         except Exception as exc:
+            # Cleanup is non-authority side-effect; record event but do not undo decision
             store.append_run_event(
-                run_id, "worktree_cleanup_failed", redact_text(str(exc)[:300]), actor="system"
+                run_id,
+                "worktree_cleanup_failed",
+                redact_text(str(exc)[:300]),
+                actor="system",
             )
     _release_run_locks(store, saved)
-    return {"run": store.get_run(run_id), "decision": decision}
+    return {
+        "run": store.get_run(run_id),
+        "decision": decision,
+        "decision_evidence": decision_saved,
+    }
 
 
 def cancel_run(

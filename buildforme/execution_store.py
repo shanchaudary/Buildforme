@@ -856,6 +856,28 @@ class Stage6Store:
             raise KeyError(f"Evidence not found for run: {run_id}")
         return items[0]
 
+    def get_evidence_by_id(self, evidence_id: str) -> dict[str, Any]:
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM evidence WHERE evidence_id=?",
+                (str(evidence_id),),
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Evidence not found: {evidence_id}")
+        return loads(row[0], {})
+
+    def get_latest_execution_evidence(self, run_id: str) -> dict[str, Any]:
+        """Latest execution-kind evidence for a run (skips founder_decision records)."""
+        from buildforme.evidence import EVIDENCE_KIND_EXECUTION
+
+        for item in self.list_run_evidence(run_id=run_id, limit=50):
+            kind = str(item.get("evidence_kind") or "")
+            if kind == EVIDENCE_KIND_EXECUTION or (
+                not kind and isinstance(item.get("process"), dict)
+            ):
+                return item
+        raise KeyError(f"Execution evidence not found for run: {run_id}")
+
     def list_run_evidence(self, *, run_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         with self.db.transaction() as conn:
             if run_id:
@@ -869,6 +891,233 @@ class Stage6Store:
                     (limit,),
                 ).fetchall()
         return [loads(r[0], {}) for r in rows]
+
+    def commit_founder_decision(
+        self,
+        *,
+        run: dict[str, Any],
+        expected_row_version: int,
+        decision_evidence: dict[str, Any],
+        event_type: str = "founder_review_decision",
+        event_summary: str = "",
+        event_actor: str = "shan",
+        event_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically: validate parent evidence + insert decision evidence + update run + event.
+
+        On any failure the entire transaction rolls back — run cannot complete without evidence.
+        """
+        from buildforme.evidence import (
+            EVIDENCE_KIND_EXECUTION,
+            EVIDENCE_KIND_FOUNDER_DECISION,
+            validate_founder_decision_for_storage,
+        )
+
+        record = dict(run)
+        rid = str(record.get("id") or "")
+        if not rid:
+            raise ValueError("run id required")
+        decision_ev = dict(decision_evidence)
+        eid = str(decision_ev.get("evidence_id") or decision_ev.get("id") or new_id("ev-fd"))
+        decision_ev["evidence_id"] = eid
+        decision_ev["id"] = eid
+        decision_ev["evidence_kind"] = EVIDENCE_KIND_FOUNDER_DECISION
+        decision_ev["run_id"] = rid
+        decision_ev["immutable"] = True
+
+        problems = validate_founder_decision_for_storage(decision_ev)
+        if problems:
+            raise ValueError("founder decision evidence rejected: " + "; ".join(problems))
+
+        parent_id = str(
+            decision_ev.get("parent_evidence_id") or decision_ev.get("execution_evidence_id") or ""
+        )
+        if not parent_id:
+            raise ValueError("parent execution evidence required")
+
+        resulting = str(decision_ev.get("resulting_status") or "")
+        if str(record.get("status") or "") != resulting:
+            raise ValueError(
+                f"inconsistent resulting status: run has {record.get('status')!r} "
+                f"decision evidence has {resulting!r}"
+            )
+
+        now = utc_now_iso()
+        decision_ev.setdefault("saved_at", now)
+        record["updated_at"] = now
+        meta = dict(event_metadata or {})
+        meta.setdefault("decision", decision_ev.get("decision"))
+        meta.setdefault("actor", event_actor)
+        meta.setdefault("evidence_id", eid)
+        meta.setdefault("parent_evidence_id", parent_id)
+        meta.setdefault("resulting_status", resulting)
+
+        with self.db.transaction() as conn:
+            existing = conn.execute(
+                "SELECT id, row_version, payload_json FROM runs WHERE id=?", (rid,)
+            ).fetchone()
+            if not existing:
+                raise KeyError(f"Run not found: {rid}")
+            current_ver = int(existing[1] or 1)
+            if current_ver != int(expected_row_version):
+                raise ValueError(
+                    f"stale founder decision rejected: expected row_version={expected_row_version} "
+                    f"have={current_ver} run_id={rid}"
+                )
+
+            # Parent execution evidence must exist, belong to this run, and match fingerprint
+            parent_row = conn.execute(
+                "SELECT payload_json, evidence_fingerprint FROM evidence WHERE evidence_id=?",
+                (parent_id,),
+            ).fetchone()
+            if not parent_row:
+                raise ValueError(f"parent execution evidence not found: {parent_id}")
+            parent_payload = loads(parent_row[0], {})
+            if str(parent_payload.get("run_id") or "") != rid:
+                raise ValueError(
+                    f"parent evidence {parent_id} belongs to run "
+                    f"{parent_payload.get('run_id')!r}, not {rid!r}"
+                )
+            parent_kind = str(parent_payload.get("evidence_kind") or "")
+            parent_is_execution = parent_kind == EVIDENCE_KIND_EXECUTION or (
+                not parent_kind and isinstance(parent_payload.get("process"), dict)
+            )
+            if not parent_is_execution:
+                raise ValueError(
+                    f"parent evidence must be execution evidence, got kind={parent_kind!r}"
+                )
+            expected_parent_fp = str(decision_ev.get("parent_evidence_fingerprint") or "")
+            actual_parent_fp = str(
+                parent_payload.get("evidence_fingerprint") or parent_row[1] or ""
+            )
+            if not expected_parent_fp or expected_parent_fp != actual_parent_fp:
+                raise ValueError(
+                    "parent evidence fingerprint mismatch or missing — refusing decision"
+                )
+
+            # Reject duplicate decision evidence ID
+            if conn.execute(
+                "SELECT evidence_id FROM evidence WHERE evidence_id=?", (eid,)
+            ).fetchone():
+                raise ValueError(f"evidence mutation forbidden: {eid} is append-only")
+
+            # Reject terminal replay: a prior terminal founder decision is final
+            prior_decisions = conn.execute(
+                "SELECT payload_json FROM evidence WHERE run_id=?", (rid,)
+            ).fetchall()
+            terminal_results = {"completed", "rejected", "blocked"}
+            for prow in prior_decisions:
+                prev = loads(prow[0], {})
+                if str(prev.get("evidence_kind") or "") != EVIDENCE_KIND_FOUNDER_DECISION:
+                    continue
+                prev_result = str(prev.get("resulting_status") or "")
+                if prev_result in terminal_results:
+                    raise ValueError(
+                        f"founder decision already terminal for run {rid} "
+                        f"(evidence_id={prev.get('evidence_id')}, "
+                        f"resulting_status={prev_result}); replay rejected"
+                    )
+                # Non-terminal prior decisions (e.g. request_changes) allowed; continue
+
+            prior_count = conn.execute(
+                "SELECT COUNT(*) FROM evidence WHERE run_id=?", (rid,)
+            ).fetchone()[0]
+            decision_ev["sequence"] = int(prior_count) + 1
+            decision_ev.setdefault("attempt", decision_ev["sequence"])
+            decision_ev["parent_evidence_id"] = parent_id
+
+            conn.execute(
+                """INSERT INTO evidence(evidence_id, run_id, sequence, attempt, parent_evidence_id,
+                   payload_json, evidence_fingerprint, saved_at, immutable)
+                   VALUES (?,?,?,?,?,?,?,?,1)""",
+                (
+                    eid,
+                    rid,
+                    decision_ev["sequence"],
+                    decision_ev.get("attempt"),
+                    parent_id,
+                    dumps(decision_ev),
+                    decision_ev.get("evidence_fingerprint"),
+                    decision_ev["saved_at"],
+                ),
+            )
+
+            new_ver = current_ver + 1
+            record["row_version"] = new_ver
+            # Attach decision evidence pointer on run payload
+            ids = list(record.get("evidence_ids") or [])
+            if eid not in ids:
+                ids.append(eid)
+            record["evidence_ids"] = ids
+            record["founder_decision_evidence_id"] = eid
+            record["founder_decision_fingerprint"] = decision_ev.get("evidence_fingerprint")
+
+            cur = conn.execute(
+                """UPDATE runs SET project_id=?, task_id=?, packet_id=?, provider_id=?, repository=?,
+                repository_local_path=?, baseline_ref=?, baseline_commit=?, requested_target_branch=?,
+                execution_branch=?, operating_mode=?, risk=?, status=?, execution_mode=?,
+                scope_fingerprint=?, constitution_version=?, constitution_hash=?, constitution_lease_id=?,
+                constitution_lease_fingerprint=?, task_lock_id=?, payload_json=?, updated_at=?,
+                started_at=?, finished_at=?, idempotency_key=?, row_version=?
+                WHERE id=? AND row_version=?""",
+                (
+                    str(record.get("project_id") or ""),
+                    record.get("task_id"),
+                    record.get("packet_id"),
+                    str(record.get("provider_id") or ""),
+                    str(record.get("repository") or ""),
+                    record.get("repository_local_path"),
+                    record.get("baseline_ref"),
+                    record.get("baseline_commit"),
+                    record.get("requested_target_branch") or record.get("target_branch"),
+                    record.get("execution_branch"),
+                    record.get("operating_mode"),
+                    record.get("risk"),
+                    str(record.get("status") or "draft"),
+                    str(record.get("execution_mode") or record.get("mode") or "dry_run"),
+                    record.get("scope_fingerprint"),
+                    record.get("constitution_version"),
+                    record.get("constitution_hash"),
+                    record.get("constitution_lease_id"),
+                    record.get("constitution_lease_fingerprint"),
+                    record.get("task_lock_id"),
+                    dumps(record),
+                    record["updated_at"],
+                    record.get("started_at"),
+                    record.get("finished_at"),
+                    record.get("idempotency_key"),
+                    new_ver,
+                    rid,
+                    current_ver,
+                ),
+            )
+            if cur.rowcount == 0:
+                raise ValueError(f"stale founder decision race: run_id={rid}")
+
+            conn.execute(
+                """INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (
+                    new_id("re"),
+                    rid,
+                    event_type,
+                    event_summary,
+                    event_actor,
+                    dumps(meta),
+                    now,
+                ),
+            )
+
+        return {
+            "run": record,
+            "decision_evidence": decision_ev,
+            "event": {
+                "event_type": event_type,
+                "summary": event_summary,
+                "actor": event_actor,
+                "metadata": meta,
+            },
+        }
 
     # —— Founder sessions ——
     def create_founder_session_record(self, record: dict[str, Any]) -> dict[str, Any]:

@@ -20,6 +20,9 @@ from buildforme.storage import utc_now_iso
 EVIDENCE_SCHEMA = "buildforme.evidence.v1"
 FINGERPRINT_SCHEMA = "buildforme.evidence_fingerprint.v3"
 EVIDENCE_KIND_EXECUTION = "execution"
+EVIDENCE_KIND_FOUNDER_DECISION = "founder_decision"
+FOUNDER_DECISION_SCHEMA = "buildforme.evidence.founder_decision.v1"
+FOUNDER_FINGERPRINT_SCHEMA = "buildforme.founder_decision_fingerprint.v1"
 
 # Material fields required on execution evidence before storage accepts it.
 EXECUTION_REQUIRED_TOP_LEVEL = (
@@ -291,6 +294,156 @@ def compute_evidence_fingerprint(bundle: dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def build_founder_decision_evidence(
+    *,
+    run: dict[str, Any],
+    parent_evidence: dict[str, Any],
+    decision: str,
+    actor: str,
+    note: str,
+    review: dict[str, Any],
+    hard_blocks: list[str],
+    previous_status: str,
+    resulting_status: str,
+    previous_row_version: int,
+    decision_timestamp: str,
+    cleanup_requested: bool = False,
+    verification: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build complete founder-decision evidence and fingerprint it once.
+
+    decision_timestamp must be fixed before this call and never changed afterward.
+    """
+    verification = verification or {}
+    parent_evidence = parent_evidence or {}
+    review = review or {}
+    hard_blocks = list(hard_blocks or [])
+
+    evidence_id = f"ev-fd-{uuid.uuid4().hex[:16]}"
+    # Canonical verification material for binding (stable subset)
+    ver_material = {
+        "passed": verification.get("passed"),
+        "blocking_reasons": list(verification.get("blocking_reasons") or []),
+    }
+    bundle: dict[str, Any] = {
+        "schema": FOUNDER_DECISION_SCHEMA,
+        "evidence_kind": EVIDENCE_KIND_FOUNDER_DECISION,
+        "evidence_id": evidence_id,
+        "id": evidence_id,
+        "immutable": True,
+        "run_id": run.get("id"),
+        "project_id": run.get("project_id"),
+        "packet_id": run.get("packet_id"),
+        "task_id": run.get("task_id"),
+        "repository": run.get("repository"),
+        "parent_evidence_id": parent_evidence.get("evidence_id") or parent_evidence.get("id"),
+        "parent_evidence_fingerprint": parent_evidence.get("evidence_fingerprint"),
+        "execution_evidence_id": parent_evidence.get("evidence_id") or parent_evidence.get("id"),
+        "decision": str(decision or "").strip().lower(),
+        "actor": str(actor or ""),
+        "note": str(note or ""),
+        "review_status": review.get("status"),
+        "review_findings": list(review.get("findings") or review.get("hard_blocks_at_decision") or []),
+        "hard_blocks": hard_blocks,
+        "verification_status": ver_material.get("passed"),
+        "verification_material": ver_material,
+        "verification_fingerprint": redact_hash(
+            json.dumps(ver_material, sort_keys=True, separators=(",", ":"), default=str)
+        ),
+        "constitution_hash": run.get("constitution_hash"),
+        "constitution_version": run.get("constitution_version"),
+        "constitution_lease_id": run.get("constitution_lease_id"),
+        "constitution_lease_fingerprint": run.get("constitution_lease_fingerprint"),
+        "scope_fingerprint": run.get("scope_fingerprint"),
+        "previous_status": previous_status,
+        "resulting_status": resulting_status,
+        "previous_row_version": int(previous_row_version),
+        "decision_timestamp": decision_timestamp,
+        "cleanup_requested": bool(cleanup_requested),
+        "review": {
+            "status": review.get("status"),
+            "founder_decision": review.get("founder_decision"),
+            "founder_actor": review.get("founder_actor"),
+            "hard_blocks_at_decision": list(review.get("hard_blocks_at_decision") or hard_blocks),
+            "accept_for_pr_prep_allowed": review.get("accept_for_pr_prep_allowed"),
+        },
+    }
+    bundle["evidence_fingerprint"] = compute_founder_decision_fingerprint(bundle)
+    return bundle
+
+
+def compute_founder_decision_fingerprint(bundle: dict[str, Any]) -> str:
+    """Canonical founder-decision fingerprint — sole authority for this evidence kind."""
+    review = bundle.get("review") if isinstance(bundle.get("review"), dict) else {}
+    material = {
+        "schema": FOUNDER_FINGERPRINT_SCHEMA,
+        "evidence_schema": bundle.get("schema") or FOUNDER_DECISION_SCHEMA,
+        "evidence_kind": EVIDENCE_KIND_FOUNDER_DECISION,
+        "evidence_id": bundle.get("evidence_id") or bundle.get("id"),
+        "run_id": bundle.get("run_id"),
+        "project_id": bundle.get("project_id"),
+        "packet_id": bundle.get("packet_id"),
+        "task_id": bundle.get("task_id"),
+        "repository": bundle.get("repository"),
+        "parent_evidence_id": bundle.get("parent_evidence_id")
+        or bundle.get("execution_evidence_id"),
+        "parent_evidence_fingerprint": bundle.get("parent_evidence_fingerprint"),
+        "decision": bundle.get("decision"),
+        "actor": bundle.get("actor"),
+        "note": bundle.get("note"),
+        "review_status": bundle.get("review_status") or review.get("status"),
+        "hard_blocks": list(bundle.get("hard_blocks") or review.get("hard_blocks_at_decision") or []),
+        "review_findings": list(bundle.get("review_findings") or []),
+        "verification_status": bundle.get("verification_status"),
+        "verification_fingerprint": bundle.get("verification_fingerprint"),
+        "constitution_hash": bundle.get("constitution_hash"),
+        "constitution_lease_id": bundle.get("constitution_lease_id"),
+        "constitution_lease_fingerprint": bundle.get("constitution_lease_fingerprint"),
+        "scope_fingerprint": bundle.get("scope_fingerprint"),
+        "previous_status": bundle.get("previous_status"),
+        "resulting_status": bundle.get("resulting_status"),
+        "previous_row_version": bundle.get("previous_row_version"),
+        "decision_timestamp": bundle.get("decision_timestamp"),
+        "cleanup_requested": bool(bundle.get("cleanup_requested")),
+    }
+    raw = json.dumps(material, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def validate_founder_decision_for_storage(evidence: dict[str, Any]) -> list[str]:
+    """Validate founder-decision evidence. Never auto-repair fingerprint."""
+    problems: list[str] = []
+    if not isinstance(evidence, dict):
+        return ["founder decision evidence must be an object"]
+    if str(evidence.get("evidence_kind") or "") != EVIDENCE_KIND_FOUNDER_DECISION:
+        problems.append("evidence_kind must be founder_decision")
+    required = (
+        "schema",
+        "evidence_id",
+        "run_id",
+        "parent_evidence_id",
+        "parent_evidence_fingerprint",
+        "decision",
+        "actor",
+        "resulting_status",
+        "previous_status",
+        "previous_row_version",
+        "decision_timestamp",
+        "evidence_fingerprint",
+    )
+    for field in required:
+        if evidence.get(field) is None or evidence.get(field) == "":
+            problems.append(f"founder decision missing required field: {field}")
+    provided = evidence.get("evidence_fingerprint")
+    if provided and isinstance(provided, str) and len(provided) >= 32:
+        expected = compute_founder_decision_fingerprint(evidence)
+        if provided != expected:
+            problems.append(
+                "founder decision fingerprint mismatch (refusing silent repair)"
+            )
+    return problems
+
+
 def validate_evidence_for_storage(evidence: dict[str, Any]) -> list[str]:
     """Return problems if evidence must not be persisted. Empty list = OK.
 
@@ -301,6 +454,9 @@ def validate_evidence_for_storage(evidence: dict[str, Any]) -> list[str]:
         return ["evidence must be an object"]
 
     kind = str(evidence.get("evidence_kind") or "")
+    if kind == EVIDENCE_KIND_FOUNDER_DECISION:
+        return validate_founder_decision_for_storage(evidence)
+
     # Execution evidence (default for live supervised path)
     is_execution = kind == EVIDENCE_KIND_EXECUTION or (
         not kind and isinstance(evidence.get("process"), dict) and evidence.get("run_id")

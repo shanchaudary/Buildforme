@@ -1141,6 +1141,15 @@ class LocalStore:
     def get_run_evidence(self, run_id: str) -> dict[str, Any]:
         return self.s6.get_run_evidence(run_id)
 
+    def get_latest_execution_evidence(self, run_id: str) -> dict[str, Any]:
+        return self.s6.get_latest_execution_evidence(run_id)
+
+    def get_evidence_by_id(self, evidence_id: str) -> dict[str, Any]:
+        return self.s6.get_evidence_by_id(evidence_id)
+
+    def commit_founder_decision(self, **kwargs: Any) -> dict[str, Any]:
+        return self.s6.commit_founder_decision(**kwargs)
+
     def list_run_evidence(self, *, run_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         return self.s6.list_run_evidence(run_id=run_id, limit=limit)
 

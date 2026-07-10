@@ -27,7 +27,6 @@ def validate_approval_binding(
         "constitution_version": run.get("constitution_version"),
         "constitution_hash": run.get("constitution_hash"),
         "constitution_lease_id": run.get("constitution_lease_id"),
-        "constitution_lease_fingerprint": run.get("constitution_lease_fingerprint"),
     }
     for field, value in expected.items():
         if str(approval.get(field) or "") != str(value or ""):

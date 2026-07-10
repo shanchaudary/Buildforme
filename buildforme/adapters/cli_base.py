@@ -148,6 +148,13 @@ class CliProviderAdapter:
             else:
                 argv[0] = str(executable)
 
+            stdin_bytes = None
+            if hasattr(self, "stdin_for_execution"):
+                try:
+                    stdin_bytes = self.stdin_for_execution(prompt_path=prompt_path)
+                except Exception:
+                    stdin_bytes = None
+
             timeout_min = int(run.get("timeout_minutes") or 30)
             supervisor = get_process_supervisor()
             result = supervisor.run(
@@ -158,6 +165,7 @@ class CliProviderAdapter:
                 provider_id=self.provider_id,
                 on_event=on_event,
                 use_provider_env_allowlist=True,
+                stdin_bytes=stdin_bytes,
             )
             result["provider_id"] = self.provider_id
             result["transport"] = "cli"

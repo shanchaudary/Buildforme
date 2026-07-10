@@ -108,8 +108,18 @@ def health_check_provider(
     provider_record: dict[str, Any] | None = None,
     *,
     extra_paths: list[str] | None = None,
+    force_compat: bool = False,
 ) -> dict[str, Any]:
-    """Full health snapshot for one provider (no secrets)."""
+    """Full health snapshot for one provider (no secrets).
+
+    live_ready requires full compatibility profile + constitution ack + enabled.
+    Env marker alone is not sufficient; --version alone is not sufficient.
+    """
+    from buildforme.provider_compatibility import (
+        compatibility_allows_live,
+        verify_provider_compatibility,
+    )
+
     pid = str(provider_id or "").strip().lower()
     disc = discover_executable(pid, extra_paths=extra_paths)
     version = probe_version(disc.get("executable"), pid)
@@ -118,13 +128,30 @@ def health_check_provider(
     constitution_ack = bool(record.get("constitution_acknowledged"))
     auth_ready = _auth_readiness(pid, disc.get("executable"))
 
-    # Live readiness requires proven auth readiness — unknown is NOT live-ready.
+    compat = verify_provider_compatibility(
+        pid,
+        disc.get("executable"),
+        version_text=version.get("version"),
+        force=force_compat,
+    )
+    # Align auth component with discovery auth_ready (single source for marker names)
+    if auth_ready.get("status") == "ready":
+        compat["auth_verified"] = True
+        comps = dict(compat.get("live_ready_components") or {})
+        comps["auth_verified"] = True
+        compat["live_ready_components"] = comps
+        compat["auth"] = auth_ready
+    else:
+        compat["auth_verified"] = False
+        comps = dict(compat.get("live_ready_components") or {})
+        comps["auth_verified"] = False
+        compat["live_ready_components"] = comps
+        compat["auth"] = auth_ready
+
     live_ready = bool(
         disc["available"]
         and version.get("version_ok")
-        and enabled
-        and constitution_ack
-        and auth_ready.get("status") == "ready"
+        and compatibility_allows_live(compat, constitution_ack=constitution_ack, enabled=enabled)
     )
 
     unsupported_reasons: list[str] = []
@@ -140,6 +167,11 @@ def health_check_provider(
         unsupported_reasons.append("authentication not ready")
     elif auth_ready.get("status") == "unknown":
         unsupported_reasons.append("authentication unknown (not treated as live-ready)")
+    for problem in compat.get("problems") or []:
+        if problem not in unsupported_reasons:
+            unsupported_reasons.append(problem)
+    if not live_ready and disc["available"] and not unsupported_reasons:
+        unsupported_reasons.append("compatibility profile incomplete")
 
     if live_ready:
         status = "available"
@@ -160,6 +192,18 @@ def health_check_provider(
         "version": version.get("version"),
         "version_ok": version.get("version_ok"),
         "auth": auth_ready,
+        "compatibility": {
+            "binary_available": compat.get("binary_available"),
+            "version_verified": compat.get("version_verified"),
+            "auth_verified": compat.get("auth_verified"),
+            "command_contract_verified": compat.get("command_contract_verified"),
+            "non_interactive_mode_verified": compat.get("non_interactive_mode_verified"),
+            "prompt_delivery_verified": compat.get("prompt_delivery_verified"),
+            "cwd_behavior_verified": compat.get("cwd_behavior_verified"),
+            "capabilities_verified": compat.get("capabilities_verified"),
+            "from_cache": compat.get("from_cache"),
+            "problems": list(compat.get("problems") or []),
+        },
         "constitution_acknowledged": constitution_ack,
         "constitution_version": record.get("constitution_version"),
         "capabilities": list(record.get("capabilities") or []),

@@ -716,14 +716,18 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
                 return
+            auth = self._require_founder_mutation(payload)
             control = self._store().set_project_execution_control(
                 project_id,
                 execution_status=str(payload.get("execution_status") or "enabled"),
                 reason=str(payload.get("reason") or ""),
+                actor=str(payload.get("actor") or auth.get("actor") or "shan"),
             )
             self._json(HTTPStatus.OK, {"control": control})
         except (KeyError, ValueError) as exc:
             code = HTTPStatus.NOT_FOUND if isinstance(exc, KeyError) else HTTPStatus.BAD_REQUEST
+            if "founder" in str(exc).lower() or "csrf" in str(exc).lower() or "host" in str(exc).lower() or "origin" in str(exc).lower():
+                code = HTTPStatus.FORBIDDEN
             self._json(code, {"error": str(exc)})
 
     def _create_lock(self) -> None:
@@ -743,10 +747,17 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             payload = self._read_json() if int(self.headers.get("Content-Length") or "0") else {}
             if not isinstance(payload, dict):
                 payload = {}
+            self._require_founder_mutation(payload)
             lock = self._store().release_repository_lock(lock_id, reason=str(payload.get("reason") or ""))
             self._json(HTTPStatus.OK, {"lock": lock})
         except KeyError as exc:
             self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+        except ValueError as exc:
+            msg = str(exc).lower()
+            code = HTTPStatus.FORBIDDEN if any(
+                x in msg for x in ("founder", "csrf", "host", "origin", "token")
+            ) else HTTPStatus.BAD_REQUEST
+            self._json(code, {"error": str(exc)})
         except Exception as exc:  # noqa: BLE001
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
@@ -784,11 +795,17 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             body = {}
         if not isinstance(body, dict):
             body = {}
+        try:
+            auth = self._require_founder_mutation(body)
+        except ValueError as exc:
+            self._json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
+            return
         engine = get_engine()
         store = self._store()
         provider_id = body.get("provider_id")
         targets = [provider_id] if provider_id else [p.get("provider_id") for p in store.list_providers()]
         results = []
+        actor = str(body.get("actor") or auth.get("actor") or "shan")
         for pid in targets:
             if not pid:
                 continue
@@ -796,7 +813,7 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
                 provider = store.get_provider_record(str(pid))
             except KeyError:
                 continue
-            refreshed = engine.refresh_provider(provider, actor=str(body.get("actor") or "shan"))
+            refreshed = engine.refresh_provider(provider, actor=actor)
             saved = store.set_provider_constitution_ack(
                 str(pid),
                 {
@@ -836,6 +853,11 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             body = {}
         if not isinstance(body, dict):
             body = {}
+        try:
+            auth = self._require_founder_mutation(body)
+        except ValueError as exc:
+            self._json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
+            return
         engine = get_engine()
         store = self._store()
         try:
@@ -843,7 +865,9 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
         except KeyError as exc:
             self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
             return
-        refreshed = engine.acknowledge_provider(provider, actor=str(body.get("actor") or "shan"))
+        refreshed = engine.acknowledge_provider(
+            provider, actor=str(body.get("actor") or auth.get("actor") or "shan")
+        )
         saved = store.set_provider_constitution_ack(
             provider_id,
             {
@@ -870,6 +894,11 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             if not isinstance(payload, dict):
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
+                return
+            try:
+                self._require_founder_mutation(payload)
+            except ValueError as exc:
+                self._json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
                 return
             # Reject credential fields
             for key in payload:
@@ -964,6 +993,24 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
                 return
+            requested_mode = str(
+                payload.get("execution_mode") or payload.get("mode") or "dry_run"
+            ).strip().lower().replace("-", "_")
+            # Live-supervised admission is execution authority — founder + CSRF required.
+            # Dry-run create remains local loopback-only (Host enforced on all mutations that gate).
+            if requested_mode == "live_supervised":
+                try:
+                    self._require_founder_mutation(payload)
+                except ValueError as exc:
+                    self._json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
+                    return
+            else:
+                # Even dry_run create requires loopback Host (no remote draft spam)
+                try:
+                    self._assert_loopback_host()
+                except ValueError as exc:
+                    self._json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
+                    return
             run = create_run(self._store(), payload)
             mode = run.get("execution_mode") or run.get("mode") or "dry_run"
             self._json(
@@ -1444,12 +1491,29 @@ def _safe_int(value: str | None, default: int, maximum: int) -> int:
     return min(max(parsed, 1), maximum)
 
 
+def _assert_loopback_bind(host: str) -> str:
+    """Live service must not bind non-loopback. Host header checks alone are insufficient."""
+    name = str(host or "").strip().lower()
+    if name in {"127.0.0.1", "localhost", "::1", "[::1]"}:
+        return "127.0.0.1" if name in {"localhost", "127.0.0.1"} else name.strip("[]")
+    # Explicit remote read-only escape hatch disables live execution mutations at bind time
+    # by refusing the bind entirely — safer than a half-open remote server.
+    raise ValueError(
+        f"non-loopback bind rejected: {host!r}. "
+        "Stage 6 live service binds only 127.0.0.1 / localhost / ::1. "
+        "Host-header-only checks cannot make 0.0.0.0 safe."
+    )
+
+
 def run(host: str = "127.0.0.1", port: int = 8787, state_path: str | Path = DEFAULT_STATE_PATH) -> None:
-    server = ThreadingHTTPServer((host, port), BuildformeRequestHandler)
+    bind_host = _assert_loopback_bind(host)
+    server = ThreadingHTTPServer((bind_host, port), BuildformeRequestHandler)
     server.state_path = Path(state_path)  # type: ignore[attr-defined]
-    print(f"Buildforme running at http://{host}:{port}")
+    server.server_port = port  # type: ignore[attr-defined]
+    print(f"Buildforme running at http://{bind_host}:{port}")
     print(f"State file: {Path(state_path)}")
     print("GitHub access: read-only (no merge, labels, comments, or PR writes)")
+    print("Bind policy: loopback only — live execution never exposed on 0.0.0.0")
     server.serve_forever()
 
 
@@ -1459,7 +1523,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--state", default=str(DEFAULT_STATE_PATH))
     args = parser.parse_args(argv)
-    run(host=args.host, port=args.port, state_path=args.state)
+    try:
+        run(host=args.host, port=args.port, state_path=args.state)
+    except ValueError as exc:
+        print(f"error: {exc}", file=__import__("sys").stderr)
+        return 2
     return 0
 
 

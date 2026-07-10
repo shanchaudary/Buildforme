@@ -16,7 +16,7 @@ from typing import Any, Iterator
 
 from buildforme.storage import utc_now_iso
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS runs (
   updated_at TEXT NOT NULL,
   started_at TEXT,
   finished_at TEXT,
-  idempotency_key TEXT UNIQUE
+  idempotency_key TEXT UNIQUE,
+  row_version INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS run_events (
@@ -188,6 +189,25 @@ CREATE TABLE IF NOT EXISTS audit_log (
   detail TEXT,
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS project_execution_controls (
+  project_id TEXT PRIMARY KEY,
+  execution_status TEXT NOT NULL,
+  reason TEXT,
+  actor TEXT,
+  updated_at TEXT NOT NULL,
+  payload_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS provider_compat_cache (
+  provider_id TEXT PRIMARY KEY,
+  executable TEXT,
+  version_text TEXT,
+  profile_json TEXT NOT NULL,
+  live_ready INTEGER NOT NULL DEFAULT 0,
+  checked_at TEXT NOT NULL,
+  expires_at_epoch INTEGER NOT NULL
+);
 """
 
 
@@ -228,10 +248,58 @@ class ExecutionDB:
                         "INSERT OR IGNORE INTO execution_control(id, kill_switch_active, reason, actor, updated_at, payload_json) VALUES (1, 0, '', 'system', ?, '{}')",
                         (utc_now_iso(),),
                     )
+                else:
+                    current = int(row[0] or 0)
+                    if current < 2:
+                        self._migrate_to_v2(conn)
+                        conn.execute(
+                            "UPDATE schema_meta SET value=? WHERE key='version'",
+                            (str(SCHEMA_VERSION),),
+                        )
+                    elif current < SCHEMA_VERSION:
+                        conn.execute(
+                            "UPDATE schema_meta SET value=? WHERE key='version'",
+                            (str(SCHEMA_VERSION),),
+                        )
                 conn.commit()
                 self._initialized = True
             finally:
                 conn.close()
+
+    def _migrate_to_v2(self, conn: sqlite3.Connection) -> None:
+        """Additive migration: row_version, project controls, compat cache."""
+        cols = {
+            r[1]
+            for r in conn.execute("PRAGMA table_info(runs)").fetchall()
+        }
+        if "row_version" not in cols:
+            conn.execute(
+                "ALTER TABLE runs ADD COLUMN row_version INTEGER NOT NULL DEFAULT 1"
+            )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS project_execution_controls (
+              project_id TEXT PRIMARY KEY,
+              execution_status TEXT NOT NULL,
+              reason TEXT,
+              actor TEXT,
+              updated_at TEXT NOT NULL,
+              payload_json TEXT NOT NULL
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS provider_compat_cache (
+              provider_id TEXT PRIMARY KEY,
+              executable TEXT,
+              version_text TEXT,
+              profile_json TEXT NOT NULL,
+              live_ready INTEGER NOT NULL DEFAULT 0,
+              checked_at TEXT NOT NULL,
+              expires_at_epoch INTEGER NOT NULL
+            )"""
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('migration_cutover', '')"
+        )
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:

@@ -139,7 +139,12 @@ class ProjectControlAdversarialTests(_Fixture):
                 "objective": "x",
             }
         )
-        # Wipe controls file to simulate missing governance record
+        # Wipe Stage 6 SQLite authority (and legacy JSON) to simulate missing control
+        with self.store.s6.db.transaction() as conn:
+            conn.execute(
+                "DELETE FROM project_execution_controls WHERE project_id=?",
+                ("emptyctl",),
+            )
         path = self.store.project_exec_controls_path
         if path.exists():
             path.write_text('{"controls": []}\n', encoding="utf-8")

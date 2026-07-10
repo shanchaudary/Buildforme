@@ -123,24 +123,39 @@ def build_evidence_bundle(
 
 
 def _fingerprint(bundle: dict[str, Any]) -> str:
+    """Canonical evidence-subset schema — material fields only, deterministic order."""
+    review = bundle.get("review") if isinstance(bundle.get("review"), dict) else {}
+    founder = bundle.get("founder_decision") if isinstance(bundle.get("founder_decision"), dict) else {}
     material = {
+        "schema": "buildforme.evidence_fingerprint.v2",
         "evidence_id": bundle.get("evidence_id"),
         "run_id": bundle.get("run_id"),
         "packet_id": bundle.get("packet_id"),
         "repository": bundle.get("repository"),
         "approved_baseline_commit": bundle.get("approved_baseline_commit"),
         "post_run_head_sha": bundle.get("post_run_head_sha"),
-        "branch": bundle.get("branch"),
+        "execution_branch": bundle.get("execution_branch") or bundle.get("branch"),
         "provider_id": bundle.get("provider_id"),
         "files_changed": bundle.get("files_changed"),
         "manifest_fingerprint": bundle.get("manifest_fingerprint"),
+        "patch_fingerprint": bundle.get("patch_fingerprint") or bundle.get("patch_hash"),
         "process": {
             "exit_code": (bundle.get("process") or {}).get("exit_code"),
             "stdout_sha256": (bundle.get("process") or {}).get("stdout_sha256"),
             "stderr_sha256": (bundle.get("process") or {}).get("stderr_sha256"),
+            "pid": (bundle.get("process") or {}).get("pid"),
+            "argv": (bundle.get("process") or {}).get("argv"),
         },
-        "constitution": bundle.get("constitution"),
+        "constitution": {
+            "version": (bundle.get("constitution") or {}).get("version"),
+            "hash": (bundle.get("constitution") or {}).get("hash"),
+            "lease_id": (bundle.get("constitution") or {}).get("lease_id"),
+            "lease_fingerprint": (bundle.get("constitution") or {}).get("lease_fingerprint"),
+        },
         "verification_passed": (bundle.get("verification") or {}).get("passed"),
+        "review_accept_allowed": review.get("accept_for_pr_prep_allowed"),
+        "founder_decision": founder.get("decision") or review.get("founder_decision"),
+        "event_hashes": bundle.get("event_hashes"),
     }
     raw = json.dumps(material, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()

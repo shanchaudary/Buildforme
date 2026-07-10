@@ -846,6 +846,13 @@ class LocalStore:
         return record
 
     def get_project_execution_control(self, project_id: str) -> dict[str, Any]:
+        # SQLite is Stage 6 authority for project execution controls.
+        record = self.s6.get_project_execution_control(str(project_id))
+        if record:
+            out = dict(record)
+            out["explicit"] = True
+            return out
+        # One-time JSON compatibility import (legacy Stage 5 files only).
         data = self._load_object(
             self.project_exec_controls_path,
             default={"controls": []},
@@ -853,9 +860,14 @@ class LocalStore:
         )
         for item in data.get("controls") or []:
             if str(item.get("project_id")) == str(project_id):
-                out = dict(item)
-                out["explicit"] = True
-                return out
+                status = str(item.get("execution_status") or "locked")
+                if status in PROJECT_EXEC_STATUSES:
+                    return self.s6.set_project_execution_control(
+                        str(project_id),
+                        execution_status=status,
+                        reason=str(item.get("reason") or "imported from JSON"),
+                        actor=str(item.get("actor") or "system"),
+                    )
         # Fail closed: missing control is not enabled.
         return {
             "project_id": project_id,
@@ -871,32 +883,17 @@ class LocalStore:
         *,
         execution_status: str,
         reason: str = "",
+        actor: str = "shan",
     ) -> dict[str, Any]:
         self.get_project(project_id)
         if execution_status not in PROJECT_EXEC_STATUSES:
             raise ValueError(f"execution_status must be one of {sorted(PROJECT_EXEC_STATUSES)}")
-        record = {
-            "project_id": project_id,
-            "execution_status": execution_status,
-            "reason": str(reason or ""),
-            "updated_at": utc_now_iso(),
-            "explicit": True,
-        }
-        data = self._load_object(
-            self.project_exec_controls_path,
-            default={"controls": []},
-            list_key="controls",
+        record = self.s6.set_project_execution_control(
+            project_id,
+            execution_status=execution_status,
+            reason=str(reason or ""),
+            actor=actor,
         )
-        controls = list(data.get("controls") or [])
-        updated = False
-        for index, item in enumerate(controls):
-            if str(item.get("project_id")) == str(project_id):
-                controls[index] = record
-                updated = True
-                break
-        if not updated:
-            controls.append(record)
-        self._atomic_write(self.project_exec_controls_path, {"controls": controls})
         self.append_event(
             {
                 "event_type": "project_execution_control_changed",
@@ -1221,8 +1218,14 @@ class LocalStore:
     def get_run(self, run_id: str) -> dict[str, Any]:
         return self.s6.get_run(run_id)
 
-    def save_run(self, run: dict[str, Any]) -> dict[str, Any]:
-        return self.s6.save_run(run)
+    def save_run(self, run: dict[str, Any], *, expected_row_version: int | None = None) -> dict[str, Any]:
+        return self.s6.save_run(run, expected_row_version=expected_row_version)
+
+    def admit_run_atomic(self, **kwargs: Any) -> dict[str, Any]:
+        return self.s6.admit_run_atomic(**kwargs)
+
+    def transition_run_with_event(self, run: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        return self.s6.transition_run_with_event(run, **kwargs)
 
     def save_run_legacy_json(self, run: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(run, dict) or not run.get("id"):

@@ -41,10 +41,7 @@ from buildforme.worktree import (
 )
 from governance.constitution_binding_guard import validate_approval_binding
 from governance.constitution_engine import get_engine
-from governance.constitution_lease import (
-    persist_lease_append_only,
-    validate_run_lease_against_store,
-)
+from governance.constitution_lease import validate_run_lease_against_store
 
 DEFAULT_BUDGET = {
     "max_tokens": None,
@@ -254,27 +251,8 @@ def create_run(store: LocalStore, payload: dict[str, Any]) -> dict[str, Any]:
         "task_lock_id": None,
         "evidence_ids": [],
     }
-    # Task lock only for live supervised runs (duplicate work protection)
-    if execution_mode == "live_supervised" and (payload.get("task_id") or packet_id):
-        lock_key = str(payload.get("task_id") or packet_id or run_id)
-        existing_locks = store.list_task_locks(active_only=True)
-        for lock in existing_locks:
-            if str(lock.get("task_key")) == lock_key and str(lock.get("project_id")) == project_id:
-                raise ValueError(f"task lock active for {lock_key}: {lock.get('id')}")
-        task_lock = store.create_task_lock(
-            {
-                "task_key": lock_key,
-                "project_id": project_id,
-                "run_id": run_id,
-                "reason": "live supervised run create",
-            }
-        )
-        run["task_lock_id"] = task_lock.get("id")
-    run = engine.attach_to_run(run, actor="system")
-    persist_lease_append_only(store, run["constitution_lease"])
-    _require_canonical_run_lease(store, run)
-    run["scope_fingerprint"] = compute_run_scope_fingerprint(run, packet)
-
+    # Build lease + scope in memory; validate BLACK/sensitive BEFORE any persistence
+    # so a rejected run cannot leave orphan locks or leases.
     black_hits = contains_black_instruction(material_text_blob(run, packet))
     if black_hits:
         raise ValueError(
@@ -287,22 +265,61 @@ def create_run(store: LocalStore, payload: dict[str, Any]) -> dict[str, Any]:
     if sensitive:
         raise ValueError(f"sensitive paths cannot be allowed: {sensitive[:5]}")
 
-    saved = store.save_run(run)
-    store.append_run_event(
-        saved["id"],
-        "run_created",
-        "Draft supervised run created",
-        actor="system",
-        metadata={
-            "constitution_version": saved.get("constitution_version"),
-            "constitution_hash": saved.get("constitution_hash"),
-            "constitution_lease_id": saved.get("constitution_lease_id"),
-            "constitution_lease_fingerprint": saved.get(
-                "constitution_lease_fingerprint"
-            ),
+    run = engine.attach_to_run(run, actor="system")
+    run["scope_fingerprint"] = compute_run_scope_fingerprint(run, packet)
+    if payload.get("idempotency_key"):
+        run["idempotency_key"] = str(payload.get("idempotency_key"))
+
+    task_lock_payload = None
+    if execution_mode == "live_supervised" and (payload.get("task_id") or packet_id):
+        lock_key = str(payload.get("task_id") or packet_id or run_id)
+        task_lock_payload = {
+            "task_key": lock_key,
+            "project_id": project_id,
+            "run_id": run_id,
+            "reason": "live supervised run create",
+        }
+
+    # Atomic admission: lock + lease + run + initial event (single SQLite transaction)
+    lease = run.get("constitution_lease") if isinstance(run.get("constitution_lease"), dict) else None
+    saved = store.admit_run_atomic(
+        run=run,
+        lease=lease,
+        task_lock=task_lock_payload,
+        event_type="run_created",
+        event_summary="Draft supervised run created",
+        event_actor="system",
+        event_metadata={
+            "constitution_version": run.get("constitution_version"),
+            "constitution_hash": run.get("constitution_hash"),
+            "constitution_lease_id": run.get("constitution_lease_id"),
+            "constitution_lease_fingerprint": run.get("constitution_lease_fingerprint"),
+            "execution_mode": execution_mode,
         },
     )
+    _require_canonical_run_lease(store, saved)
     return saved
+
+
+def _persist_transition(
+    store: LocalStore,
+    run: dict[str, Any],
+    *,
+    event_type: str,
+    event_summary: str = "",
+    actor: str = "system",
+    event_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Atomic run state + event with optimistic concurrency via row_version."""
+    expected = run.get("row_version")
+    return store.transition_run_with_event(
+        run,
+        expected_row_version=int(expected) if expected is not None else None,
+        event_type=event_type,
+        event_summary=event_summary,
+        event_actor=actor,
+        event_metadata=event_metadata,
+    )
 
 
 def run_preflight(store: LocalStore, run_id: str) -> dict[str, Any]:
@@ -312,16 +329,21 @@ def run_preflight(store: LocalStore, run_id: str) -> dict[str, Any]:
     status = str(run.get("status"))
     if status == "draft":
         run = transition_run(run, "awaiting_preflight", "system", "preflight requested")
-        store.save_run(run)
+        run = _persist_transition(
+            store,
+            run,
+            event_type="preflight_started",
+            event_summary="Preflight evaluation started",
+        )
     elif status not in {"awaiting_preflight", "awaiting_approval", "approved"}:
         raise ValueError(f"cannot preflight from status {status}")
-
-    store.append_run_event(
-        run_id,
-        "preflight_started",
-        "Preflight evaluation started",
-        actor="system",
-    )
+    else:
+        store.append_run_event(
+            run_id,
+            "preflight_started",
+            "Preflight evaluation started",
+            actor="system",
+        )
     result = evaluate_run_preflight(run, store)
     run = store.get_run(run_id)
     run["preflight"] = result
@@ -341,11 +363,11 @@ def run_preflight(store: LocalStore, run_id: str) -> dict[str, Any]:
                     "system",
                     "preflight passed; approvals required",
                 )
-            store.append_run_event(
-                run_id,
-                "preflight_passed",
-                "Preflight passed; awaiting approval",
-                actor="system",
+            saved = _persist_transition(
+                store,
+                run,
+                event_type="preflight_passed",
+                event_summary="Preflight passed; awaiting approval",
             )
         else:
             if str(run.get("status")) in {"awaiting_preflight", "awaiting_approval"}:
@@ -363,24 +385,23 @@ def run_preflight(store: LocalStore, run_id: str) -> dict[str, Any]:
                         "system",
                         "preflight passed; no approvals required",
                     )
-            store.append_run_event(
-                run_id,
-                "preflight_passed",
-                "Preflight passed; auto-approved for dry-run",
-                actor="system",
+            saved = _persist_transition(
+                store,
+                run,
+                event_type="preflight_passed",
+                event_summary="Preflight passed; auto-approved for dry-run",
             )
     else:
         if str(run.get("status")) == "awaiting_preflight":
             run = transition_run(run, "preflight_failed", "system", "preflight failed")
         elif can_transition(str(run.get("status")), "blocked"):
             run = transition_run(run, "blocked", "system", "preflight failed")
-        store.append_run_event(
-            run_id,
-            "preflight_failed",
-            "; ".join(result.get("blocking_reasons") or ["failed"]),
-            actor="system",
+        saved = _persist_transition(
+            store,
+            run,
+            event_type="preflight_failed",
+            event_summary="; ".join(result.get("blocking_reasons") or ["failed"]),
         )
-    saved = store.save_run(run)
     return {"run": saved, "preflight": result}
 
 
@@ -453,7 +474,13 @@ def record_run_approval(
     if decision == "rejected":
         if can_transition(str(run.get("status")), "rejected"):
             run = transition_run(run, "rejected", actor, note or "approval rejected")
-            store.save_run(run)
+            _persist_transition(
+                store,
+                run,
+                event_type="approval_rejected",
+                event_summary=note or "approval rejected",
+                actor=actor,
+            )
         return {"approval": record, "run": store.get_run(run_id)}
 
     current_run = store.get_run(run_id)
@@ -483,11 +510,11 @@ def record_run_approval(
             actor,
             "all required approvals present for current scope and constitution lease",
         )
-        store.save_run(run)
-        store.append_run_event(
-            run_id,
-            "run_approved",
-            "Run approved for dry-run",
+        _persist_transition(
+            store,
+            run,
+            event_type="run_approved",
+            event_summary="Run approved for supervised execution",
             actor=actor,
         )
     return {"approval": record, "run": store.get_run(run_id)}
@@ -770,13 +797,12 @@ def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
     run = transition_run(run, "queued", "system", "live supervised queued")
     run = transition_run(run, "starting", "system", "worktree ready at approved baseline")
     run = transition_run(run, "running", "system", "provider launching")
-    store.save_run(run)
-    store.append_run_event(
-        run_id,
-        "supervised_started",
-        redact_text(f"Live supervised execution via {provider_id}"),
-        actor="system",
-        metadata={
+    run = _persist_transition(
+        store,
+        run,
+        event_type="supervised_started",
+        event_summary=redact_text(f"Live supervised execution via {provider_id}"),
+        event_metadata={
             "worktree": worktree_meta.get("worktree_path"),
             "baseline": approved_baseline,
             "execution_branch": run_branch,
@@ -1128,8 +1154,9 @@ def cancel_run(
         pass
     if status in {"running", "starting", "queued"}:
         run = transition_run(run, "cancel_requested", actor, note)
-        store.save_run(run)
-        store.append_run_event(run_id, "cancel_requested", note, actor=actor)
+        run = _persist_transition(
+            store, run, event_type="cancel_requested", event_summary=note, actor=actor
+        )
         run = transition_run(run, "cancelled", actor, note)
     elif can_transition(status, "rejected"):
         run = transition_run(run, "rejected", actor, note)
@@ -1137,8 +1164,9 @@ def cancel_run(
         run = transition_run(run, "blocked", actor, note)
     else:
         raise ValueError(f"cannot cancel from status {status}")
-    saved = store.save_run(run)
-    store.append_run_event(run_id, "run_cancelled", note, actor=actor)
+    saved = _persist_transition(
+        store, run, event_type="run_cancelled", event_summary=note, actor=actor
+    )
     _release_run_locks(store, saved)
     return saved
 
@@ -1175,6 +1203,10 @@ def retry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
     max_attempts = int(parent.get("max_attempts") or 1)
     if attempt >= max_attempts:
         raise ValueError("max attempts exceeded")
+    # Retry preserves authority: mode, provider, packet, capabilities.
+    # Live baseline is re-pinned at create (not copied stale SHA from failed run).
+    # Execution branch is re-derived per new run_id (not reused).
+    parent_mode = str(parent.get("execution_mode") or parent.get("mode") or "dry_run")
     child = create_run(
         store,
         {
@@ -1184,7 +1216,8 @@ def retry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
             "packet": parent.get("packet"),
             "provider_id": parent.get("provider_id"),
             "repository": parent.get("repository"),
-            "target_branch": parent.get("target_branch"),
+            "target_branch": parent.get("requested_target_branch")
+            or parent.get("target_branch"),
             "operating_mode": parent.get("operating_mode"),
             "risk": parent.get("risk"),
             "requested_capabilities": parent.get("requested_capabilities"),
@@ -1193,6 +1226,8 @@ def retry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
             "attempt": attempt,
             "budget": parent.get("budget"),
             "parent_run_id": parent.get("id"),
+            "execution_mode": parent_mode,
+            "baseline_ref": parent.get("baseline_ref") or "HEAD",
         },
     )
     store.append_run_event(

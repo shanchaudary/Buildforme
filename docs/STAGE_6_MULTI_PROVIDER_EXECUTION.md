@@ -51,10 +51,23 @@ Repository-specific commands come from project `verification_profile` / project 
 | Baseline | Exact SHA pinned **before** approval; in scope fingerprint |
 | Branch collision | Fail closed unless validated resume |
 | Founder accept | Hard blocks cannot be overridden via `accept_for_pr_prep` |
-| Evidence | Append-only; immutable evidence_id |
-| Auth | `unknown` is **not** live-ready |
-| Local mutate | Founder token + same-origin/loopback checks |
+| Evidence | Append-only; immutable evidence_id; fingerprint binds patch + branch + process |
+| Auth | `unknown` is **not** live-ready; env marker alone insufficient |
+| Provider ready | Compatibility profile: binary, version, auth, command contract, non-interactive, prompt, cwd, capabilities |
+| Local mutate | Founder session + CSRF + loopback Host for all execution-authority mutations |
+| Live create | `POST /api/runs` with `live_supervised` requires founder auth |
+| Bind address | Server refuses non-loopback bind (`0.0.0.0` rejected); Host header alone is not safety |
+| Admission | Atomic SQLite transaction: lock + lease + run + event |
+| Transitions | Atomic run + event with `row_version` optimistic concurrency |
+| Retry | Preserves execution_mode, provider, packet; re-pins live baseline; new execution branch |
+| SQLite authority | Project execution controls and kill switch in SQLite (not split-brain JSON) |
+
+## Real provider smoke
+
+`scripts/stage6_real_provider_smoke.py` runs one disposable-repo live path against an
+installed provider (Codex when `live_ready`). Not a substitute for CI unit tests; required
+local acceptance proof for Stage 6.
 
 ## Acceptance
 
-Complete only when multi-provider architecture is real, isolation + evidence + independent verification + review gate work, cancellation/timeouts proved, **GitHub CI green**, no merge/deploy authority added, and the hardening table above is implemented and tested.
+Complete only when multi-provider architecture is real, isolation + evidence + independent verification + review gate work, cancellation/timeouts proved, **GitHub CI green**, no merge/deploy authority added, hardening table above is implemented and tested, and at least one real-provider smoke has been demonstrated.

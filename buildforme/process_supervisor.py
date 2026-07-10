@@ -40,6 +40,7 @@ class ProcessSupervisor:
         env: dict[str, str] | None = None,
         on_event: Callable[[dict[str, Any]], None] | None = None,
         use_provider_env_allowlist: bool = True,
+        stdin_bytes: bytes | None = None,
     ) -> dict[str, Any]:
         """Execute argv (list only). Never shell=True. Own process group on POSIX."""
         if not argv or not str(argv[0]).strip():
@@ -101,6 +102,7 @@ class ProcessSupervisor:
             "cwd": str(cwd_path),
             "stdout": subprocess.PIPE,
             "stderr": subprocess.PIPE,
+            "stdin": subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
             "text": True,
             "shell": False,
             "env": safe_env,
@@ -114,6 +116,17 @@ class ProcessSupervisor:
 
         try:
             proc = subprocess.Popen(**popen_kwargs)
+            if stdin_bytes is not None and proc.stdin is not None:
+                try:
+                    # text mode expects str
+                    text_in = stdin_bytes.decode("utf-8", errors="replace")
+                    proc.stdin.write(text_in)
+                    proc.stdin.close()
+                except Exception:
+                    try:
+                        proc.stdin.close()
+                    except Exception:
+                        pass
         except OSError as exc:
             return redact_process_result(
                 {

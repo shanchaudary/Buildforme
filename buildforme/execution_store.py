@@ -16,7 +16,8 @@ class Stage6Store:
         self.db = ExecutionDB(db_path)
 
     # —— Runs ——
-    def save_run(self, run: dict[str, Any]) -> dict[str, Any]:
+    def save_run(self, run: dict[str, Any], *, expected_row_version: int | None = None) -> dict[str, Any]:
+        """Persist a run. When expected_row_version is set, reject stale writers."""
         record = dict(run)
         rid = str(record.get("id") or new_id("run"))
         record["id"] = rid
@@ -24,44 +25,25 @@ class Stage6Store:
         record.setdefault("created_at", now)
         record["updated_at"] = now
         with self.db.transaction() as conn:
-            existing = conn.execute("SELECT id FROM runs WHERE id=?", (rid,)).fetchone()
-            cols = (
-                rid,
-                str(record.get("project_id") or ""),
-                record.get("task_id"),
-                record.get("packet_id"),
-                str(record.get("provider_id") or ""),
-                str(record.get("repository") or ""),
-                record.get("repository_local_path"),
-                record.get("baseline_ref"),
-                record.get("baseline_commit"),
-                record.get("requested_target_branch") or record.get("target_branch"),
-                record.get("execution_branch"),
-                record.get("operating_mode"),
-                record.get("risk"),
-                str(record.get("status") or "draft"),
-                str(record.get("execution_mode") or record.get("mode") or "dry_run"),
-                record.get("scope_fingerprint"),
-                record.get("constitution_version"),
-                record.get("constitution_hash"),
-                record.get("constitution_lease_id"),
-                record.get("constitution_lease_fingerprint"),
-                record.get("task_lock_id"),
-                dumps(record),
-                record["created_at"],
-                record["updated_at"],
-                record.get("started_at"),
-                record.get("finished_at"),
-                record.get("idempotency_key"),
-            )
+            existing = conn.execute(
+                "SELECT id, row_version FROM runs WHERE id=?", (rid,)
+            ).fetchone()
             if existing:
-                conn.execute(
+                current_ver = int(existing[1] or 1)
+                if expected_row_version is not None and current_ver != int(expected_row_version):
+                    raise ValueError(
+                        f"stale run write rejected: expected row_version={expected_row_version} "
+                        f"have={current_ver} run_id={rid}"
+                    )
+                new_ver = current_ver + 1
+                record["row_version"] = new_ver
+                cur = conn.execute(
                     """UPDATE runs SET project_id=?, task_id=?, packet_id=?, provider_id=?, repository=?,
                     repository_local_path=?, baseline_ref=?, baseline_commit=?, requested_target_branch=?,
                     execution_branch=?, operating_mode=?, risk=?, status=?, execution_mode=?,
                     scope_fingerprint=?, constitution_version=?, constitution_hash=?, constitution_lease_id=?,
                     constitution_lease_fingerprint=?, task_lock_id=?, payload_json=?, updated_at=?,
-                    started_at=?, finished_at=?, idempotency_key=? WHERE id=?""",
+                    started_at=?, finished_at=?, idempotency_key=?, row_version=? WHERE id=? AND row_version=?""",
                     (
                         str(record.get("project_id") or ""),
                         record.get("task_id"),
@@ -88,20 +70,306 @@ class Stage6Store:
                         record.get("started_at"),
                         record.get("finished_at"),
                         record.get("idempotency_key"),
+                        new_ver,
                         rid,
+                        current_ver,
                     ),
                 )
+                if cur.rowcount == 0:
+                    raise ValueError(f"stale run write race: run_id={rid}")
             else:
+                record.setdefault("row_version", 1)
                 conn.execute(
                     """INSERT INTO runs(
                     id, project_id, task_id, packet_id, provider_id, repository, repository_local_path,
                     baseline_ref, baseline_commit, requested_target_branch, execution_branch, operating_mode,
                     risk, status, execution_mode, scope_fingerprint, constitution_version, constitution_hash,
                     constitution_lease_id, constitution_lease_fingerprint, task_lock_id, payload_json,
-                    created_at, updated_at, started_at, finished_at, idempotency_key
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    cols,
+                    created_at, updated_at, started_at, finished_at, idempotency_key, row_version
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        rid,
+                        str(record.get("project_id") or ""),
+                        record.get("task_id"),
+                        record.get("packet_id"),
+                        str(record.get("provider_id") or ""),
+                        str(record.get("repository") or ""),
+                        record.get("repository_local_path"),
+                        record.get("baseline_ref"),
+                        record.get("baseline_commit"),
+                        record.get("requested_target_branch") or record.get("target_branch"),
+                        record.get("execution_branch"),
+                        record.get("operating_mode"),
+                        record.get("risk"),
+                        str(record.get("status") or "draft"),
+                        str(record.get("execution_mode") or record.get("mode") or "dry_run"),
+                        record.get("scope_fingerprint"),
+                        record.get("constitution_version"),
+                        record.get("constitution_hash"),
+                        record.get("constitution_lease_id"),
+                        record.get("constitution_lease_fingerprint"),
+                        record.get("task_lock_id"),
+                        dumps(record),
+                        record["created_at"],
+                        record["updated_at"],
+                        record.get("started_at"),
+                        record.get("finished_at"),
+                        record.get("idempotency_key"),
+                        int(record.get("row_version") or 1),
+                    ),
                 )
+        return record
+
+    def admit_run_atomic(
+        self,
+        *,
+        run: dict[str, Any],
+        lease: dict[str, Any] | None = None,
+        task_lock: dict[str, Any] | None = None,
+        event_type: str = "run_created",
+        event_summary: str = "Draft supervised run created",
+        event_actor: str = "system",
+        event_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Atomic Stage 6 admission: optional lock + lease + run + initial event.
+
+        All records commit together or roll back together. Idempotency: if
+        idempotency_key already maps to a run, return that run without mutation.
+        """
+        from governance.constitution_lease import lease_records_equal, validate_lease_integrity
+
+        record = dict(run)
+        rid = str(record.get("id") or new_id("run"))
+        record["id"] = rid
+        now = utc_now_iso()
+        record.setdefault("created_at", now)
+        record["updated_at"] = now
+        record.setdefault("row_version", 1)
+        idemp = record.get("idempotency_key")
+
+        with self.db.transaction() as conn:
+            if idemp:
+                hit = conn.execute(
+                    "SELECT payload_json FROM runs WHERE idempotency_key=?", (str(idemp),)
+                ).fetchone()
+                if hit:
+                    return loads(hit[0], {})
+
+            existing = conn.execute("SELECT id FROM runs WHERE id=?", (rid,)).fetchone()
+            if existing:
+                raise ValueError(f"run already admitted: {rid}")
+
+            lock_id = None
+            if task_lock:
+                lock_id = str(task_lock.get("id") or new_id("tlock"))
+                task_key = str(task_lock.get("task_key") or "").strip()
+                if not task_key:
+                    raise ValueError("task_key required for task lock")
+                try:
+                    conn.execute(
+                        """INSERT INTO task_locks(id, task_key, project_id, run_id, reason, active, created_at, released_at)
+                           VALUES (?,?,?,?,?,1,?,NULL)""",
+                        (
+                            lock_id,
+                            task_key,
+                            task_lock.get("project_id"),
+                            rid,
+                            str(task_lock.get("reason") or ""),
+                            now,
+                        ),
+                    )
+                except Exception as exc:
+                    raise ValueError(f"task lock already active: {task_key}") from exc
+                record["task_lock_id"] = lock_id
+
+            if lease:
+                problems = validate_lease_integrity(lease)
+                if problems:
+                    raise ValueError("invalid constitution lease: " + "; ".join(problems))
+                lid = str(lease["lease_id"])
+                prev = conn.execute(
+                    "SELECT payload_json FROM constitution_leases WHERE lease_id=?", (lid,)
+                ).fetchone()
+                if prev:
+                    if not lease_records_equal(loads(prev[0], {}), lease):
+                        raise ValueError(f"constitution lease mutation forbidden: lease_id={lid}")
+                else:
+                    lease_rec = dict(lease)
+                    lease_rec["stored_at"] = now
+                    conn.execute(
+                        """INSERT INTO constitution_leases(lease_id, run_id, provider_id, packet_id,
+                           constitution_version, constitution_hash, lease_fingerprint, payload_json, stored_at)
+                           VALUES (?,?,?,?,?,?,?,?,?)""",
+                        (
+                            lid,
+                            lease.get("run_id") or rid,
+                            lease.get("provider_id"),
+                            lease.get("packet_id"),
+                            lease.get("constitution_version"),
+                            lease.get("constitution_hash"),
+                            lease.get("lease_fingerprint"),
+                            dumps(lease_rec),
+                            now,
+                        ),
+                    )
+
+            conn.execute(
+                """INSERT INTO runs(
+                id, project_id, task_id, packet_id, provider_id, repository, repository_local_path,
+                baseline_ref, baseline_commit, requested_target_branch, execution_branch, operating_mode,
+                risk, status, execution_mode, scope_fingerprint, constitution_version, constitution_hash,
+                constitution_lease_id, constitution_lease_fingerprint, task_lock_id, payload_json,
+                created_at, updated_at, started_at, finished_at, idempotency_key, row_version
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    rid,
+                    str(record.get("project_id") or ""),
+                    record.get("task_id"),
+                    record.get("packet_id"),
+                    str(record.get("provider_id") or ""),
+                    str(record.get("repository") or ""),
+                    record.get("repository_local_path"),
+                    record.get("baseline_ref"),
+                    record.get("baseline_commit"),
+                    record.get("requested_target_branch") or record.get("target_branch"),
+                    record.get("execution_branch"),
+                    record.get("operating_mode"),
+                    record.get("risk"),
+                    str(record.get("status") or "draft"),
+                    str(record.get("execution_mode") or record.get("mode") or "dry_run"),
+                    record.get("scope_fingerprint"),
+                    record.get("constitution_version"),
+                    record.get("constitution_hash"),
+                    record.get("constitution_lease_id"),
+                    record.get("constitution_lease_fingerprint"),
+                    record.get("task_lock_id"),
+                    dumps(record),
+                    record["created_at"],
+                    record["updated_at"],
+                    record.get("started_at"),
+                    record.get("finished_at"),
+                    record.get("idempotency_key"),
+                    int(record.get("row_version") or 1),
+                ),
+            )
+            event = {
+                "id": new_id("re"),
+                "run_id": rid,
+                "event_type": event_type,
+                "summary": event_summary,
+                "actor": event_actor,
+                "metadata": event_metadata or {},
+                "created_at": now,
+            }
+            conn.execute(
+                """INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (
+                    event["id"],
+                    rid,
+                    event_type,
+                    event_summary,
+                    event_actor,
+                    dumps(event_metadata or {}),
+                    now,
+                ),
+            )
+        return record
+
+    def transition_run_with_event(
+        self,
+        run: dict[str, Any],
+        *,
+        expected_row_version: int | None = None,
+        event_type: str,
+        event_summary: str = "",
+        event_actor: str = "system",
+        event_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically persist run state change + audit event with optimistic concurrency."""
+        record = dict(run)
+        rid = str(record.get("id") or "")
+        if not rid:
+            raise ValueError("run id required")
+        now = utc_now_iso()
+        record["updated_at"] = now
+        with self.db.transaction() as conn:
+            existing = conn.execute(
+                "SELECT id, row_version, payload_json FROM runs WHERE id=?", (rid,)
+            ).fetchone()
+            if not existing:
+                raise KeyError(f"Run not found: {rid}")
+            current_ver = int(existing[1] or 1)
+            if expected_row_version is not None and current_ver != int(expected_row_version):
+                raise ValueError(
+                    f"stale run transition rejected: expected row_version={expected_row_version} "
+                    f"have={current_ver} run_id={rid}"
+                )
+            # If caller didn't pass expected version, still use DB version as base
+            if expected_row_version is None:
+                # Allow only if payload row_version matches DB (best-effort)
+                payload_ver = int(record.get("row_version") or current_ver)
+                if payload_ver != current_ver:
+                    raise ValueError(
+                        f"stale run transition rejected: payload row_version={payload_ver} "
+                        f"have={current_ver} run_id={rid}"
+                    )
+            new_ver = current_ver + 1
+            record["row_version"] = new_ver
+            cur = conn.execute(
+                """UPDATE runs SET project_id=?, task_id=?, packet_id=?, provider_id=?, repository=?,
+                repository_local_path=?, baseline_ref=?, baseline_commit=?, requested_target_branch=?,
+                execution_branch=?, operating_mode=?, risk=?, status=?, execution_mode=?,
+                scope_fingerprint=?, constitution_version=?, constitution_hash=?, constitution_lease_id=?,
+                constitution_lease_fingerprint=?, task_lock_id=?, payload_json=?, updated_at=?,
+                started_at=?, finished_at=?, idempotency_key=?, row_version=?
+                WHERE id=? AND row_version=?""",
+                (
+                    str(record.get("project_id") or ""),
+                    record.get("task_id"),
+                    record.get("packet_id"),
+                    str(record.get("provider_id") or ""),
+                    str(record.get("repository") or ""),
+                    record.get("repository_local_path"),
+                    record.get("baseline_ref"),
+                    record.get("baseline_commit"),
+                    record.get("requested_target_branch") or record.get("target_branch"),
+                    record.get("execution_branch"),
+                    record.get("operating_mode"),
+                    record.get("risk"),
+                    str(record.get("status") or "draft"),
+                    str(record.get("execution_mode") or record.get("mode") or "dry_run"),
+                    record.get("scope_fingerprint"),
+                    record.get("constitution_version"),
+                    record.get("constitution_hash"),
+                    record.get("constitution_lease_id"),
+                    record.get("constitution_lease_fingerprint"),
+                    record.get("task_lock_id"),
+                    dumps(record),
+                    record["updated_at"],
+                    record.get("started_at"),
+                    record.get("finished_at"),
+                    record.get("idempotency_key"),
+                    new_ver,
+                    rid,
+                    current_ver,
+                ),
+            )
+            if cur.rowcount == 0:
+                raise ValueError(f"stale run transition race: run_id={rid}")
+            conn.execute(
+                """INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (
+                    new_id("re"),
+                    rid,
+                    event_type,
+                    event_summary,
+                    event_actor,
+                    dumps(event_metadata or {}),
+                    now,
+                ),
+            )
         return record
 
     def get_run(self, run_id: str) -> dict[str, Any]:
@@ -708,78 +976,317 @@ class Stage6Store:
             )
         return payload
 
-    def migrate_from_json(self, runtime_dir: Path) -> dict[str, Any]:
-        """Idempotent import from legacy JSON runtime files with backup."""
+    # —— Project execution controls (SQLite authority) ——
+    def get_project_execution_control(self, project_id: str) -> dict[str, Any] | None:
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM project_execution_controls WHERE project_id=?",
+                (str(project_id),),
+            ).fetchone()
+        return loads(row[0], {}) if row else None
+
+    def set_project_execution_control(
+        self,
+        project_id: str,
+        *,
+        execution_status: str,
+        reason: str = "",
+        actor: str = "shan",
+    ) -> dict[str, Any]:
+        now = utc_now_iso()
+        record = {
+            "project_id": project_id,
+            "execution_status": execution_status,
+            "reason": str(reason or ""),
+            "actor": actor,
+            "updated_at": now,
+            "explicit": True,
+        }
+        with self.db.transaction() as conn:
+            conn.execute(
+                """INSERT INTO project_execution_controls(project_id, execution_status, reason, actor, updated_at, payload_json)
+                   VALUES (?,?,?,?,?,?)
+                   ON CONFLICT(project_id) DO UPDATE SET
+                   execution_status=excluded.execution_status, reason=excluded.reason,
+                   actor=excluded.actor, updated_at=excluded.updated_at, payload_json=excluded.payload_json""",
+                (
+                    project_id,
+                    execution_status,
+                    record["reason"],
+                    actor,
+                    now,
+                    dumps(record),
+                ),
+            )
+        return record
+
+    def list_project_execution_controls(self) -> list[dict[str, Any]]:
+        with self.db.transaction() as conn:
+            rows = conn.execute(
+                "SELECT payload_json FROM project_execution_controls ORDER BY project_id"
+            ).fetchall()
+        return [loads(r[0], {}) for r in rows]
+
+    def set_migration_cutover(self, marker: str) -> None:
+        with self.db.transaction() as conn:
+            conn.execute(
+                """INSERT INTO schema_meta(key, value) VALUES ('migration_cutover', ?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                (str(marker),),
+            )
+
+    def get_migration_cutover(self) -> str | None:
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT value FROM schema_meta WHERE key='migration_cutover'"
+            ).fetchone()
+        if not row or not row[0]:
+            return None
+        return str(row[0])
+
+    def migrate_from_json(
+        self,
+        runtime_dir: Path,
+        *,
+        dry_run: bool = False,
+        cutover: bool = True,
+    ) -> dict[str, Any]:
+        """Idempotent import from legacy JSON runtime files with backup and cutover marker.
+
+        Authority after cutover: SQLite only for Stage 6 execution facts.
+        dry_run previews counts without writing DB (still creates backup listing).
+        """
         import json
         import shutil
 
         runtime_dir = Path(runtime_dir)
-        backup = runtime_dir / f"json_backup_{utc_now_iso().replace(':', '')}"
-        report = {"backup": str(backup), "imported": {}, "errors": []}
+        stamp = utc_now_iso().replace(":", "")
+        backup = runtime_dir / f"json_backup_{stamp}"
+        report: dict[str, Any] = {
+            "backup": str(backup),
+            "imported": {},
+            "preview": {},
+            "errors": [],
+            "malformed": [],
+            "dry_run": bool(dry_run),
+            "cutover": False,
+            "integrity": None,
+        }
+        sources = (
+            "runs.json",
+            "run_events.json",
+            "run_approvals.json",
+            "constitution_leases.json",
+            "task_locks.json",
+            "repository_locks.json",
+            "repository_bindings.json",
+            "run_evidence.json",
+            "execution_control.json",
+            "project_execution_controls.json",
+            "providers.json",
+            "provider_acks.json",
+        )
         if runtime_dir.exists():
             backup.mkdir(parents=True, exist_ok=True)
-            for name in (
-                "runs.json",
-                "run_events.json",
-                "run_approvals.json",
-                "constitution_leases.json",
-                "task_locks.json",
-                "repository_locks.json",
-                "repository_bindings.json",
-                "run_evidence.json",
-                "execution_control.json",
-                "providers.json",
-            ):
+            for name in sources:
                 src = runtime_dir / name
                 if src.exists():
                     shutil.copy2(src, backup / name)
-        # Import runs
-        runs_path = runtime_dir / "runs.json"
-        if runs_path.exists():
+
+        def _load(name: str, list_key: str) -> list[dict[str, Any]]:
+            path = runtime_dir / name
+            if not path.exists():
+                return []
             try:
-                data = json.loads(runs_path.read_text(encoding="utf-8") or "{}")
-                count = 0
-                for run in data.get("runs") or []:
-                    if isinstance(run, dict) and run.get("id"):
-                        try:
-                            self.save_run(run)
-                            count += 1
-                        except Exception as exc:
-                            report["errors"].append(f"run {run.get('id')}: {exc}")
-                report["imported"]["runs"] = count
+                data = json.loads(path.read_text(encoding="utf-8") or "{}")
             except Exception as exc:
-                report["errors"].append(f"runs.json: {exc}")
+                report["errors"].append(f"{name}: {exc}")
+                return []
+            if not isinstance(data, dict):
+                report["malformed"].append(f"{name}: root not object")
+                return []
+            items = data.get(list_key) or data.get("items") or []
+            if name == "execution_control.json" and isinstance(data, dict) and "kill_switch_active" in data:
+                return [data]
+            out = []
+            for item in items if isinstance(items, list) else []:
+                if isinstance(item, dict):
+                    out.append(item)
+                else:
+                    report["malformed"].append(f"{name}: non-object item")
+            return out
+
+        if dry_run:
+            report["preview"] = {
+                "runs": len(_load("runs.json", "runs")),
+                "leases": len(_load("constitution_leases.json", "leases")),
+                "bindings": len(_load("repository_bindings.json", "bindings")),
+                "events": len(_load("run_events.json", "events")),
+                "approvals": len(_load("run_approvals.json", "approvals")),
+                "task_locks": len(_load("task_locks.json", "locks")),
+                "repository_locks": len(_load("repository_locks.json", "locks")),
+                "evidence": len(_load("run_evidence.json", "evidence")),
+                "project_controls": len(_load("project_execution_controls.json", "controls")),
+            }
+            report["db"] = self.db.pragmas()
+            return report
+
+        # Runs
+        count = 0
+        for run in _load("runs.json", "runs"):
+            if run.get("id"):
+                try:
+                    self.save_run(run)
+                    count += 1
+                except Exception as exc:
+                    report["errors"].append(f"run {run.get('id')}: {exc}")
+        report["imported"]["runs"] = count
+
+        # Events (after runs so FK holds)
+        count = 0
+        for ev in _load("run_events.json", "events"):
+            rid = str(ev.get("run_id") or "")
+            if not rid:
+                report["malformed"].append("run_event missing run_id")
+                continue
+            try:
+                self.append_run_event(
+                    rid,
+                    str(ev.get("event_type") or ev.get("type") or "imported"),
+                    str(ev.get("summary") or ""),
+                    actor=str(ev.get("actor") or "system"),
+                    metadata=ev.get("metadata") if isinstance(ev.get("metadata"), dict) else {},
+                )
+                count += 1
+            except Exception as exc:
+                report["errors"].append(f"event: {exc}")
+        report["imported"]["events"] = count
+
+        # Approvals
+        count = 0
+        for ap in _load("run_approvals.json", "approvals"):
+            if ap.get("run_id") and ap.get("requirement_type"):
+                try:
+                    self.save_run_approval(ap)
+                    count += 1
+                except Exception as exc:
+                    report["errors"].append(f"approval: {exc}")
+        report["imported"]["approvals"] = count
+
         # Leases
-        leases_path = runtime_dir / "constitution_leases.json"
-        if leases_path.exists():
-            try:
-                data = json.loads(leases_path.read_text(encoding="utf-8") or "{}")
-                count = 0
-                for lease in data.get("leases") or []:
-                    if isinstance(lease, dict) and lease.get("lease_id"):
-                        try:
-                            self.save_constitution_lease(lease)
-                            count += 1
-                        except Exception as exc:
-                            report["errors"].append(f"lease: {exc}")
-                report["imported"]["leases"] = count
-            except Exception as exc:
-                report["errors"].append(f"leases: {exc}")
+        count = 0
+        for lease in _load("constitution_leases.json", "leases"):
+            if lease.get("lease_id"):
+                try:
+                    self.save_constitution_lease(lease)
+                    count += 1
+                except Exception as exc:
+                    report["errors"].append(f"lease: {exc}")
+        report["imported"]["leases"] = count
+
+        # Task locks
+        count = 0
+        for lock in _load("task_locks.json", "locks"):
+            if lock.get("task_key") and lock.get("active", True):
+                try:
+                    self.create_task_lock(lock)
+                    count += 1
+                except Exception as exc:
+                    report["errors"].append(f"task_lock: {exc}")
+        report["imported"]["task_locks"] = count
+
+        # Repository locks
+        count = 0
+        for lock in _load("repository_locks.json", "locks"):
+            if lock.get("repository") and lock.get("active", True):
+                try:
+                    self.create_repository_lock(lock)
+                    count += 1
+                except Exception as exc:
+                    report["errors"].append(f"repo_lock: {exc}")
+        report["imported"]["repository_locks"] = count
+
         # Bindings
-        bind_path = runtime_dir / "repository_bindings.json"
-        if bind_path.exists():
+        count = 0
+        for b in _load("repository_bindings.json", "bindings"):
             try:
-                data = json.loads(bind_path.read_text(encoding="utf-8") or "{}")
-                count = 0
-                for b in data.get("bindings") or []:
-                    if isinstance(b, dict):
-                        try:
-                            self.register_repository_binding(b)
-                            count += 1
-                        except Exception as exc:
-                            report["errors"].append(f"binding: {exc}")
-                report["imported"]["bindings"] = count
+                self.register_repository_binding(b)
+                count += 1
             except Exception as exc:
-                report["errors"].append(f"bindings: {exc}")
+                report["errors"].append(f"binding: {exc}")
+        report["imported"]["bindings"] = count
+
+        # Evidence
+        count = 0
+        for ev in _load("run_evidence.json", "evidence"):
+            if ev.get("run_id"):
+                try:
+                    # re-key so import can be replayed without mutation errors on second apply
+                    if "evidence_id" in ev:
+                        # only insert if missing
+                        with self.db.transaction() as conn:
+                            exists = conn.execute(
+                                "SELECT evidence_id FROM evidence WHERE evidence_id=?",
+                                (str(ev["evidence_id"]),),
+                            ).fetchone()
+                        if exists:
+                            count += 1
+                            continue
+                    self.save_run_evidence(ev)
+                    count += 1
+                except Exception as exc:
+                    report["errors"].append(f"evidence: {exc}")
+        report["imported"]["evidence"] = count
+
+        # Execution control
+        for ctrl in _load("execution_control.json", "controls"):
+            try:
+                self.set_execution_control(
+                    kill_switch_active=bool(ctrl.get("kill_switch_active")),
+                    reason=str(ctrl.get("reason") or ""),
+                    actor=str(ctrl.get("actor") or "system"),
+                )
+                report["imported"]["execution_control"] = 1
+            except Exception as exc:
+                report["errors"].append(f"execution_control: {exc}")
+
+        # Project controls
+        count = 0
+        for pc in _load("project_execution_controls.json", "controls"):
+            pid = str(pc.get("project_id") or "")
+            if not pid:
+                continue
+            try:
+                self.set_project_execution_control(
+                    pid,
+                    execution_status=str(pc.get("execution_status") or "locked"),
+                    reason=str(pc.get("reason") or ""),
+                    actor=str(pc.get("actor") or "system"),
+                )
+                count += 1
+            except Exception as exc:
+                report["errors"].append(f"project_control: {exc}")
+        report["imported"]["project_controls"] = count
+
+        # Provider acks from providers.json constitution fields
+        count = 0
+        for prov in _load("providers.json", "providers"):
+            pid = str(prov.get("provider_id") or "")
+            if pid and prov.get("constitution_acknowledged"):
+                try:
+                    self.set_provider_constitution_ack(pid, prov)
+                    count += 1
+                except Exception as exc:
+                    report["errors"].append(f"provider_ack: {exc}")
+        report["imported"]["provider_acks"] = count
+
         report["db"] = self.db.pragmas()
+        report["integrity"] = report["db"].get("integrity_check")
+        if cutover and not report["errors"]:
+            self.set_migration_cutover(f"sqlite_authority_{stamp}")
+            report["cutover"] = True
+            report["cutover_marker"] = self.get_migration_cutover()
+        elif cutover and report["errors"]:
+            report["cutover"] = False
+            report["errors"].append("cutover withheld because import reported errors")
         return report

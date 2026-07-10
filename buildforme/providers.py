@@ -40,6 +40,12 @@ DEFAULT_PROVIDERS: list[dict[str, Any]] = [
         "supports_resume": False,
         "credentials_required": True,
         "credentials_configured": False,
+        "constitution_supported": True,
+        "constitution_acknowledged": False,
+        "constitution_version": None,
+        "constitution_hash": None,
+        "constitution_last_refresh": None,
+        "constitution_acknowledged_at": None,
     },
     {
         "provider_id": "claude",
@@ -70,6 +76,12 @@ DEFAULT_PROVIDERS: list[dict[str, Any]] = [
         "supports_resume": False,
         "credentials_required": True,
         "credentials_configured": False,
+        "constitution_supported": True,
+        "constitution_acknowledged": False,
+        "constitution_version": None,
+        "constitution_hash": None,
+        "constitution_last_refresh": None,
+        "constitution_acknowledged_at": None,
     },
     {
         "provider_id": "grok",
@@ -99,6 +111,12 @@ DEFAULT_PROVIDERS: list[dict[str, Any]] = [
         "supports_resume": False,
         "credentials_required": True,
         "credentials_configured": False,
+        "constitution_supported": True,
+        "constitution_acknowledged": False,
+        "constitution_version": None,
+        "constitution_hash": None,
+        "constitution_last_refresh": None,
+        "constitution_acknowledged_at": None,
     },
     {
         "provider_id": "glm",
@@ -128,6 +146,12 @@ DEFAULT_PROVIDERS: list[dict[str, Any]] = [
         "supports_resume": False,
         "credentials_required": True,
         "credentials_configured": False,
+        "constitution_supported": True,
+        "constitution_acknowledged": False,
+        "constitution_version": None,
+        "constitution_hash": None,
+        "constitution_last_refresh": None,
+        "constitution_acknowledged_at": None,
     },
 ]
 
@@ -142,6 +166,7 @@ PLANNING_EDITABLE_FIELDS = frozenset(
         "supported_risk_levels",
     }
 )
+# Constitution acknowledgement is managed only via constitution-refresh / acknowledge APIs.
 
 
 def default_provider_registry() -> list[dict[str, Any]]:
@@ -154,6 +179,12 @@ def default_provider_registry() -> list[dict[str, Any]]:
         record["mode"] = "dry_run"
         record["live_execution_available"] = False
         record["credentials_configured"] = False
+        record["constitution_supported"] = True
+        record.setdefault("constitution_acknowledged", False)
+        record.setdefault("constitution_version", None)
+        record.setdefault("constitution_hash", None)
+        record.setdefault("constitution_last_refresh", None)
+        record.setdefault("constitution_acknowledged_at", None)
         out.append(record)
     return out
 

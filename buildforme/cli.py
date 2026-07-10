@@ -220,6 +220,119 @@ def run_events_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def constitution_status_command(args: argparse.Namespace) -> int:
+    from buildforme.storage import LocalStore
+    from governance.constitution_engine import get_engine
+
+    engine = get_engine()
+    store = LocalStore(args.state)
+    if args.brief:
+        payload = {"status": engine.status()}
+    else:
+        payload = engine.dashboard_payload(store)
+    status = payload.get("status") or engine.status()
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("Buildforme AI Constitution")
+        print(f"  Version: {status.get('version')}")
+        print(f"  Hash: {status.get('hash')}")
+        print(f"  Laws: {status.get('law_count')}")
+        print(f"  Document valid: {status.get('document_valid')}")
+        if not args.brief:
+            print(f"  Violations: {(payload.get('violation_summary') or {}).get('total', 0)}")
+            print(f"  Leases: {len(payload.get('leases') or [])}")
+            for ack in payload.get("provider_acknowledgements") or []:
+                print(
+                    f"  Provider {ack.get('provider_id')}: ack={ack.get('constitution_acknowledged')} "
+                    f"refresh_needed={ack.get('needs_refresh')}"
+                )
+    return 0 if status.get("document_valid") else 2
+
+
+def constitution_validate_command(args: argparse.Namespace) -> int:
+    from buildforme.storage import LocalStore
+    from governance.constitution_engine import get_engine
+
+    engine = get_engine()
+    store = LocalStore(args.state) if args.state else None
+    payload = engine.full_validation_suite(store)
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("Constitution validation")
+        for check in payload.get("checks") or []:
+            mark = "PASS" if check.get("ok") else "FAIL"
+            print(f"  [{mark}] {check.get('name')}: {check.get('detail')}")
+        print(f"Overall: {'PASS' if payload.get('passed') else 'FAIL'}")
+        print(f"Version: {payload.get('version')} Hash: {payload.get('hash')}")
+    return 0 if payload.get("passed") else 2
+
+
+def constitution_refresh_command(args: argparse.Namespace) -> int:
+    """Deliver full constitution acknowledgement to providers (once per version)."""
+    from buildforme.storage import LocalStore
+    from governance.constitution_engine import get_engine
+
+    engine = get_engine()
+    store = LocalStore(args.state)
+    targets = [args.provider] if args.provider else [p.get("provider_id") for p in store.list_providers()]
+    results = []
+    for provider_id in targets:
+        if not provider_id:
+            continue
+        provider = store.get_provider_record(str(provider_id))
+        refreshed = engine.refresh_provider(provider, actor=args.actor or "shan")
+        saved = store.set_provider_constitution_ack(
+            str(provider_id),
+            {
+                "constitution_supported": refreshed.get("constitution_supported"),
+                "constitution_acknowledged": refreshed.get("constitution_acknowledged"),
+                "constitution_version": refreshed.get("constitution_version"),
+                "constitution_hash": refreshed.get("constitution_hash"),
+                "constitution_last_refresh": refreshed.get("constitution_last_refresh"),
+                "constitution_acknowledged_at": refreshed.get("constitution_acknowledged_at"),
+                "constitution_ack_actor": refreshed.get("constitution_ack_actor"),
+            },
+        )
+        results.append(
+            {
+                "provider_id": provider_id,
+                "acknowledged": saved.get("constitution_acknowledged"),
+                "version": saved.get("constitution_version"),
+                "hash": saved.get("constitution_hash"),
+                "full_constitution_delivered": True,
+                "policy": "subsequent_executions_receive_reminder_only",
+            }
+        )
+    payload = {
+        "version": engine.version(),
+        "hash": engine.content_hash(),
+        "refreshed": results,
+        "reminder_sample": engine.reminder(phase="provider_refresh"),
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"Constitution refresh version={payload['version']} hash={payload['hash']}")
+        for item in results:
+            print(f"  {item['provider_id']}: acknowledged={item['acknowledged']}")
+    return 0
+
+
+def constitution_export_command(args: argparse.Namespace) -> int:
+    from governance.constitution_engine import get_engine
+
+    engine = get_engine()
+    text = engine.export(format=args.format)
+    if args.output:
+        Path(args.output).write_text(text, encoding="utf-8")
+        print(f"Wrote {args.output}")
+    else:
+        print(text, end="" if text.endswith("\n") else "\n")
+    return 0
+
+
 def governance_validate_command(args: argparse.Namespace) -> int:
     """Run Stage 5.5 governance smoke checks and adversarial unit tests."""
     import unittest
@@ -394,6 +507,32 @@ def build_parser() -> argparse.ArgumentParser:
     gov.add_argument("--state", default="runtime/buildforme_state.json")
     gov.add_argument("--json", action="store_true")
     gov.set_defaults(func=governance_validate_command)
+
+    c_status = subparsers.add_parser("constitution-status", help="Show AI Constitution status")
+    c_status.add_argument("--state", default="runtime/buildforme_state.json")
+    c_status.add_argument("--json", action="store_true")
+    c_status.add_argument("--brief", action="store_true", help="Status only, no store dashboard")
+    c_status.set_defaults(func=constitution_status_command)
+
+    c_val = subparsers.add_parser("constitution-validate", help="Validate Constitution document and bindings")
+    c_val.add_argument("--state", default="runtime/buildforme_state.json")
+    c_val.add_argument("--json", action="store_true")
+    c_val.set_defaults(func=constitution_validate_command)
+
+    c_ref = subparsers.add_parser(
+        "constitution-refresh",
+        help="Deliver full Constitution acknowledgement to providers (once per version)",
+    )
+    c_ref.add_argument("--state", default="runtime/buildforme_state.json")
+    c_ref.add_argument("--provider", default=None, help="Single provider id (default: all)")
+    c_ref.add_argument("--actor", default="shan")
+    c_ref.add_argument("--json", action="store_true")
+    c_ref.set_defaults(func=constitution_refresh_command)
+
+    c_exp = subparsers.add_parser("constitution-export", help="Export Constitution as json|markdown|reminder")
+    c_exp.add_argument("--format", default="json", choices=["json", "markdown", "reminder"])
+    c_exp.add_argument("--output", default=None, help="Optional file path")
+    c_exp.set_defaults(func=constitution_export_command)
     return parser
 
 

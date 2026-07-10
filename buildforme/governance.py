@@ -21,7 +21,7 @@ def parse_bool_strict(value: Any, *, field: str = "value") -> bool:
     """Parse booleans without unsafe truthiness.
 
     Accepts: True/False, 1/0, "true"/"false", "yes"/"no", "on"/"off" (case-insensitive).
-    Rejects: null, "", "False" as non-boolean string ambiguities other than listed, objects.
+    Rejects: null, "", objects, and any non-enumerated representation.
     Note: Python bool("false") is True — this function must not use that.
     """
     if isinstance(value, bool):
@@ -97,11 +97,10 @@ def validate_actor(actor: Any) -> str:
 
 
 def compute_run_scope_fingerprint(run: dict[str, Any], packet: dict[str, Any] | None = None) -> str:
-    """Deterministic cryptographic fingerprint of execution scope.
-
-    Uses sorted JSON + SHA-256 (not Python's salted hash()).
-    """
-    packet = packet if isinstance(packet, dict) else (run.get("packet") if isinstance(run.get("packet"), dict) else {})
+    """Deterministic cryptographic fingerprint of execution and governance scope."""
+    packet = packet if isinstance(packet, dict) else (
+        run.get("packet") if isinstance(run.get("packet"), dict) else {}
+    )
     material = {
         "run_id": str(run.get("id") or ""),
         "project_id": str(run.get("project_id") or ""),
@@ -116,6 +115,14 @@ def compute_run_scope_fingerprint(run: dict[str, Any], packet: dict[str, Any] | 
         "timeout_minutes": int(run.get("timeout_minutes") or 0),
         "max_attempts": int(run.get("max_attempts") or 0),
         "budget": _canonical(run.get("budget") or {}),
+        "constitution_version": str(run.get("constitution_version") or ""),
+        "constitution_hash": str(run.get("constitution_hash") or ""),
+        "constitution_lease_id": str(run.get("constitution_lease_id") or ""),
+        "constitution_lease_fingerprint": str(
+            run.get("constitution_lease_fingerprint") or ""
+        ),
+        "packet_constitution_version": str(packet.get("constitution_version") or ""),
+        "packet_constitution_hash": str(packet.get("constitution_hash") or ""),
         "packet_objective": str(packet.get("objective") or ""),
         "packet_allowed_files": sorted(str(x) for x in (packet.get("allowed_files") or [])),
         "packet_forbidden_files": sorted(str(x) for x in (packet.get("forbidden_files") or [])),
@@ -140,7 +147,9 @@ def _canonical(value: Any) -> Any:
 
 def material_text_blob(run: dict[str, Any], packet: dict[str, Any] | None = None) -> str:
     """Concatenate all material text fields for policy scanning."""
-    packet = packet if isinstance(packet, dict) else (run.get("packet") if isinstance(run.get("packet"), dict) else {})
+    packet = packet if isinstance(packet, dict) else (
+        run.get("packet") if isinstance(run.get("packet"), dict) else {}
+    )
     parts: list[str] = []
     for key in (
         "objective",

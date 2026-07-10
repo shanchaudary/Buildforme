@@ -999,6 +999,57 @@ textarea.mono {
   word-break: break-word;
 }
 
+/* —— Constitution (Stage 5.6) —— */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin: 16px 0 20px;
+}
+
+.stat-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  background: rgba(7, 10, 18, 0.45);
+  display: grid;
+  gap: 6px;
+}
+
+.stat-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
+.split-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.mt-4 {
+  margin-top: 1rem;
+}
+
+.pill.risk-critical,
+.pill.risk-high {
+  background: rgba(248, 113, 113, 0.15);
+  color: #fca5a5;
+}
+
+.pill.risk-medium {
+  background: rgba(251, 191, 36, 0.12);
+  color: #fbbf24;
+}
+
+.pill.risk-low {
+  background: rgba(52, 211, 153, 0.12);
+  color: #6ee7b7;
+}
+
 /* —— Tasks —— */
 .task-table {
   display: grid;

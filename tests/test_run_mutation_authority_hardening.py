@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from buildforme.execution_service import execute_supervised, record_run_approval
 from buildforme.storage import LocalStore
 
 
@@ -471,6 +472,58 @@ class RunMutationAuthorityHardeningTests(unittest.TestCase):
         )
         self.assertEqual(saved["status"], "awaiting_approval")
         self.assertEqual(saved["approval_requirements"], ["shan_task_approval"])
+
+
+    def test_live_execution_rejects_missing_bound_scope_before_other_authority(self):
+        self._make_run(
+            "run-live-missing-scope",
+            status="approved",
+            scope_fingerprint=None,
+        )
+        before = self.store.get_run("run-live-missing-scope")
+        with self.assertRaisesRegex(ValueError, "missing governed scope_fingerprint"):
+            execute_supervised(self.store, "run-live-missing-scope")
+        after = self.store.get_run("run-live-missing-scope")
+        self.assertEqual(after["status"], before["status"])
+        self.assertEqual(after["row_version"], before["row_version"])
+        self.assertEqual(self.store.list_run_events("run-live-missing-scope"), [])
+
+    def test_live_execution_rejects_mismatched_bound_scope(self):
+        self._make_run(
+            "run-live-stale-scope",
+            status="approved",
+            scope_fingerprint="not-the-canonical-scope",
+        )
+        before = self.store.get_run("run-live-stale-scope")
+        with self.assertRaisesRegex(ValueError, "scope fingerprint mismatch"):
+            execute_supervised(self.store, "run-live-stale-scope")
+        after = self.store.get_run("run-live-stale-scope")
+        self.assertEqual(after["status"], before["status"])
+        self.assertEqual(after["row_version"], before["row_version"])
+        self.assertEqual(self.store.list_run_events("run-live-stale-scope"), [])
+
+    def test_approval_rejects_missing_bound_scope_before_lease_or_write(self):
+        self._make_run(
+            "run-approval-missing-scope",
+            status="awaiting_approval",
+            scope_fingerprint=None,
+        )
+        before = self.store.get_run("run-approval-missing-scope")
+        with self.assertRaisesRegex(ValueError, "missing governed scope_fingerprint"):
+            record_run_approval(
+                self.store,
+                "run-approval-missing-scope",
+                requirement_type="shan_task_approval",
+                decision="approved",
+            )
+        after = self.store.get_run("run-approval-missing-scope")
+        self.assertEqual(after["status"], before["status"])
+        self.assertEqual(after["row_version"], before["row_version"])
+        self.assertEqual(self.store.list_run_events("run-approval-missing-scope"), [])
+        self.assertEqual(
+            self.store.list_run_approvals("run-approval-missing-scope"),
+            [],
+        )
 
 
 if __name__ == "__main__":

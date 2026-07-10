@@ -430,16 +430,27 @@ class BindingInvalidationTests(ApprovalAtomicFixture):
         run["baseline_commit"] = "abcdef01" * 5
         self.store.save_run_for_setup(run)
         run = self.store.get_run(run["id"])
-        # New approval for second requirement should not complete set with stale first
-        result = record_run_approval(
-            self.store,
-            run["id"],
-            requirement_type="security_review",
-            decision="approved",
-            actor="shan",
+        # Authority drift invalidates the run itself. A new approval must fail
+        # before writing history, events, or a status transition.
+        before = self.store.get_run(run["id"])
+        history_before = self.store.list_run_approval_history(run["id"])
+        events_before = self.store.list_run_events(run["id"])
+        with self.assertRaisesRegex(ValueError, "scope fingerprint mismatch"):
+            record_run_approval(
+                self.store,
+                run["id"],
+                requirement_type="security_review",
+                decision="approved",
+                actor="shan",
+            )
+        after = self.store.get_run(run["id"])
+        self.assertEqual(after["status"], "awaiting_approval")
+        self.assertEqual(after["row_version"], before["row_version"])
+        self.assertEqual(
+            self.store.list_run_approval_history(run["id"]),
+            history_before,
         )
-        # Still awaiting because first approval binding no longer matches
-        self.assertEqual(result["run"]["status"], "awaiting_approval")
+        self.assertEqual(self.store.list_run_events(run["id"]), events_before)
 
 
 if __name__ == "__main__":

@@ -469,6 +469,7 @@ def record_run_approval(
     """
     run_id = validate_safe_id(run_id, field="run_id")
     run = store.get_run(run_id)
+    _require_bound_scope(run)
     _require_canonical_run_lease(store, run)
     actor = validate_actor(actor)
     risk = str(run.get("risk") or "")
@@ -731,6 +732,7 @@ def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
     run = store.get_run(run_id)
     if str(run.get("execution_mode") or run.get("mode") or "dry_run") != "live_supervised":
         raise ValueError("run execution_mode must be live_supervised (use run-dry-run for dry_run)")
+    _require_bound_scope(run)
     if str(run.get("status")) not in {"approved", "queued"}:
         raise ValueError(f"run must be approved before supervised execution (status={run.get('status')})")
     if not run.get("baseline_commit"):

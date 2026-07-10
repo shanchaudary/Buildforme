@@ -589,8 +589,12 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
                 return
+            from buildforme.governance import parse_bool_strict
+
             control = self._store().set_execution_control(
-                kill_switch_active=bool(payload.get("kill_switch_active")),
+                kill_switch_active=parse_bool_strict(
+                    payload.get("kill_switch_active"), field="kill_switch_active"
+                ),
                 reason=str(payload.get("reason") or ""),
                 actor=str(payload.get("actor") or "shan"),
             )

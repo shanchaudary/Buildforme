@@ -1066,6 +1066,11 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.OK, result)
                 return
             if action == "approve":
+                idemp = (
+                    payload.get("idempotency_key")
+                    or self.headers.get("X-Idempotency-Key")
+                    or self.headers.get("X-Buildforme-Idempotency-Key")
+                )
                 result = record_run_approval(
                     store,
                     run_id,
@@ -1073,10 +1078,16 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
                     decision="approved",
                     note=str(payload.get("note") or ""),
                     actor=str(payload.get("actor") or auth.get("actor") or "shan"),
+                    idempotency_key=str(idemp) if idemp else None,
                 )
                 self._json(HTTPStatus.OK, result)
                 return
             if action == "reject":
+                idemp = (
+                    payload.get("idempotency_key")
+                    or self.headers.get("X-Idempotency-Key")
+                    or self.headers.get("X-Buildforme-Idempotency-Key")
+                )
                 result = record_run_approval(
                     store,
                     run_id,
@@ -1084,6 +1095,7 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
                     decision="rejected",
                     note=str(payload.get("note") or ""),
                     actor=str(payload.get("actor") or auth.get("actor") or "shan"),
+                    idempotency_key=str(idemp) if idemp else None,
                 )
                 self._json(HTTPStatus.OK, result)
                 return

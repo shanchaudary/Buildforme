@@ -16,7 +16,7 @@ from typing import Any, Iterator
 
 from buildforme.storage import utc_now_iso
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -81,6 +81,28 @@ CREATE TABLE IF NOT EXISTS run_approvals (
   updated_at TEXT NOT NULL,
   UNIQUE(run_id, requirement_type)
 );
+
+-- Append-only approval attempts (never overwritten)
+CREATE TABLE IF NOT EXISTS run_approval_history (
+  approval_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(id),
+  requirement_type TEXT NOT NULL,
+  decision TEXT NOT NULL,
+  scope_fingerprint TEXT,
+  constitution_hash TEXT,
+  constitution_lease_id TEXT,
+  constitution_lease_fingerprint TEXT,
+  actor TEXT,
+  note TEXT,
+  created_at TEXT NOT NULL,
+  idempotency_key TEXT,
+  payload_json TEXT NOT NULL,
+  immutable INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_approval_history_run
+  ON run_approval_history(run_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_history_idemp
+  ON run_approval_history(idempotency_key) WHERE idempotency_key IS NOT NULL AND idempotency_key != '';
 
 CREATE TABLE IF NOT EXISTS constitution_leases (
   lease_id TEXT PRIMARY KEY,
@@ -252,11 +274,9 @@ class ExecutionDB:
                     current = int(row[0] or 0)
                     if current < 2:
                         self._migrate_to_v2(conn)
-                        conn.execute(
-                            "UPDATE schema_meta SET value=? WHERE key='version'",
-                            (str(SCHEMA_VERSION),),
-                        )
-                    elif current < SCHEMA_VERSION:
+                    if current < 3:
+                        self._migrate_to_v3(conn)
+                    if current < SCHEMA_VERSION:
                         conn.execute(
                             "UPDATE schema_meta SET value=? WHERE key='version'",
                             (str(SCHEMA_VERSION),),
@@ -300,6 +320,75 @@ class ExecutionDB:
         conn.execute(
             "INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('migration_cutover', '')"
         )
+
+    def _migrate_to_v3(self, conn: sqlite3.Connection) -> None:
+        """Additive migration: immutable run_approval_history."""
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS run_approval_history (
+              approval_id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL REFERENCES runs(id),
+              requirement_type TEXT NOT NULL,
+              decision TEXT NOT NULL,
+              scope_fingerprint TEXT,
+              constitution_hash TEXT,
+              constitution_lease_id TEXT,
+              constitution_lease_fingerprint TEXT,
+              actor TEXT,
+              note TEXT,
+              created_at TEXT NOT NULL,
+              idempotency_key TEXT,
+              payload_json TEXT NOT NULL,
+              immutable INTEGER NOT NULL DEFAULT 1
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_approval_history_run "
+            "ON run_approval_history(run_id, created_at)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_history_idemp "
+            "ON run_approval_history(idempotency_key) "
+            "WHERE idempotency_key IS NOT NULL AND idempotency_key != ''"
+        )
+        # Seed history from existing effective rows (one-time, idempotent by approval id)
+        rows = conn.execute("SELECT payload_json FROM run_approvals").fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row[0] or "{}")
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            aid = str(payload.get("id") or payload.get("approval_id") or "")
+            if not aid:
+                continue
+            exists = conn.execute(
+                "SELECT 1 FROM run_approval_history WHERE approval_id=?", (aid,)
+            ).fetchone()
+            if exists:
+                continue
+            conn.execute(
+                """INSERT INTO run_approval_history(
+                   approval_id, run_id, requirement_type, decision, scope_fingerprint,
+                   constitution_hash, constitution_lease_id, constitution_lease_fingerprint,
+                   actor, note, created_at, idempotency_key, payload_json, immutable)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1)""",
+                (
+                    aid,
+                    str(payload.get("run_id") or ""),
+                    str(payload.get("requirement_type") or ""),
+                    str(payload.get("decision") or ""),
+                    payload.get("scope_fingerprint") or payload.get("scope"),
+                    payload.get("constitution_hash"),
+                    payload.get("constitution_lease_id"),
+                    payload.get("constitution_lease_fingerprint"),
+                    payload.get("actor"),
+                    payload.get("note"),
+                    payload.get("created_at") or utc_now_iso(),
+                    payload.get("idempotency_key"),
+                    row[0],
+                ),
+            )
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:

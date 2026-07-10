@@ -413,23 +413,24 @@ def record_run_approval(
     decision: str,
     note: str = "",
     actor: str = "shan",
+    idempotency_key: str | None = None,
 ) -> dict[str, Any]:
-    run = store.get_run(validate_safe_id(run_id, field="run_id"))
+    """Record an approval attempt via one atomic store transaction.
+
+    Does not separately save approval, append events, or save_run transitions.
+    """
+    run_id = validate_safe_id(run_id, field="run_id")
+    run = store.get_run(run_id)
     _require_canonical_run_lease(store, run)
     actor = validate_actor(actor)
     risk = str(run.get("risk") or "")
     if risk == "BLACK" and decision == "approved":
         raise ValueError("BLACK risk cannot be approved for execution")
-    if str(run.get("status")) not in {
-        "awaiting_approval",
-        "awaiting_preflight",
-        "approved",
-        "draft",
-    }:
-        if is_terminal(str(run.get("status"))):
-            raise ValueError("cannot approve terminal run")
+    if is_terminal(str(run.get("status"))) and str(run.get("status")) not in {"approved"}:
+        raise ValueError("cannot approve terminal run")
 
     packet = run.get("packet") if isinstance(run.get("packet"), dict) else None
+    # Scope and constitution fields derived from stored run only (never caller authority)
     fingerprint = compute_run_scope_fingerprint(run, packet)
     engine = get_engine()
     approval_payload = engine.attach_to_approval(
@@ -443,81 +444,49 @@ def record_run_approval(
             "actor": actor,
             "packet_id": run.get("packet_id"),
             "task_id": run.get("task_id"),
+            "project_id": run.get("project_id"),
+            "provider_id": run.get("provider_id"),
+            "repository": run.get("repository"),
+            "baseline_commit": run.get("baseline_commit"),
+            "execution_branch": run.get("execution_branch"),
+            "requested_capabilities": list(run.get("requested_capabilities") or []),
+            "risk": run.get("risk"),
+            "constitution_lease_fingerprint": run.get("constitution_lease_fingerprint"),
+            "idempotency_key": str(idempotency_key).strip() if idempotency_key else None,
         },
         run=run,
     )
-    record = store.save_run_approval(approval_payload)
-    record_problems = validate_approval_binding(
-        record,
+    # Pre-check binding before txn (txn re-validates against live scope)
+    pre_problems = validate_approval_binding(
+        approval_payload,
         run,
         expected_scope_fingerprint=fingerprint,
     )
-    if record_problems:
-        raise ValueError(
-            "stored approval lost constitutional binding: "
-            + "; ".join(record_problems)
-        )
+    if pre_problems:
+        raise ValueError("approval binding invalid: " + "; ".join(pre_problems))
 
-    store.append_run_event(
-        run_id,
-        "approval_recorded",
-        f"{requirement_type} → {decision}",
-        actor=actor,
-        metadata={
+    expected_version = int(run.get("row_version") or 1)
+    committed = store.commit_run_approval(
+        run_id=run_id,
+        expected_row_version=expected_version,
+        approval_payload=approval_payload,
+        event_type="approval_recorded",
+        event_summary=f"{requirement_type} → {decision}",
+        event_actor=actor,
+        event_metadata={
             "requirement_type": requirement_type,
             "decision": decision,
             "scope_fingerprint": fingerprint,
             "constitution_lease_id": run.get("constitution_lease_id"),
+            "idempotency_key": approval_payload.get("idempotency_key"),
         },
     )
-
-    if decision == "rejected":
-        if can_transition(str(run.get("status")), "rejected"):
-            run = transition_run(run, "rejected", actor, note or "approval rejected")
-            _persist_transition(
-                store,
-                run,
-                event_type="approval_rejected",
-                event_summary=note or "approval rejected",
-                actor=actor,
-            )
-        return {"approval": record, "run": store.get_run(run_id)}
-
-    current_run = store.get_run(run_id)
-    _require_canonical_run_lease(store, current_run)
-    current_fp = compute_run_scope_fingerprint(current_run, packet)
-    if current_fp != fingerprint:
-        raise ValueError("Approval invalidated: run scope changed during approval")
-
-    required = list(current_run.get("approval_requirements") or [])
-    approvals = store.list_run_approvals(run_id=run_id)
-    approved = _current_approved_types(
-        approvals,
-        current_run,
-        current_fp,
-        fail_on_invalid=False,
-    )
-
-    run = store.get_run(run_id)
-    if (
-        str(run.get("status")) == "awaiting_approval"
-        and required
-        and all(requirement in approved for requirement in required)
-    ):
-        run = transition_run(
-            run,
-            "approved",
-            actor,
-            "all required approvals present for current scope and constitution lease",
-        )
-        _persist_transition(
-            store,
-            run,
-            event_type="run_approved",
-            event_summary="Run approved for supervised execution",
-            actor=actor,
-        )
-    return {"approval": record, "run": store.get_run(run_id)}
+    return {
+        "approval": committed["approval"],
+        "run": committed["run"],
+        "event": committed.get("event"),
+        "replayed": bool(committed.get("replayed")),
+    }
 
 
 def execute_dry_run(store: LocalStore, run_id: str) -> dict[str, Any]:

@@ -467,38 +467,24 @@ class Stage6Store:
 
     # —— Approvals ——
     def save_run_approval(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Legacy/migration helper: append history + upsert effective current.
+
+        Live approval path must use commit_run_approval() for atomic authority.
+        """
         record = dict(payload)
         record.setdefault("id", new_id("rap"))
+        record.setdefault("approval_id", record["id"])
         now = utc_now_iso()
         record.setdefault("created_at", now)
         record["updated_at"] = now
+        record["immutable"] = True
         with self.db.transaction() as conn:
-            conn.execute(
-                """INSERT INTO run_approvals(id, run_id, requirement_type, decision, scope_fingerprint,
-                   constitution_hash, constitution_lease_id, note, actor, payload_json, created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(run_id, requirement_type) DO UPDATE SET
-                   decision=excluded.decision, scope_fingerprint=excluded.scope_fingerprint,
-                   constitution_hash=excluded.constitution_hash, constitution_lease_id=excluded.constitution_lease_id,
-                   note=excluded.note, actor=excluded.actor, payload_json=excluded.payload_json, updated_at=excluded.updated_at""",
-                (
-                    record["id"],
-                    record["run_id"],
-                    record["requirement_type"],
-                    record["decision"],
-                    record.get("scope_fingerprint") or record.get("scope"),
-                    record.get("constitution_hash"),
-                    record.get("constitution_lease_id"),
-                    record.get("note"),
-                    record.get("actor"),
-                    dumps(record),
-                    record["created_at"],
-                    record["updated_at"],
-                ),
-            )
+            self._insert_approval_history_conn(conn, record)
+            self._upsert_effective_approval_conn(conn, record)
         return record
 
     def list_run_approvals(self, run_id: str | None = None) -> list[dict[str, Any]]:
+        """Effective current approvals (latest valid projection, not full history)."""
         with self.db.transaction() as conn:
             if run_id:
                 rows = conn.execute(
@@ -507,6 +493,367 @@ class Stage6Store:
             else:
                 rows = conn.execute("SELECT payload_json FROM run_approvals").fetchall()
         return [loads(r[0], {}) for r in rows]
+
+    def list_run_approval_history(self, run_id: str | None = None) -> list[dict[str, Any]]:
+        with self.db.transaction() as conn:
+            if run_id:
+                rows = conn.execute(
+                    "SELECT payload_json FROM run_approval_history WHERE run_id=? ORDER BY created_at ASC",
+                    (run_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT payload_json FROM run_approval_history ORDER BY created_at ASC"
+                ).fetchall()
+        return [loads(r[0], {}) for r in rows]
+
+    def _insert_approval_history_conn(self, conn: Any, record: dict[str, Any]) -> None:
+        aid = str(record.get("approval_id") or record.get("id") or new_id("rap"))
+        record["approval_id"] = aid
+        record["id"] = aid
+        conn.execute(
+            """INSERT INTO run_approval_history(
+               approval_id, run_id, requirement_type, decision, scope_fingerprint,
+               constitution_hash, constitution_lease_id, constitution_lease_fingerprint,
+               actor, note, created_at, idempotency_key, payload_json, immutable)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1)""",
+            (
+                aid,
+                str(record.get("run_id") or ""),
+                str(record.get("requirement_type") or ""),
+                str(record.get("decision") or ""),
+                record.get("scope_fingerprint") or record.get("scope"),
+                record.get("constitution_hash"),
+                record.get("constitution_lease_id"),
+                record.get("constitution_lease_fingerprint"),
+                record.get("actor"),
+                record.get("note"),
+                record.get("created_at") or utc_now_iso(),
+                record.get("idempotency_key") or None,
+                dumps(record),
+            ),
+        )
+
+    def _upsert_effective_approval_conn(self, conn: Any, record: dict[str, Any]) -> None:
+        aid = str(record.get("approval_id") or record.get("id") or new_id("rap"))
+        now = record.get("updated_at") or utc_now_iso()
+        conn.execute(
+            """INSERT INTO run_approvals(id, run_id, requirement_type, decision, scope_fingerprint,
+               constitution_hash, constitution_lease_id, note, actor, payload_json, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(run_id, requirement_type) DO UPDATE SET
+               id=excluded.id, decision=excluded.decision, scope_fingerprint=excluded.scope_fingerprint,
+               constitution_hash=excluded.constitution_hash, constitution_lease_id=excluded.constitution_lease_id,
+               note=excluded.note, actor=excluded.actor, payload_json=excluded.payload_json,
+               updated_at=excluded.updated_at""",
+            (
+                aid,
+                str(record.get("run_id") or ""),
+                str(record.get("requirement_type") or ""),
+                str(record.get("decision") or ""),
+                record.get("scope_fingerprint") or record.get("scope"),
+                record.get("constitution_hash"),
+                record.get("constitution_lease_id"),
+                record.get("note"),
+                record.get("actor"),
+                dumps(record),
+                record.get("created_at") or now,
+                now,
+            ),
+        )
+
+    def commit_run_approval(
+        self,
+        *,
+        run_id: str,
+        expected_row_version: int,
+        approval_payload: dict[str, Any],
+        event_type: str = "approval_recorded",
+        event_summary: str = "",
+        event_actor: str = "shan",
+        event_metadata: dict[str, Any] | None = None,
+        transition_reason: str = "",
+    ) -> dict[str, Any]:
+        """Atomically: history + effective approval + optional run transition + event.
+
+        Evaluates approval set only after history insert inside the same transaction.
+        """
+        from buildforme.run_state import can_transition, is_terminal, transition_run
+        from governance.constitution_binding_guard import validate_approval_binding
+
+        rid = str(run_id)
+        approval = dict(approval_payload)
+        approval.setdefault("id", new_id("rap"))
+        approval["approval_id"] = str(approval.get("approval_id") or approval["id"])
+        approval["id"] = approval["approval_id"]
+        now = utc_now_iso()
+        approval.setdefault("created_at", now)
+        approval["updated_at"] = now
+        approval["immutable"] = True
+        idemp = str(approval.get("idempotency_key") or "").strip() or None
+        if idemp:
+            approval["idempotency_key"] = idemp
+
+        with self.db.transaction() as conn:
+            # —— Idempotent replay (no new history/event) ——
+            if idemp:
+                hit = conn.execute(
+                    "SELECT payload_json FROM run_approval_history WHERE idempotency_key=?",
+                    (idemp,),
+                ).fetchone()
+                if hit:
+                    prev = loads(hit[0], {})
+                    if str(prev.get("run_id")) != rid:
+                        raise ValueError("idempotency key bound to a different run")
+                    if str(prev.get("requirement_type")) != str(approval.get("requirement_type")):
+                        raise ValueError("idempotency key conflicts: requirement_type mismatch")
+                    if str(prev.get("decision")) != str(approval.get("decision")):
+                        raise ValueError("idempotency key conflicts: decision mismatch")
+                    if str(prev.get("scope_fingerprint") or prev.get("scope") or "") != str(
+                        approval.get("scope_fingerprint") or approval.get("scope") or ""
+                    ):
+                        raise ValueError("idempotency key conflicts: scope_fingerprint mismatch")
+                    run_row = conn.execute(
+                        "SELECT payload_json FROM runs WHERE id=?", (rid,)
+                    ).fetchone()
+                    if not run_row:
+                        raise KeyError(f"Run not found: {rid}")
+                    return {
+                        "approval": prev,
+                        "run": loads(run_row[0], {}),
+                        "event": None,
+                        "replayed": True,
+                    }
+
+            existing = conn.execute(
+                "SELECT id, row_version, payload_json FROM runs WHERE id=?", (rid,)
+            ).fetchone()
+            if not existing:
+                raise KeyError(f"Run not found: {rid}")
+            current_ver = int(existing[1] or 1)
+            if current_ver != int(expected_row_version):
+                raise ValueError(
+                    f"stale approval rejected: expected row_version={expected_row_version} "
+                    f"have={current_ver} run_id={rid}"
+                )
+            run = loads(existing[2], {})
+            run["row_version"] = current_ver
+            status = str(run.get("status") or "")
+
+            if is_terminal(status) and status not in {"approved"}:
+                raise ValueError(f"cannot approve terminal run status={status}")
+            if status == "rejected":
+                raise ValueError("cannot approve rejected run")
+            if status not in {
+                "awaiting_approval",
+                "awaiting_preflight",
+                "approved",
+                "draft",
+            }:
+                raise ValueError(f"cannot record approval from status {status}")
+
+            lease_id = str(run.get("constitution_lease_id") or "")
+            if lease_id:
+                lease_row = conn.execute(
+                    "SELECT payload_json FROM constitution_leases WHERE lease_id=?",
+                    (lease_id,),
+                ).fetchone()
+                if not lease_row:
+                    raise ValueError("constitution lease missing for run")
+
+            for field in (
+                "constitution_version",
+                "constitution_hash",
+                "constitution_lease_id",
+            ):
+                if str(approval.get(field) or "") != str(run.get(field) or ""):
+                    raise ValueError(f"approval {field} does not match current run")
+
+            # Scope must match recalculated run material (caller may not invent scope)
+            from buildforme.governance import compute_run_scope_fingerprint
+
+            packet = run.get("packet") if isinstance(run.get("packet"), dict) else None
+            live_scope = compute_run_scope_fingerprint(run, packet)
+            provided_scope = str(
+                approval.get("scope_fingerprint") or approval.get("scope") or ""
+            )
+            if provided_scope != live_scope:
+                raise ValueError(
+                    "approval scope fingerprint does not match current run scope"
+                )
+            approval["scope_fingerprint"] = live_scope
+            approval["scope"] = live_scope
+
+            problems = validate_approval_binding(
+                approval,
+                run,
+                expected_scope_fingerprint=live_scope,
+            )
+            if problems:
+                raise ValueError("approval binding invalid: " + "; ".join(problems))
+
+            # Rejection finality: prior effective rejection for this run blocks approve
+            if str(approval.get("decision")) == "approved":
+                eff_rows = conn.execute(
+                    "SELECT decision FROM run_approvals WHERE run_id=?", (rid,)
+                ).fetchall()
+                if any(str(r[0]) == "rejected" for r in eff_rows):
+                    raise ValueError(
+                        "run has a rejected approval requirement; cannot approve further"
+                    )
+
+            try:
+                self._insert_approval_history_conn(conn, approval)
+            except Exception as exc:
+                raise ValueError(f"approval history insert failed: {exc}") from exc
+
+            self._upsert_effective_approval_conn(conn, approval)
+
+            # Evaluate effective approval set inside transaction
+            scope_fp = live_scope
+            eff = conn.execute(
+                "SELECT payload_json FROM run_approvals WHERE run_id=?", (rid,)
+            ).fetchall()
+            approved_types: set[str] = set()
+            rejected_any = False
+            for erow in eff:
+                item = loads(erow[0], {})
+                probs = validate_approval_binding(
+                    item, run, expected_scope_fingerprint=scope_fp
+                )
+                if probs:
+                    continue
+                if str(item.get("decision")) == "approved":
+                    approved_types.add(str(item.get("requirement_type")))
+                if str(item.get("decision")) == "rejected":
+                    rejected_any = True
+
+            required = [str(x) for x in (run.get("approval_requirements") or [])]
+            derived_status = status
+            transition_event_type = None
+            transition_summary = None
+
+            if str(approval.get("decision")) == "rejected" or rejected_any:
+                if can_transition(status, "rejected"):
+                    derived_status = "rejected"
+                    transition_event_type = "approval_rejected"
+                    transition_summary = str(
+                        approval.get("note") or "approval rejected"
+                    )
+            elif (
+                status == "awaiting_approval"
+                and required
+                and all(req in approved_types for req in required)
+            ):
+                if can_transition(status, "approved"):
+                    derived_status = "approved"
+                    transition_event_type = "run_approved"
+                    transition_summary = (
+                        "all required approvals present for current scope and constitution lease"
+                    )
+
+            record = dict(run)
+            if derived_status != status:
+                record = transition_run(
+                    record,
+                    derived_status,
+                    event_actor,
+                    transition_reason or transition_summary or "",
+                )
+            record["updated_at"] = now
+
+            new_ver = current_ver + 1
+            record["row_version"] = new_ver
+            cur = conn.execute(
+                """UPDATE runs SET project_id=?, task_id=?, packet_id=?, provider_id=?, repository=?,
+                repository_local_path=?, baseline_ref=?, baseline_commit=?, requested_target_branch=?,
+                execution_branch=?, operating_mode=?, risk=?, status=?, execution_mode=?,
+                scope_fingerprint=?, constitution_version=?, constitution_hash=?, constitution_lease_id=?,
+                constitution_lease_fingerprint=?, task_lock_id=?, payload_json=?, updated_at=?,
+                started_at=?, finished_at=?, idempotency_key=?, row_version=?
+                WHERE id=? AND row_version=?""",
+                (
+                    str(record.get("project_id") or ""),
+                    record.get("task_id"),
+                    record.get("packet_id"),
+                    str(record.get("provider_id") or ""),
+                    str(record.get("repository") or ""),
+                    record.get("repository_local_path"),
+                    record.get("baseline_ref"),
+                    record.get("baseline_commit"),
+                    record.get("requested_target_branch") or record.get("target_branch"),
+                    record.get("execution_branch"),
+                    record.get("operating_mode"),
+                    record.get("risk"),
+                    str(record.get("status") or "draft"),
+                    str(record.get("execution_mode") or record.get("mode") or "dry_run"),
+                    record.get("scope_fingerprint"),
+                    record.get("constitution_version"),
+                    record.get("constitution_hash"),
+                    record.get("constitution_lease_id"),
+                    record.get("constitution_lease_fingerprint"),
+                    record.get("task_lock_id"),
+                    dumps(record),
+                    record["updated_at"],
+                    record.get("started_at"),
+                    record.get("finished_at"),
+                    record.get("idempotency_key"),
+                    new_ver,
+                    rid,
+                    current_ver,
+                ),
+            )
+            if cur.rowcount == 0:
+                raise ValueError(f"stale approval race: run_id={rid}")
+
+            meta = dict(event_metadata or {})
+            meta.setdefault("requirement_type", approval.get("requirement_type"))
+            meta.setdefault("decision", approval.get("decision"))
+            meta.setdefault("scope_fingerprint", scope_fp)
+            meta.setdefault("approval_id", approval.get("approval_id"))
+            meta.setdefault("resulting_status", record.get("status"))
+            meta.setdefault("constitution_lease_id", run.get("constitution_lease_id"))
+
+            conn.execute(
+                """INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (
+                    new_id("re"),
+                    rid,
+                    event_type,
+                    event_summary,
+                    event_actor,
+                    dumps(meta),
+                    now,
+                ),
+            )
+            if transition_event_type and derived_status != status:
+                conn.execute(
+                    """INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    (
+                        new_id("re"),
+                        rid,
+                        transition_event_type,
+                        transition_summary or "",
+                        event_actor,
+                        dumps(meta),
+                        now,
+                    ),
+                )
+
+            event = {
+                "event_type": event_type,
+                "summary": event_summary,
+                "actor": event_actor,
+                "metadata": meta,
+            }
+            return {
+                "approval": approval,
+                "run": record,
+                "event": event,
+                "replayed": False,
+            }
 
     # —— Leases ——
     def save_constitution_lease(self, lease: dict[str, Any]) -> dict[str, Any]:

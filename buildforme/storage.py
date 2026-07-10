@@ -1291,6 +1291,12 @@ class LocalStore:
     def list_run_approvals(self, run_id: str | None = None) -> list[dict[str, Any]]:
         return self.s6.list_run_approvals(run_id=run_id)
 
+    def list_run_approval_history(self, run_id: str | None = None) -> list[dict[str, Any]]:
+        return self.s6.list_run_approval_history(run_id=run_id)
+
+    def commit_run_approval(self, **kwargs: Any) -> dict[str, Any]:
+        return self.s6.commit_run_approval(**kwargs)
+
     def save_run_approval(self, payload: dict[str, Any]) -> dict[str, Any]:
         from buildforme.governance import validate_actor, validate_safe_id
 

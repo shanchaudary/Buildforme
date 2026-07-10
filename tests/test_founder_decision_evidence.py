@@ -192,7 +192,7 @@ class FounderDecisionTransactionTests(unittest.TestCase):
             "baseline_commit": "b" * 40,
             "worktree_path": str(Path(self.temp.name) / "wt"),
         }
-        self.store.save_run(self.run)
+        self.store.save_run_for_setup(self.run)
         # Parent execution evidence (minimal that storage accepts as execution)
         from buildforme.evidence import build_evidence_bundle
 
@@ -332,7 +332,7 @@ class FounderDecisionTransactionTests(unittest.TestCase):
         other["evidence_id"] = "ev-foreign"
         other["run_id"] = "run-other"
         other["id"] = "ev-foreign"
-        self.store.save_run(
+        self.store.save_run_for_setup(
             {
                 "id": "run-other",
                 "project_id": "p",
@@ -768,7 +768,7 @@ class FounderServiceIntegrationTests(unittest.TestCase):
             "blocking_reasons": ["tests failed"],
             "checks": [{"name": "tests", "status": "fail", "detail": "boom"}],
         }
-        self.store.save_run(run)
+        self.store.save_run_for_setup(run)
         with self.assertRaisesRegex(ValueError, "blocked by governance"):
             founder_review_decision(
                 self.store,

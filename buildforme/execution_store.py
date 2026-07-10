@@ -16,8 +16,19 @@ class Stage6Store:
         self.db = ExecutionDB(db_path)
 
     # —— Runs ——
-    def save_run(self, run: dict[str, Any], *, expected_row_version: int | None = None) -> dict[str, Any]:
-        """Persist a run. When expected_row_version is set, reject stale writers."""
+    def save_run(
+        self,
+        run: dict[str, Any],
+        *,
+        expected_row_version: int | None = None,
+        allow_unversioned: bool = False,
+    ) -> dict[str, Any]:
+        """Create a run or versioned-update an existing one.
+
+        Runtime Stage 6 code must pass expected_row_version for updates, or use
+        commit_run_mutation / transition_run_with_event. allow_unversioned is only
+        for migration/import and explicit test fixture setup.
+        """
         record = dict(run)
         rid = str(record.get("id") or new_id("run"))
         record["id"] = rid
@@ -30,11 +41,20 @@ class Stage6Store:
             ).fetchone()
             if existing:
                 current_ver = int(existing[1] or 1)
+                if expected_row_version is None and not allow_unversioned:
+                    raise ValueError(
+                        f"existing run update requires expected_row_version "
+                        f"(run_id={rid}); use commit_run_mutation or pass version"
+                    )
                 if expected_row_version is not None and current_ver != int(expected_row_version):
                     raise ValueError(
                         f"stale run write rejected: expected row_version={expected_row_version} "
                         f"have={current_ver} run_id={rid}"
                     )
+                # Unversioned setup path still bumps version for consistency
+                base_ver = current_ver if expected_row_version is None else int(expected_row_version)
+                if expected_row_version is None:
+                    base_ver = current_ver
                 new_ver = current_ver + 1
                 record["row_version"] = new_ver
                 cur = conn.execute(
@@ -118,6 +138,128 @@ class Stage6Store:
                         int(record.get("row_version") or 1),
                     ),
                 )
+        return record
+
+    def save_run_for_setup(self, run: dict[str, Any]) -> dict[str, Any]:
+        """Explicit fixture/migration helper — not for runtime authority paths."""
+        return self.save_run(run, allow_unversioned=True)
+
+    def commit_run_mutation(
+        self,
+        run: dict[str, Any],
+        *,
+        expected_row_version: int,
+        event_type: str,
+        event_summary: str = "",
+        event_actor: str = "system",
+        event_metadata: dict[str, Any] | None = None,
+        require_db_status_in: set[str] | frozenset[str] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically persist an existing-run mutation + audit event with version check.
+
+        Rejects stale writers, terminal overwrites, and unreachable status transitions.
+        """
+        from buildforme.run_state import can_reach, is_terminal
+
+        record = dict(run)
+        rid = str(record.get("id") or "")
+        if not rid:
+            raise ValueError("run id required")
+        now = utc_now_iso()
+        record["updated_at"] = now
+        with self.db.transaction() as conn:
+            existing = conn.execute(
+                "SELECT id, row_version, payload_json, status FROM runs WHERE id=?",
+                (rid,),
+            ).fetchone()
+            if not existing:
+                raise KeyError(f"Run not found: {rid}")
+            current_ver = int(existing[1] or 1)
+            if current_ver != int(expected_row_version):
+                raise ValueError(
+                    f"stale run mutation rejected: expected row_version={expected_row_version} "
+                    f"have={current_ver} run_id={rid}"
+                )
+            db_payload = loads(existing[2], {})
+            db_status = str(existing[3] or db_payload.get("status") or "")
+            new_status = str(record.get("status") or db_status)
+            if require_db_status_in is not None and db_status not in require_db_status_in:
+                raise ValueError(
+                    f"run mutation refused: db status {db_status!r} not in "
+                    f"{sorted(require_db_status_in)}"
+                )
+            if db_status != new_status:
+                if is_terminal(db_status):
+                    raise ValueError(
+                        f"cannot overwrite terminal status {db_status!r} with {new_status!r}"
+                    )
+                if not can_reach(db_status, new_status):
+                    raise ValueError(
+                        f"unreachable run transition {db_status!r} → {new_status!r}"
+                    )
+            new_ver = current_ver + 1
+            record["row_version"] = new_ver
+            # Preserve created_at from DB
+            record["created_at"] = db_payload.get("created_at") or record.get("created_at")
+            cur = conn.execute(
+                """UPDATE runs SET project_id=?, task_id=?, packet_id=?, provider_id=?, repository=?,
+                repository_local_path=?, baseline_ref=?, baseline_commit=?, requested_target_branch=?,
+                execution_branch=?, operating_mode=?, risk=?, status=?, execution_mode=?,
+                scope_fingerprint=?, constitution_version=?, constitution_hash=?, constitution_lease_id=?,
+                constitution_lease_fingerprint=?, task_lock_id=?, payload_json=?, updated_at=?,
+                started_at=?, finished_at=?, idempotency_key=?, row_version=?
+                WHERE id=? AND row_version=?""",
+                (
+                    str(record.get("project_id") or ""),
+                    record.get("task_id"),
+                    record.get("packet_id"),
+                    str(record.get("provider_id") or ""),
+                    str(record.get("repository") or ""),
+                    record.get("repository_local_path"),
+                    record.get("baseline_ref"),
+                    record.get("baseline_commit"),
+                    record.get("requested_target_branch") or record.get("target_branch"),
+                    record.get("execution_branch"),
+                    record.get("operating_mode"),
+                    record.get("risk"),
+                    new_status,
+                    str(record.get("execution_mode") or record.get("mode") or "dry_run"),
+                    record.get("scope_fingerprint"),
+                    record.get("constitution_version"),
+                    record.get("constitution_hash"),
+                    record.get("constitution_lease_id"),
+                    record.get("constitution_lease_fingerprint"),
+                    record.get("task_lock_id"),
+                    dumps(record),
+                    record["updated_at"],
+                    record.get("started_at"),
+                    record.get("finished_at"),
+                    record.get("idempotency_key"),
+                    new_ver,
+                    rid,
+                    current_ver,
+                ),
+            )
+            if cur.rowcount == 0:
+                raise ValueError(f"stale run mutation race: run_id={rid}")
+            meta = dict(event_metadata or {})
+            meta.setdefault("previous_status", db_status)
+            meta.setdefault("resulting_status", new_status)
+            meta.setdefault("previous_row_version", current_ver)
+            meta.setdefault("row_version", new_ver)
+            conn.execute(
+                """INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (
+                    new_id("re"),
+                    rid,
+                    event_type,
+                    event_summary,
+                    event_actor,
+                    dumps(meta),
+                    now,
+                ),
+            )
         return record
 
     def admit_run_atomic(
@@ -287,6 +429,8 @@ class Stage6Store:
         event_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Atomically persist run state change + audit event with optimistic concurrency."""
+        from buildforme.run_state import can_reach, is_terminal
+
         record = dict(run)
         rid = str(record.get("id") or "")
         if not rid:
@@ -295,7 +439,7 @@ class Stage6Store:
         record["updated_at"] = now
         with self.db.transaction() as conn:
             existing = conn.execute(
-                "SELECT id, row_version, payload_json FROM runs WHERE id=?", (rid,)
+                "SELECT id, row_version, payload_json, status FROM runs WHERE id=?", (rid,)
             ).fetchone()
             if not existing:
                 raise KeyError(f"Run not found: {rid}")
@@ -313,6 +457,17 @@ class Stage6Store:
                     raise ValueError(
                         f"stale run transition rejected: payload row_version={payload_ver} "
                         f"have={current_ver} run_id={rid}"
+                    )
+            db_status = str(existing[3] or loads(existing[2], {}).get("status") or "")
+            new_status = str(record.get("status") or db_status)
+            if db_status != new_status:
+                if is_terminal(db_status):
+                    raise ValueError(
+                        f"cannot overwrite terminal status {db_status!r} with {new_status!r}"
+                    )
+                if not can_reach(db_status, new_status):
+                    raise ValueError(
+                        f"unreachable run transition {db_status!r} → {new_status!r}"
                     )
             new_ver = current_ver + 1
             record["row_version"] = new_ver
@@ -1814,7 +1969,7 @@ class Stage6Store:
         for run in runs_src:
             if run.get("id"):
                 try:
-                    self.save_run(run)
+                    self.save_run(run, allow_unversioned=True)
                     count += 1
                 except Exception as exc:
                     report["errors"].append(f"run {run.get('id')}: {exc}")

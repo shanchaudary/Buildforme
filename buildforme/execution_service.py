@@ -309,17 +309,25 @@ def _persist_transition(
     event_summary: str = "",
     actor: str = "system",
     event_metadata: dict[str, Any] | None = None,
+    require_db_status_in: set[str] | frozenset[str] | None = None,
 ) -> dict[str, Any]:
-    """Atomic run state + event with optimistic concurrency via row_version."""
+    """Atomic run mutation + event with mandatory optimistic concurrency."""
     expected = run.get("row_version")
-    return store.transition_run_with_event(
+    if expected is None:
+        raise ValueError("run mutation requires row_version on payload")
+    return store.commit_run_mutation(
         run,
-        expected_row_version=int(expected) if expected is not None else None,
+        expected_row_version=int(expected),
         event_type=event_type,
         event_summary=event_summary,
         event_actor=actor,
         event_metadata=event_metadata,
+        require_db_status_in=require_db_status_in,
     )
+
+
+def _reload(store: LocalStore, run_id: str) -> dict[str, Any]:
+    return store.get_run(run_id)
 
 
 def run_preflight(store: LocalStore, run_id: str) -> dict[str, Any]:
@@ -507,12 +515,11 @@ def execute_dry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
                 "preflight failed before dry-run",
             )
         run["preflight"] = preflight
-        store.save_run(run)
-        store.append_run_event(
-            run_id,
-            "preflight_failed",
-            "Blocked at dry-run gate",
-            actor="system",
+        _persist_transition(
+            store,
+            run,
+            event_type="preflight_failed",
+            event_summary="Blocked at dry-run gate",
         )
         raise ValueError(
             "preflight failed: "
@@ -561,22 +568,18 @@ def execute_dry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
     run = transition_run(run, "queued", "system", "dry-run queued")
     run = transition_run(run, "starting", "system", "dry-run starting")
     run = transition_run(run, "running", "system", "dry-run running")
-    store.save_run(run)
-    store.append_run_event(
-        run_id,
-        "dry_run_started",
-        "Dry-run adapter invoked",
-        actor="system",
-        metadata={
+    run = _persist_transition(
+        store,
+        run,
+        event_type="dry_run_started",
+        event_summary="Dry-run adapter invoked",
+        event_metadata={
             "constitution_lease_id": run.get("constitution_lease_id"),
-            "constitution_lease_fingerprint": run.get(
-                "constitution_lease_fingerprint"
-            ),
+            "constitution_lease_fingerprint": run.get("constitution_lease_fingerprint"),
             "constitution_hash": run.get("constitution_hash"),
-            "constitution_reminder": (run.get("constitution_reminder") or {}).get(
-                "phase"
-            ),
+            "constitution_reminder": (run.get("constitution_reminder") or {}).get("phase"),
         },
+        require_db_status_in={"approved", "queued", "starting"},
     )
 
     packet = run.get("packet") if isinstance(run.get("packet"), dict) else {}
@@ -610,16 +613,22 @@ def execute_dry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
             provider_id=str(run.get("provider_id") or "") or None,
             lease_id=str(run.get("constitution_lease_id") or "") or None,
         )
-        run = store.get_run(run_id)
+        run = _reload(store, run_id)
         run["constitution_compliance"] = {
             "status": "violations",
             "violations": validation.get("violations") or [],
             "validated_at": utc_now_iso(),
         }
-        store.save_run(run)
+        _persist_transition(
+            store,
+            run,
+            event_type="constitution_rejected",
+            event_summary="constitution validation rejected dry-run completion",
+            require_db_status_in={"running", "starting", "queued"},
+        )
         raise ValueError("constitution validation rejected dry-run completion")
 
-    run = store.get_run(run_id)
+    run = _reload(store, run_id)
     _require_canonical_run_lease(store, run)
     run["dry_run_result"] = result
     run["result_summary"] = result.get("summary")
@@ -644,22 +653,20 @@ def execute_dry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
         "system",
         "dry-run accepted as completed (no live work)",
     )
-    saved = store.save_run(run)
-    store.append_run_event(
-        run_id,
-        "dry_run_completed",
-        result.get("summary") or "completed",
-        actor="system",
-        metadata={
+    saved = _persist_transition(
+        store,
+        run,
+        event_type="dry_run_completed",
+        event_summary=result.get("summary") or "completed",
+        event_metadata={
             "network_calls": [],
             "github_writes": [],
             "shell_commands_executed": [],
             "constitution_compliance": "compliant",
-            "constitution_hash": saved.get("constitution_hash"),
-            "constitution_lease_fingerprint": saved.get(
-                "constitution_lease_fingerprint"
-            ),
+            "constitution_hash": run.get("constitution_hash"),
+            "constitution_lease_fingerprint": run.get("constitution_lease_fingerprint"),
         },
+        require_db_status_in={"running", "starting", "queued", "needs_review"},
     )
     return {
         "run": saved,
@@ -698,7 +705,12 @@ def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
         if can_transition(str(run.get("status")), "blocked"):
             run = transition_run(run, "blocked", "system", "preflight failed before live execution")
         run["preflight"] = pre
-        store.save_run(run)
+        _persist_transition(
+            store,
+            run,
+            event_type="preflight_failed",
+            event_summary="preflight failed before live execution",
+        )
         raise ValueError("preflight failed: " + "; ".join(pre.get("blocking_reasons") or []))
 
     control = store.get_execution_control()
@@ -778,6 +790,7 @@ def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
             "requested_target_branch": run.get("requested_target_branch"),
             "constitution_lease_id": run.get("constitution_lease_id"),
         },
+        require_db_status_in={"approved", "queued", "starting"},
     )
 
     def on_event(event: dict[str, Any]) -> None:
@@ -812,22 +825,41 @@ def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
             on_event=on_event,
         )
     except Exception as exc:
-        run = store.get_run(run_id)
+        run = _reload(store, run_id)
         if can_transition(str(run.get("status")), "failed"):
             run = transition_run(run, "failed", "system", redact_text(str(exc)[:300]))
-        store.save_run(run)
-        store.append_run_event(run_id, "supervised_failed", redact_text(str(exc)[:500]), actor="system")
+            run["process_result"] = {"error": redact_text(str(exc)[:300]), "ok": False}
+            try:
+                run = _persist_transition(
+                    store,
+                    run,
+                    event_type="supervised_failed",
+                    event_summary=redact_text(str(exc)[:500]),
+                    require_db_status_in={"running", "starting", "queued", "cancel_requested"},
+                )
+            except ValueError:
+                # Terminal/stale (e.g. cancelled wins) — do not overwrite
+                run = _reload(store, run_id)
         _release_run_locks(store, run)
         raise
 
-    run = store.get_run(run_id)
+    run = _reload(store, run_id)
     if process_result.get("cancelled") or str(run.get("status")) == "cancel_requested":
         if str(run.get("status")) == "running" and can_transition("running", "cancel_requested"):
             run = transition_run(run, "cancel_requested", "system", "cancelled during execution")
         if can_transition(str(run.get("status")), "cancelled"):
             run = transition_run(run, "cancelled", "system", "provider process cancelled")
         run["process_result"] = process_result
-        store.save_run(run)
+        try:
+            run = _persist_transition(
+                store,
+                run,
+                event_type="supervised_cancelled",
+                event_summary="provider process cancelled",
+                require_db_status_in={"running", "starting", "queued", "cancel_requested"},
+            )
+        except ValueError:
+            run = _reload(store, run_id)
         _release_run_locks(store, run)
         return {"run": run, "process": process_result, "cancelled": True}
 
@@ -835,7 +867,16 @@ def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
         if can_transition(str(run.get("status")), "timed_out"):
             run = transition_run(run, "timed_out", "system", "provider timeout")
         run["process_result"] = process_result
-        store.save_run(run)
+        try:
+            run = _persist_transition(
+                store,
+                run,
+                event_type="supervised_timed_out",
+                event_summary="provider timeout",
+                require_db_status_in={"running", "starting", "queued"},
+            )
+        except ValueError:
+            run = _reload(store, run_id)
         _release_run_locks(store, run)
         return {"run": run, "process": process_result, "timed_out": True}
 
@@ -845,7 +886,16 @@ def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
                 run, "failed", "system", process_result.get("error") or "provider unavailable"
             )
         run["process_result"] = process_result
-        store.save_run(run)
+        try:
+            run = _persist_transition(
+                store,
+                run,
+                event_type="supervised_unavailable",
+                event_summary=str(process_result.get("error") or "provider unavailable"),
+                require_db_status_in={"running", "starting", "queued"},
+            )
+        except ValueError:
+            run = _reload(store, run_id)
         _release_run_locks(store, run)
         return {"run": run, "process": process_result, "unavailable": True}
 
@@ -965,8 +1015,21 @@ def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
     )
     # Attach review into a follow-up evidence record is optional; keep one primary record
 
-    run = store.get_run(run_id)
+    # Reload — cancel/timeout may have won while provider finished
+    run = _reload(store, run_id)
     _require_canonical_run_lease(store, run)
+    if is_terminal(str(run.get("status"))):
+        # Do not overwrite cancellation / other terminal with needs_review
+        _release_run_locks(store, run)
+        return {
+            "run": run,
+            "process": process_result,
+            "evidence": saved_evidence,
+            "verification": verification,
+            "review": review,
+            "constitution_validation": validation,
+            "stale_completion_suppressed": True,
+        }
     run["process_result"] = {
         "exit_code": process_result.get("exit_code"),
         "timed_out": process_result.get("timed_out"),
@@ -1004,22 +1067,39 @@ def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
         phase="review",
         lease=run.get("constitution_lease") if isinstance(run.get("constitution_lease"), dict) else None,
     )
+    run["final_head_sha"] = final_head
+    run["head_commit"] = final_head
+    run["worktree"] = worktree_meta
+    run["worktree_path"] = worktree_meta.get("worktree_path")
 
     if str(run.get("status")) == "running" and can_transition("running", "needs_review"):
         run = transition_run(run, "needs_review", "system", "provider finished — founder review required")
-    saved = store.save_run(run)
-    store.append_run_event(
-        run_id,
-        "supervised_finished",
-        saved.get("result_summary") or "finished",
-        actor="system",
-        metadata={
-            "verification_passed": verification.get("passed"),
-            "review_status": review.get("status"),
-            "files_changed": evidence.get("file_count"),
-            "evidence_id": saved_evidence.get("evidence_id"),
-        },
-    )
+    try:
+        saved = _persist_transition(
+            store,
+            run,
+            event_type="supervised_finished",
+            event_summary=run.get("result_summary") or "finished",
+            event_metadata={
+                "verification_passed": verification.get("passed"),
+                "review_status": review.get("status"),
+                "files_changed": saved_evidence.get("file_count"),
+                "evidence_id": saved_evidence.get("evidence_id"),
+            },
+            require_db_status_in={"running", "starting", "queued"},
+        )
+    except ValueError:
+        saved = _reload(store, run_id)
+        _release_run_locks(store, saved)
+        return {
+            "run": saved,
+            "process": process_result,
+            "evidence": saved_evidence,
+            "verification": verification,
+            "review": review,
+            "constitution_validation": validation,
+            "stale_completion_suppressed": True,
+        }
     return {
         "run": saved,
         "process": process_result,
@@ -1189,18 +1269,34 @@ def cancel_run(
     if status in {"running", "starting", "queued"}:
         run = transition_run(run, "cancel_requested", actor, note)
         run = _persist_transition(
-            store, run, event_type="cancel_requested", event_summary=note, actor=actor
+            store,
+            run,
+            event_type="cancel_requested",
+            event_summary=note,
+            actor=actor,
+            require_db_status_in={"running", "starting", "queued"},
         )
         run = transition_run(run, "cancelled", actor, note)
+        saved = _persist_transition(
+            store,
+            run,
+            event_type="run_cancelled",
+            event_summary=note,
+            actor=actor,
+            require_db_status_in={"cancel_requested"},
+        )
     elif can_transition(status, "rejected"):
         run = transition_run(run, "rejected", actor, note)
+        saved = _persist_transition(
+            store, run, event_type="run_cancelled", event_summary=note, actor=actor
+        )
     elif can_transition(status, "blocked"):
         run = transition_run(run, "blocked", actor, note)
+        saved = _persist_transition(
+            store, run, event_type="run_cancelled", event_summary=note, actor=actor
+        )
     else:
         raise ValueError(f"cannot cancel from status {status}")
-    saved = _persist_transition(
-        store, run, event_type="run_cancelled", event_summary=note, actor=actor
-    )
     _release_run_locks(store, saved)
     return saved
 

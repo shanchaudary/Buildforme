@@ -463,7 +463,7 @@ class LeaseMutationTests(unittest.TestCase):
         engine = get_engine(force_reload=True)
         lease = engine.issue_run_lease(run_id="run-x", provider_id="codex", packet_id="pkt")
         # Need run shell for FK if any
-        store.save_run(
+        store.save_run_for_setup(
             {
                 "id": "run-x",
                 "project_id": "p",
@@ -612,7 +612,7 @@ class AtomicAdmissionTests(unittest.TestCase):
         run = self.store.get_run(run["id"])
         run["status"] = "failed"
         run["finished_at"] = "2020-01-01T00:00:00Z"
-        self.store.save_run(run)
+        self.store.save_run_for_setup(run)
         child = retry_run(self.store, run["id"])
         self.assertEqual(child.get("execution_mode"), "dry_run")
         self.assertEqual(child.get("provider_id"), "codex")

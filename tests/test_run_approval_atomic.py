@@ -92,10 +92,10 @@ class ApprovalAtomicFixture(unittest.TestCase):
                     "security_review",
                 ]
             run2["status"] = "awaiting_approval"
-            self.store.save_run(run2)
+            self.store.save_run_for_setup(run2)
         elif run2["status"] != "awaiting_approval":
             run2["status"] = "awaiting_approval"
-            self.store.save_run(run2)
+            self.store.save_run_for_setup(run2)
         return self.store.get_run(run["id"])
 
 
@@ -105,7 +105,7 @@ class AtomicSuccessTests(ApprovalAtomicFixture):
         # Ensure two requirements
         run["approval_requirements"] = ["shan_task_approval", "security_review"]
         run["status"] = "awaiting_approval"
-        self.store.save_run(run)
+        self.store.save_run_for_setup(run)
         run = self.store.get_run(run["id"])
 
         result = record_run_approval(
@@ -129,7 +129,7 @@ class AtomicSuccessTests(ApprovalAtomicFixture):
         run = self._run_awaiting(risk="YELLOW")
         run["approval_requirements"] = ["shan_task_approval"]
         run["status"] = "awaiting_approval"
-        self.store.save_run(run)
+        self.store.save_run_for_setup(run)
         run = self.store.get_run(run["id"])
 
         result = record_run_approval(
@@ -149,7 +149,7 @@ class AtomicSuccessTests(ApprovalAtomicFixture):
         run = self._run_awaiting()
         run["approval_requirements"] = ["shan_task_approval"]
         run["status"] = "awaiting_approval"
-        self.store.save_run(run)
+        self.store.save_run_for_setup(run)
         run = self.store.get_run(run["id"])
 
         result = record_run_approval(
@@ -180,7 +180,7 @@ class RollbackAndStaleTests(ApprovalAtomicFixture):
         run = self._run_awaiting()
         run["approval_requirements"] = ["shan_task_approval"]
         run["status"] = "awaiting_approval"
-        self.store.save_run(run)
+        self.store.save_run_for_setup(run)
         run = self.store.get_run(run["id"])
         before_events = len(self.store.list_run_events(run["id"]))
         before_hist = len(self.store.list_run_approval_history(run["id"]))
@@ -188,7 +188,7 @@ class RollbackAndStaleTests(ApprovalAtomicFixture):
         # Bump version under the feet of a prepared approval
         run2 = self.store.get_run(run["id"])
         run2["note_bump"] = "x"
-        self.store.save_run(run2)  # increments row_version
+        self.store.save_run_for_setup(run2)  # increments row_version
 
         # record_run_approval loads fresh version — to force stale, call store directly
         from buildforme.governance import compute_run_scope_fingerprint
@@ -227,11 +227,11 @@ class RollbackAndStaleTests(ApprovalAtomicFixture):
         run = self._run_awaiting()
         run["approval_requirements"] = ["shan_task_approval"]
         run["status"] = "awaiting_approval"
-        self.store.save_run(run)
+        self.store.save_run_for_setup(run)
         run = self.store.get_run(run["id"])
         # Mutate scope material
         run["baseline_commit"] = "deadbeef" * 5
-        self.store.save_run(run)
+        self.store.save_run_for_setup(run)
         # Approval built with old fingerprint fails inside commit when scope recalculated
         # Actually record_run_approval recomputes from live run — so we need to inject
         # wrong scope into payload via commit_run_approval
@@ -268,7 +268,7 @@ class HistoryIdempotencyTests(ApprovalAtomicFixture):
         run = self._run_awaiting(risk="RED")
         run["approval_requirements"] = ["shan_task_approval", "security_review"]
         run["status"] = "awaiting_approval"
-        self.store.save_run(run)
+        self.store.save_run_for_setup(run)
         run = self.store.get_run(run["id"])
 
         record_run_approval(
@@ -303,7 +303,7 @@ class HistoryIdempotencyTests(ApprovalAtomicFixture):
         run = self._run_awaiting()
         run["approval_requirements"] = ["shan_task_approval"]
         run["status"] = "awaiting_approval"
-        self.store.save_run(run)
+        self.store.save_run_for_setup(run)
         run = self.store.get_run(run["id"])
 
         r1 = record_run_approval(
@@ -338,7 +338,7 @@ class HistoryIdempotencyTests(ApprovalAtomicFixture):
         run = self._run_awaiting()
         run["approval_requirements"] = ["shan_task_approval", "security_review"]
         run["status"] = "awaiting_approval"
-        self.store.save_run(run)
+        self.store.save_run_for_setup(run)
         run = self.store.get_run(run["id"])
 
         record_run_approval(
@@ -365,7 +365,7 @@ class ConcurrencyTests(ApprovalAtomicFixture):
         run = self._run_awaiting()
         run["approval_requirements"] = ["shan_task_approval"]
         run["status"] = "awaiting_approval"
-        self.store.save_run(run)
+        self.store.save_run_for_setup(run)
         run_id = run["id"]
         errors: list[str] = []
         results: list[dict] = []
@@ -415,7 +415,7 @@ class BindingInvalidationTests(ApprovalAtomicFixture):
         run = self._run_awaiting(risk="RED")
         run["approval_requirements"] = ["shan_task_approval", "security_review"]
         run["status"] = "awaiting_approval"
-        self.store.save_run(run)
+        self.store.save_run_for_setup(run)
         run = self.store.get_run(run["id"])
 
         record_run_approval(
@@ -428,7 +428,7 @@ class BindingInvalidationTests(ApprovalAtomicFixture):
         # Change baseline → scope changes; old effective approval fails binding
         run = self.store.get_run(run["id"])
         run["baseline_commit"] = "abcdef01" * 5
-        self.store.save_run(run)
+        self.store.save_run_for_setup(run)
         run = self.store.get_run(run["id"])
         # New approval for second requirement should not complete set with stale first
         result = record_run_approval(

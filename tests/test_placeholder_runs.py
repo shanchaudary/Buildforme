@@ -21,7 +21,7 @@ class MissingRunEventTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.store = LocalStore(Path(self.temp.name) / "state.json")
-        self.store.save_run(
+        self.store.save_run_for_setup(
             {
                 "id": "run-real",
                 "project_id": "p",
@@ -77,7 +77,7 @@ class MissingRunEvidenceTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.store = LocalStore(Path(self.temp.name) / "state.json")
-        self.store.save_run(
+        self.store.save_run_for_setup(
             {
                 "id": "run-ev",
                 "project_id": "p",

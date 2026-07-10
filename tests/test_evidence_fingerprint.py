@@ -276,7 +276,7 @@ class StorageEnforcementTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.store = LocalStore(Path(self.temp.name) / "state.json")
         # Shell run for FK
-        self.store.save_run(
+        self.store.save_run_for_setup(
             {
                 "id": "run-fp-1",
                 "project_id": "p",

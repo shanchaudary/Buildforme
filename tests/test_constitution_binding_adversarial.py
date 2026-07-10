@@ -112,7 +112,7 @@ class ConstitutionBindingAdversarialTests(unittest.TestCase):
             forged_run,
             forged_run["packet"],
         )
-        self.store.save_run(forged_run)
+        self.store.save_run_for_setup(forged_run)
 
         result = run_preflight(self.store, run["id"])
         self.assertFalse(result["preflight"]["passed"])

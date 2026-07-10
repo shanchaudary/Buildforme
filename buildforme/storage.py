@@ -1227,14 +1227,30 @@ class LocalStore:
     def get_run(self, run_id: str) -> dict[str, Any]:
         return self.s6.get_run(run_id)
 
-    def save_run(self, run: dict[str, Any], *, expected_row_version: int | None = None) -> dict[str, Any]:
-        return self.s6.save_run(run, expected_row_version=expected_row_version)
+    def save_run(
+        self,
+        run: dict[str, Any],
+        *,
+        expected_row_version: int | None = None,
+        allow_unversioned: bool = False,
+    ) -> dict[str, Any]:
+        return self.s6.save_run(
+            run,
+            expected_row_version=expected_row_version,
+            allow_unversioned=allow_unversioned,
+        )
+
+    def save_run_for_setup(self, run: dict[str, Any]) -> dict[str, Any]:
+        return self.s6.save_run_for_setup(run)
 
     def admit_run_atomic(self, **kwargs: Any) -> dict[str, Any]:
         return self.s6.admit_run_atomic(**kwargs)
 
     def transition_run_with_event(self, run: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
         return self.s6.transition_run_with_event(run, **kwargs)
+
+    def commit_run_mutation(self, run: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        return self.s6.commit_run_mutation(run, **kwargs)
 
     def save_run_legacy_json(self, run: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(run, dict) or not run.get("id"):

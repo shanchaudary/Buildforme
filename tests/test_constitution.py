@@ -286,7 +286,7 @@ class IntegrationStoreTests(unittest.TestCase):
         run3 = self.store.get_run(run["id"])
         if str(run3.get("status")) != "approved":
             run3["status"] = "approved"
-            self.store.save_run(run3)
+            self.store.save_run_for_setup(run3)
         dry = execute_dry_run(self.store, run["id"])
         self.assertEqual(dry["run"]["constitution_compliance"]["status"], "compliant")
         self.assertEqual(dry["run"]["status"], "completed")

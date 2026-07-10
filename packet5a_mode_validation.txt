@@ -1,5 +1,6 @@
 == apply ==
 Packet 5A execution-mode and approval policy applied
+Packet 5A mode-policy validation corrections applied
 == syntax and diff ==
 == focused tests ==
 test_completion_mutations_are_bound_to_execution_mode (test_packet5a_mutation_policy_contract.Packet5AMutationPolicyContractTests.test_completion_mutations_are_bound_to_execution_mode) ... ok
@@ -43,148 +44,49 @@ test_positive_verification_evidence_and_review_mutations (test_run_mutation_auth
 test_preflight_cannot_rewrite_bound_scope_during_transition (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_preflight_cannot_rewrite_bound_scope_during_transition) ... ok
 test_preflight_cannot_rewrite_bound_scope_same_state (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_preflight_cannot_rewrite_bound_scope_same_state) ... ok
 test_same_state_metadata_cannot_fabricate_lifecycle_truth (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_same_state_metadata_cannot_fabricate_lifecycle_truth) ... ok
-test_same_state_preflight_cannot_rewrite_approval_requirements (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_same_state_preflight_cannot_rewrite_approval_requirements) ... ok
+test_same_state_preflight_cannot_rewrite_approval_requirements (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_same_state_preflight_cannot_rewrite_approval_requirements) ... FAIL
 test_same_state_transition_path_is_rejected (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_same_state_transition_path_is_rejected) ... ok
 test_storage_status_policy_cannot_be_broadened_by_caller (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_storage_status_policy_cannot_be_broadened_by_caller) ... ok
-test_terminal_path_derives_finished_at (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_terminal_path_derives_finished_at) ... ERROR
+test_terminal_path_derives_finished_at (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_terminal_path_derives_finished_at) ... ok
 test_transition_only_mutation_cannot_be_used_same_state (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_transition_only_mutation_cannot_be_used_same_state) ... ok
 
 ======================================================================
-ERROR: test_terminal_path_derives_finished_at (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_terminal_path_derives_finished_at)
+FAIL: test_same_state_preflight_cannot_rewrite_approval_requirements (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_same_state_preflight_cannot_rewrite_approval_requirements)
 ----------------------------------------------------------------------
+ValueError: approval_requirements may change only with an authorized preflight state edge
+
+During handling of the above exception, another exception occurred:
+
 Traceback (most recent call last):
-  File "/home/runner/work/Buildforme/Buildforme/tests/test_run_mutation_authority_hardening.py", line 206, in test_terminal_path_derives_finished_at
-    saved = self._commit(
-            ^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/tests/test_run_mutation_authority_hardening.py", line 54, in _commit
-    return self.store.commit_run_mutation(
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/buildforme/storage.py", line 1253, in commit_run_mutation
-    return self.s6.commit_run_mutation(run, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_store.py", line 478, in commit_run_mutation
-    raise ValueError(
-ValueError: mutation_type 'dry_run_finished' not permitted for execution_mode 'live_supervised'
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_run_mutation_authority_hardening.py", line 447, in test_same_state_preflight_cannot_rewrite_approval_requirements
+    with self.assertRaisesRegex(ValueError, "authorized preflight admission edge"):
+AssertionError: "authorized preflight admission edge" does not match "approval_requirements may change only with an authorized preflight state edge"
 
 ----------------------------------------------------------------------
-Ran 36 tests in 1.016s
+Ran 36 tests in 4.181s
 
-FAILED (errors=1)
+FAILED (failures=1)
 == full suite ==
-.............................E....................................................................................................................................................E.E..E.....................................E................../opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/case.py:657: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 42169)>
+..........................................................................................................................................................................................................................F...................../opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/case.py:657: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 45859)>
   function, args, kwargs = self._cleanups.pop()
 ResourceWarning: Enable tracemalloc to get the object allocation traceback
 .......................................
 ======================================================================
-ERROR: test_resealed_embedded_forgery_fails_against_canonical_store (test_constitution_binding_adversarial.ConstitutionBindingAdversarialTests.test_resealed_embedded_forgery_fails_against_canonical_store)
+FAIL: test_same_state_preflight_cannot_rewrite_approval_requirements (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_same_state_preflight_cannot_rewrite_approval_requirements)
 ----------------------------------------------------------------------
+ValueError: approval_requirements may change only with an authorized preflight state edge
+
+During handling of the above exception, another exception occurred:
+
 Traceback (most recent call last):
-  File "/home/runner/work/Buildforme/Buildforme/tests/test_constitution_binding_adversarial.py", line 117, in test_resealed_embedded_forgery_fails_against_canonical_store
-    result = run_preflight(self.store, run["id"])
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 446, in run_preflight
-    saved = _persist_transition(
-            ^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 320, in _persist_transition
-    return store.commit_run_mutation(
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/buildforme/storage.py", line 1253, in commit_run_mutation
-    return self.s6.commit_run_mutation(run, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_store.py", line 578, in commit_run_mutation
-    raise ValueError(
-ValueError: approval_requirements may change only on an authorized preflight admission edge
-
-======================================================================
-ERROR: test_partial_approval_stays_awaiting (test_run_approval_atomic.AtomicSuccessTests.test_partial_approval_stays_awaiting)
-----------------------------------------------------------------------
-Traceback (most recent call last):
-  File "/home/runner/work/Buildforme/Buildforme/tests/test_run_approval_atomic.py", line 104, in test_partial_approval_stays_awaiting
-    run = self._run_awaiting(risk="RED")
-          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/tests/test_run_approval_atomic.py", line 84, in _run_awaiting
-    pre = run_preflight(self.store, run["id"])
-          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 446, in run_preflight
-    saved = _persist_transition(
-            ^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 320, in _persist_transition
-    return store.commit_run_mutation(
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/buildforme/storage.py", line 1253, in commit_run_mutation
-    return self.s6.commit_run_mutation(run, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_store.py", line 578, in commit_run_mutation
-    raise ValueError(
-ValueError: approval_requirements may change only on an authorized preflight admission edge
-
-======================================================================
-ERROR: test_stale_approval_not_counted_after_scope_change (test_run_approval_atomic.BindingInvalidationTests.test_stale_approval_not_counted_after_scope_change)
-----------------------------------------------------------------------
-Traceback (most recent call last):
-  File "/home/runner/work/Buildforme/Buildforme/tests/test_run_approval_atomic.py", line 415, in test_stale_approval_not_counted_after_scope_change
-    run = self._run_awaiting(risk="RED")
-          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/tests/test_run_approval_atomic.py", line 84, in _run_awaiting
-    pre = run_preflight(self.store, run["id"])
-          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 446, in run_preflight
-    saved = _persist_transition(
-            ^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 320, in _persist_transition
-    return store.commit_run_mutation(
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/buildforme/storage.py", line 1253, in commit_run_mutation
-    return self.s6.commit_run_mutation(run, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_store.py", line 578, in commit_run_mutation
-    raise ValueError(
-ValueError: approval_requirements may change only on an authorized preflight admission edge
-
-======================================================================
-ERROR: test_history_append_only_not_overwrite (test_run_approval_atomic.HistoryIdempotencyTests.test_history_append_only_not_overwrite)
-----------------------------------------------------------------------
-Traceback (most recent call last):
-  File "/home/runner/work/Buildforme/Buildforme/tests/test_run_approval_atomic.py", line 268, in test_history_append_only_not_overwrite
-    run = self._run_awaiting(risk="RED")
-          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/tests/test_run_approval_atomic.py", line 84, in _run_awaiting
-    pre = run_preflight(self.store, run["id"])
-          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 446, in run_preflight
-    saved = _persist_transition(
-            ^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 320, in _persist_transition
-    return store.commit_run_mutation(
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/buildforme/storage.py", line 1253, in commit_run_mutation
-    return self.s6.commit_run_mutation(run, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_store.py", line 578, in commit_run_mutation
-    raise ValueError(
-ValueError: approval_requirements may change only on an authorized preflight admission edge
-
-======================================================================
-ERROR: test_terminal_path_derives_finished_at (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_terminal_path_derives_finished_at)
-----------------------------------------------------------------------
-Traceback (most recent call last):
-  File "/home/runner/work/Buildforme/Buildforme/tests/test_run_mutation_authority_hardening.py", line 206, in test_terminal_path_derives_finished_at
-    saved = self._commit(
-            ^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/tests/test_run_mutation_authority_hardening.py", line 54, in _commit
-    return self.store.commit_run_mutation(
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/buildforme/storage.py", line 1253, in commit_run_mutation
-    return self.s6.commit_run_mutation(run, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_store.py", line 478, in commit_run_mutation
-    raise ValueError(
-ValueError: mutation_type 'dry_run_finished' not permitted for execution_mode 'live_supervised'
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_run_mutation_authority_hardening.py", line 447, in test_same_state_preflight_cannot_rewrite_approval_requirements
+    with self.assertRaisesRegex(ValueError, "authorized preflight admission edge"):
+AssertionError: "authorized preflight admission edge" does not match "approval_requirements may change only with an authorized preflight state edge"
 
 ----------------------------------------------------------------------
-Ran 279 tests in 15.681s
+Ran 279 tests in 27.723s
 
-FAILED (errors=5)
+FAILED (failures=1)
 == policy smoke ==
 {
   "classification": {

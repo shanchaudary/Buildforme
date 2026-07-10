@@ -40,7 +40,7 @@ def inherit_for_run(
     lease: dict[str, Any] | None = None,
     actor: str = "system",
 ) -> dict[str, Any]:
-    """Bind run to constitution lease. Existing lease is preserved (immutable)."""
+    """Bind run to constitution lease. Existing valid lease is preserved."""
     out = dict(run)
     if lease and not validate_lease_integrity(lease):
         bound_lease = dict(lease)
@@ -58,6 +58,7 @@ def inherit_for_run(
         )
     out["constitution_lease"] = bound_lease
     out["constitution_lease_id"] = bound_lease.get("lease_id")
+    out["constitution_lease_fingerprint"] = bound_lease.get("lease_fingerprint")
     out["constitution_version"] = bound_lease.get("constitution_version")
     out["constitution_hash"] = bound_lease.get("constitution_hash")
     out["constitution_compliance"] = out.get("constitution_compliance") or {
@@ -83,7 +84,7 @@ def inherit_for_approval(
     *,
     run: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Bind approval to constitution hash (and run lease when available)."""
+    """Bind approval to constitution hash and exact run lease."""
     out = dict(approval)
     content_hash = str(
         (run or {}).get("constitution_hash") or compute_constitution_hash(constitution)
@@ -93,6 +94,7 @@ def inherit_for_approval(
     out["constitution_hash"] = content_hash
     if run and run.get("constitution_lease_id"):
         out["constitution_lease_id"] = run.get("constitution_lease_id")
+        out["constitution_lease_fingerprint"] = run.get("constitution_lease_fingerprint")
     return out
 
 

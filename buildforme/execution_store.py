@@ -778,10 +778,23 @@ class Stage6Store:
 
     # —— Evidence ——
     def save_run_evidence(self, evidence: dict[str, Any]) -> dict[str, Any]:
+        """Append-only evidence persistence with independent fingerprint validation.
+
+        Never silently repairs a mismatched fingerprint. Never overwrites an ID.
+        """
+        from buildforme.evidence import validate_evidence_for_storage
+
         record = dict(evidence)
         eid = str(record.get("evidence_id") or record.get("id") or new_id("ev"))
         record["evidence_id"] = eid
         record["id"] = eid
+
+        # Validate before any storage metadata mutation that is not in fingerprint material.
+        # saved_at/sequence are excluded from fingerprint by design.
+        problems = validate_evidence_for_storage(record)
+        if problems:
+            raise ValueError("evidence rejected: " + "; ".join(problems))
+
         record.setdefault("saved_at", utc_now_iso())
         record["immutable"] = True
         rid = str(record.get("run_id") or "")
@@ -818,6 +831,8 @@ class Stage6Store:
                         utc_now_iso(),
                     ),
                 )
+            # Re-check fingerprint after sequence/parent assignment is unnecessary:
+            # those fields are not material. Persist the validated fingerprint as-is.
             conn.execute(
                 """INSERT INTO evidence(evidence_id, run_id, sequence, attempt, parent_evidence_id,
                    payload_json, evidence_fingerprint, saved_at, immutable)

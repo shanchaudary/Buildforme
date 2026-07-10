@@ -945,6 +945,30 @@ def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
             lease_id=str(run.get("constitution_lease_id") or "") or None,
         )
 
+    # All material fields must be supplied before fingerprinting — never attach after.
+    man_fp = (diff.get("manifest") or {}).get("manifest_fingerprint")
+    if not man_fp:
+        # Fail-closed incomplete manifest still bound into evidence (distinct from patch).
+        import hashlib as _hl
+        import json as _json
+
+        man_fp = "incomplete:" + _hl.sha256(
+            _json.dumps(
+                (diff.get("manifest") or {}).get("blocking_reasons") or ["manifest_incomplete"],
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+    patch_fp = patch_ev.get("patch_fingerprint")
+    if not patch_fp:
+        import hashlib as _hl
+        import json as _json
+
+        patch_fp = "incomplete:" + _hl.sha256(
+            _json.dumps(
+                patch_ev.get("blocking_reasons") or ["patch_incomplete"],
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
     evidence = build_evidence_bundle(
         run=run,
         packet=packet,
@@ -956,12 +980,12 @@ def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
         events=store.list_run_events(run_id),
         constitution_result=validation,
         attempt=int(run.get("attempt") or 0) + 1,
+        approved_baseline_sha=approved_baseline,
+        final_head_sha=final_head,
+        execution_branch=run_branch,
+        patch_fingerprint=patch_fp,
+        manifest_fingerprint=man_fp,
     )
-    evidence["approved_baseline_sha"] = approved_baseline
-    evidence["final_head_sha"] = final_head
-    evidence["execution_branch"] = run_branch
-    evidence["patch_fingerprint"] = patch_ev.get("patch_fingerprint")
-    evidence["manifest_fingerprint"] = (diff.get("manifest") or {}).get("manifest_fingerprint")
     saved_evidence = store.save_run_evidence(evidence)
 
     review = build_review_package(
@@ -1088,27 +1112,26 @@ def founder_review_decision(
         redact_text(f"{decision}: {note}"),
         actor=actor,
     )
-    # Append-only decision evidence linked to execution evidence (do not mutate prior)
+    # Append-only decision evidence linked to execution evidence (do not mutate prior).
+    # Not full execution evidence — uses evidence_kind so storage applies fingerprint match only.
     try:
+        import uuid as _uuid
+
+        from buildforme.evidence import compute_evidence_fingerprint
+
         decision_ev = {
+            "schema": "buildforme.evidence.founder_decision.v1",
+            "evidence_kind": "founder_decision",
+            "evidence_id": f"ev-fd-{_uuid.uuid4().hex[:16]}",
             "run_id": run_id,
-            "kind": "founder_decision",
             "parent_evidence_id": evidence.get("evidence_id"),
             "decision": decision,
             "note": note,
             "actor": actor,
             "review": result["review"],
             "execution_evidence_id": evidence.get("evidence_id"),
-            "evidence_fingerprint": None,
         }
-        from buildforme.evidence import build_evidence_bundle as _beb
-        # Lightweight decision record
-        decision_ev["evidence_fingerprint"] = __import__("hashlib").sha256(
-            __import__("json").dumps(
-                {"run_id": run_id, "decision": decision, "parent": evidence.get("evidence_id")},
-                sort_keys=True,
-            ).encode()
-        ).hexdigest()
+        decision_ev["evidence_fingerprint"] = compute_evidence_fingerprint(decision_ev)
         store.save_run_evidence(decision_ev)
     except Exception:
         pass

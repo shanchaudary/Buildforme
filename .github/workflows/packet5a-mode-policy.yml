@@ -1,5 +1,6 @@
 name: Packet 5A Execution Mode Policy
 
+# Validation revision 3: corrected only the assertion text after the prior fail-closed diagnostic.
 on:
   push:
     branches:

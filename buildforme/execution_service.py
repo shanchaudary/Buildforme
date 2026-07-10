@@ -334,6 +334,21 @@ def _reload(store: LocalStore, run_id: str) -> dict[str, Any]:
     return store.get_run(run_id)
 
 
+def _require_bound_scope(run: dict[str, Any]) -> str:
+    packet = run.get("packet") if isinstance(run.get("packet"), dict) else None
+    stored = str(run.get("scope_fingerprint") or "")
+    if not stored:
+        raise ValueError(
+            "run missing governed scope_fingerprint; recreate through constitutional admission"
+        )
+    computed = compute_run_scope_fingerprint(run, packet)
+    if computed != stored:
+        raise ValueError(
+            "run scope fingerprint mismatch; bound authority changed and requires a new run"
+        )
+    return computed
+
+
 def _startup_transition_path(from_status: str) -> list[str]:
     """Explicit path approved→queued→starting→running from current status."""
     full = ["approved", "queued", "starting", "running"]
@@ -357,6 +372,7 @@ def run_preflight(store: LocalStore, run_id: str) -> dict[str, Any]:
     run = store.get_run(validate_safe_id(run_id, field="run_id"))
     if is_terminal(str(run.get("status"))):
         raise ValueError("cannot preflight terminal run")
+    _require_bound_scope(run)
     status = str(run.get("status"))
     if status == "draft":
         run = transition_run(run, "awaiting_preflight", "system", "preflight requested")
@@ -378,12 +394,9 @@ def run_preflight(store: LocalStore, run_id: str) -> dict[str, Any]:
         )
     result = evaluate_run_preflight(run, store)
     run = store.get_run(run_id)
+    _require_bound_scope(run)
     run["preflight"] = result
     run["approval_requirements"] = list(result.get("required_approvals") or [])
-    run["scope_fingerprint"] = compute_run_scope_fingerprint(
-        run,
-        run.get("packet") if isinstance(run.get("packet"), dict) else None,
-    )
     run["updated_at"] = utc_now_iso()
 
     if result.get("passed"):
@@ -527,6 +540,7 @@ def record_run_approval(
 def execute_dry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
     run_id = validate_safe_id(run_id, field="run_id")
     run = store.get_run(run_id)
+    _require_bound_scope(run)
     if str(run.get("status")) not in {"approved", "queued"}:
         raise ValueError(
             f"run must be approved before dry-run (status={run.get('status')})"

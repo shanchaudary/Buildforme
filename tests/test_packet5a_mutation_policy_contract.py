@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import unittest
+from pathlib import Path
 
 from buildforme.execution_store import (
     MUTATION_METADATA_ALLOWLISTS,
@@ -76,6 +78,29 @@ class Packet5AMutationPolicyContractTests(unittest.TestCase):
             ("needs_review", "completed"),
             _MUTATION_ALLOWED_EDGES["dry_run_finished"],
         )
+
+    def test_scope_guard_is_required_at_approval_and_live_execution_entrypoints(self):
+        source_path = Path("buildforme/execution_service.py")
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+        functions = {
+            node.name: node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        for function_name in ("record_run_approval", "execute_supervised"):
+            function = functions[function_name]
+            guard_calls = [
+                node
+                for node in ast.walk(function)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_require_bound_scope"
+            ]
+            self.assertEqual(
+                len(guard_calls),
+                1,
+                msg=f"{function_name} must enforce exactly one bound-scope guard",
+            )
 
 
 if __name__ == "__main__":

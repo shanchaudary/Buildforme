@@ -34,6 +34,12 @@
         </div>
 
         <nav class="nav" role="tablist" aria-label="App sections">
+          <button type="button" class="nav-item" data-view="execution" role="tab" aria-selected="false">
+            <span class="nav-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="12" cy="12" r="3.5" stroke="currentColor" stroke-width="1.6"/></svg>
+            </span>
+            Execution control
+          </button>
           <button type="button" class="nav-item" data-view="planner" role="tab" aria-selected="false">
             <span class="nav-icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 2l3 7h7l-5.5 4.5L18 21l-6-4-6 4 1.5-7.5L2 9h7l3-7z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
@@ -125,6 +131,90 @@
             </button>
           </div>
         </header>
+
+        <!-- VIEW: Execution control -->
+        <section id="view-execution" class="view" data-view-panel="execution" hidden>
+          <div class="local-only-banner">
+            Dry-run only. No coding provider is called. Local approval is not GitHub approval, merge authority, or deployment authority. There is no Run live action in Stage 5.
+          </div>
+
+          <div class="metrics queue-metrics">
+            <article class="metric"><span class="metric-label">Kill switch</span><strong class="metric-value" id="ex-kill">—</strong></article>
+            <article class="metric"><span class="metric-label">Active locks</span><strong class="metric-value" id="ex-locks">—</strong></article>
+            <article class="metric"><span class="metric-label">Providers</span><strong class="metric-value" id="ex-providers">4 dry-run</strong></article>
+            <article class="metric"><span class="metric-label">Open runs</span><strong class="metric-value" id="ex-runs">—</strong></article>
+          </div>
+
+          <div class="split packet-split">
+            <div class="card">
+              <div class="card-head"><div><h2>Global control</h2><p class="card-sub">Kill switch blocks all new runs</p></div><span class="chip chip-accent">Stage 5</span></div>
+              <p id="ex-kill-detail" class="card-sub"></p>
+              <div class="field"><label for="ex-kill-reason">Reason</label><input id="ex-kill-reason" placeholder="Why activating/deactivating?" /></div>
+              <div class="button-row">
+                <button type="button" id="ex-kill-on" class="btn btn-danger">Activate kill switch</button>
+                <button type="button" id="ex-kill-off" class="btn btn-secondary">Deactivate</button>
+                <button type="button" id="ex-refresh" class="btn btn-ghost">Refresh</button>
+              </div>
+              <p id="ex-feedback" class="toast" hidden></p>
+
+              <h3 class="recommend-label" style="margin-top:18px">Project execution</h3>
+              <div class="form-grid-2">
+                <div class="field"><label for="ex-project">Project</label><select id="ex-project"></select></div>
+                <div class="field"><label for="ex-project-status">Status</label>
+                  <select id="ex-project-status"><option value="enabled">enabled</option><option value="paused">paused</option><option value="locked">locked</option></select>
+                </div>
+              </div>
+              <div class="field"><label for="ex-project-reason">Reason</label><input id="ex-project-reason" /></div>
+              <button type="button" id="ex-project-save" class="btn btn-secondary btn-sm">Update project execution</button>
+
+              <h3 class="recommend-label" style="margin-top:18px">Repository locks</h3>
+              <div class="form-grid-2">
+                <div class="field"><label for="ex-lock-repo">Repository</label><input id="ex-lock-repo" value="shanchaudary/Buildforme" /></div>
+                <div class="field"><label for="ex-lock-scope">Scope</label>
+                  <select id="ex-lock-scope"><option>all</option><option>write</option><option>merge</option><option>production</option><option>branch</option></select>
+                </div>
+              </div>
+              <div class="field"><label for="ex-lock-reason">Reason</label><input id="ex-lock-reason" /></div>
+              <button type="button" id="ex-lock-add" class="btn btn-secondary btn-sm">Add lock</button>
+              <div id="ex-lock-list" class="queue-list" style="margin-top:12px"></div>
+            </div>
+
+            <div class="card">
+              <div class="card-head"><div><h2>Providers</h2><p class="card-sub">Planning profiles only · credentials never accepted</p></div></div>
+              <div id="ex-provider-list" class="queue-list"></div>
+
+              <div class="card-head" style="margin-top:18px"><div><h2>Create supervised run</h2><p class="card-sub">Draft → preflight → approve → dry-run</p></div></div>
+              <div class="form-grid-2">
+                <div class="field"><label for="ex-run-project">Project</label><select id="ex-run-project"></select></div>
+                <div class="field"><label for="ex-run-provider">Provider</label><select id="ex-run-provider"></select></div>
+              </div>
+              <div class="form-grid-2">
+                <div class="field"><label for="ex-run-packet">Saved packet id</label><input id="ex-run-packet" placeholder="pkt_..." /></div>
+                <div class="field"><label for="ex-run-branch">Target branch</label><input id="ex-run-branch" value="stage-5-execution-safety-foundation" /></div>
+              </div>
+              <div class="field"><label for="ex-run-mode">Operating mode</label>
+                <select id="ex-run-mode">
+                  <option>READ_ONLY_AUDIT</option><option>PLAN_ONLY</option><option>DOCUMENTATION_ONLY</option>
+                  <option selected>IMPLEMENTATION</option><option>REVIEW</option>
+                </select>
+              </div>
+              <div class="button-row">
+                <button type="button" id="ex-run-create" class="btn btn-primary btn-sm">Create draft run</button>
+              </div>
+              <p class="card-sub" style="margin-top:8px">No Run live button exists by design.</p>
+            </div>
+          </div>
+
+          <div class="card" style="margin-top:16px">
+            <div class="card-head"><div><h2>Runs</h2><p class="card-sub">Supervised dry-run records</p></div></div>
+            <div id="ex-run-list" class="queue-list"></div>
+          </div>
+
+          <div class="card" style="margin-top:16px">
+            <div class="card-head"><div><h2>Run detail / events</h2><p class="card-sub" id="ex-detail-title">Select a run</p></div></div>
+            <pre id="ex-detail" class="code-block packet-md">No run selected.</pre>
+          </div>
+        </section>
 
         <!-- VIEW: Chief planner -->
         <section id="view-planner" class="view" data-view-panel="planner" hidden>

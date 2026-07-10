@@ -156,6 +156,11 @@ const PAGE_META = {
     title: "Agent packets",
     desc: "Generate tool-neutral instructions for Grok, Codex, Claude, or GLM. No live agent execution.",
   },
+  execution: {
+    kicker: "Safety",
+    title: "Execution control",
+    desc: "Kill switch, locks, dry-run providers, supervised runs. No live agent calls.",
+  },
   planner: {
     kicker: "Control plane",
     title: "Chief planner",
@@ -742,6 +747,9 @@ function showView(name) {
   }
   if (name === "projects" && serverOnline) {
     loadProjectsPage();
+  }
+  if (name === "execution" && serverOnline) {
+    refreshExecutionPage();
   }
 }
 
@@ -1909,6 +1917,250 @@ document.querySelector("#truth-form")?.addEventListener("submit", async (event) 
     await loadRoadmap(projectId);
   } catch (error) {
     showFeedback("#projects-feedback", error.message, "is-error");
+  }
+});
+
+// —— Stage 5 execution control ——
+async function refreshExecutionPage() {
+  try {
+    const [ctrlRes, locksRes, provRes, runsRes, projRes, packetsRes] = await Promise.all([
+      fetch("/api/execution/control"),
+      fetch("/api/repository-locks?active=true"),
+      fetch("/api/providers"),
+      fetch("/api/runs"),
+      fetch("/api/projects"),
+      fetch("/api/packets"),
+    ]);
+    const control = (await ctrlRes.json()).control || {};
+    const locks = (await locksRes.json()).locks || [];
+    const providers = (await provRes.json()).providers || [];
+    const runs = (await runsRes.json()).runs || [];
+    const projects = ((await projRes.json()).projects || []).filter((p) => p.status !== "archived");
+    const packets = (await packetsRes.json()).packets || [];
+
+    setText("#ex-kill", control.kill_switch_active ? "ON" : "off");
+    setText("#ex-locks", locks.length);
+    setText("#ex-runs", runs.length);
+    setText(
+      "#ex-kill-detail",
+      control.kill_switch_active
+        ? `Active · ${control.reason || "no reason"} · ${control.activated_at || ""}`
+        : `Inactive · last update ${control.updated_at || "—"}`,
+    );
+
+    const fillProjects = (sel) => {
+      if (!sel) return;
+      sel.innerHTML = projects.map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join("") ||
+        `<option value="">No projects</option>`;
+    };
+    fillProjects(document.querySelector("#ex-project"));
+    fillProjects(document.querySelector("#ex-run-project"));
+    const provSel = document.querySelector("#ex-run-provider");
+    if (provSel) {
+      provSel.innerHTML = providers
+        .map((p) => `<option value="${escapeHtml(p.provider_id)}">${escapeHtml(p.display_name)} (dry-run)</option>`)
+        .join("");
+    }
+    if (packets[0] && document.querySelector("#ex-run-packet") && !document.querySelector("#ex-run-packet").value) {
+      document.querySelector("#ex-run-packet").value = packets[packets.length - 1].id || "";
+    }
+
+    const provList = document.querySelector("#ex-provider-list");
+    provList.innerHTML = providers
+      .map(
+        (p) => `<article class="queue-item">
+        <div class="queue-item-head"><h3 class="queue-item-title">${escapeHtml(p.display_name)}</h3>
+        <span class="chip">dry-run only</span></div>
+        <div class="queue-meta">
+          <span>enabled: ${p.enabled ? "yes" : "no"}</span>
+          <span>live: false</span>
+          <span>creds: false</span>
+          <span>risk: ${(p.supported_risk_levels || []).join("/")}</span>
+        </div>
+        <p class="queue-action">Caps: ${(p.capabilities || []).join(", ")}</p>
+      </article>`,
+      )
+      .join("") || `<div class="empty-inline">No providers</div>`;
+
+    const lockList = document.querySelector("#ex-lock-list");
+    lockList.innerHTML = locks.length
+      ? locks
+          .map(
+            (l) => `<article class="queue-item">
+          <div class="queue-item-head"><h3 class="queue-item-title">${escapeHtml(l.repository)} · ${escapeHtml(l.lock_scope)}</h3>
+          <button type="button" class="btn btn-ghost btn-sm" data-release="${escapeHtml(l.id)}">Release</button></div>
+          <p class="queue-action">${escapeHtml(l.reason || "")}</p></article>`,
+          )
+          .join("")
+      : `<div class="empty-inline">No active locks</div>`;
+    lockList.querySelectorAll("[data-release]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        await fetch(`/api/repository-locks/${encodeURIComponent(btn.getAttribute("data-release"))}/release`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason: "released from UI" }),
+        });
+        await refreshExecutionPage();
+      });
+    });
+
+    const runList = document.querySelector("#ex-run-list");
+    runList.innerHTML = runs.length
+      ? runs
+          .slice()
+          .reverse()
+          .map(
+            (r) => `<article class="queue-item">
+          <div class="queue-item-head">
+            <h3 class="queue-item-title">${escapeHtml(r.id)}</h3>
+            <span class="risk-badge risk-${String(r.risk || "yellow").toLowerCase()}">${escapeHtml(r.risk || "")}</span>
+          </div>
+          <div class="queue-meta">
+            <span>${escapeHtml(r.status)}</span>
+            <span>${escapeHtml(r.provider_id)}</span>
+            <span>${escapeHtml(r.target_branch || "")}</span>
+            <span>${escapeHtml(r.project_id || "")}</span>
+          </div>
+          <div class="queue-actions">
+            <button type="button" class="btn btn-secondary btn-sm" data-view-run="${escapeHtml(r.id)}">View</button>
+            <button type="button" class="btn btn-secondary btn-sm" data-preflight="${escapeHtml(r.id)}">Preflight</button>
+            <button type="button" class="btn btn-secondary btn-sm" data-approve="${escapeHtml(r.id)}">Approve local</button>
+            <button type="button" class="btn btn-primary btn-sm" data-dry="${escapeHtml(r.id)}">Execute dry-run</button>
+            <button type="button" class="btn btn-danger btn-sm" data-cancel="${escapeHtml(r.id)}">Cancel</button>
+          </div>
+        </article>`,
+          )
+          .join("")
+      : `<div class="empty-inline">No supervised runs yet.</div>`;
+
+    runList.querySelectorAll("[data-view-run]").forEach((btn) =>
+      btn.addEventListener("click", () => viewRun(btn.getAttribute("data-view-run"))),
+    );
+    runList.querySelectorAll("[data-preflight]").forEach((btn) =>
+      btn.addEventListener("click", () => runAction(btn.getAttribute("data-preflight"), "preflight")),
+    );
+    runList.querySelectorAll("[data-approve]").forEach((btn) =>
+      btn.addEventListener("click", () =>
+        runAction(btn.getAttribute("data-approve"), "approve", {
+          requirement_type: "shan_task_approval",
+          note: "Local UI approval",
+        }),
+      ),
+    );
+    runList.querySelectorAll("[data-dry]").forEach((btn) =>
+      btn.addEventListener("click", () => runAction(btn.getAttribute("data-dry"), "dry-run")),
+    );
+    runList.querySelectorAll("[data-cancel]").forEach((btn) =>
+      btn.addEventListener("click", () => runAction(btn.getAttribute("data-cancel"), "cancel", { reason: "UI cancel" })),
+    );
+  } catch (error) {
+    showFeedback("#ex-feedback", error.message, "is-error");
+  }
+}
+
+async function viewRun(runId) {
+  try {
+    const response = await fetch(`/api/runs/${encodeURIComponent(runId)}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    setText("#ex-detail-title", `Run ${runId}`);
+    document.querySelector("#ex-detail").textContent = JSON.stringify(data, null, 2);
+  } catch (error) {
+    showFeedback("#ex-feedback", error.message, "is-error");
+  }
+}
+
+async function runAction(runId, action, body = {}) {
+  try {
+    const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    showFeedback("#ex-feedback", `${action} ok for ${runId}`, "is-ok");
+    document.querySelector("#ex-detail").textContent = JSON.stringify(data, null, 2);
+    await refreshExecutionPage();
+  } catch (error) {
+    showFeedback("#ex-feedback", error.message, "is-error");
+  }
+}
+
+document.querySelector("#ex-refresh")?.addEventListener("click", refreshExecutionPage);
+document.querySelector("#ex-kill-on")?.addEventListener("click", async () => {
+  if (!confirm("Activate global kill switch? All new runs will be blocked.")) return;
+  await fetch("/api/execution/control", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      kill_switch_active: true,
+      reason: document.querySelector("#ex-kill-reason").value || "Activated from UI",
+    }),
+  });
+  await refreshExecutionPage();
+});
+document.querySelector("#ex-kill-off")?.addEventListener("click", async () => {
+  if (!confirm("Deactivate kill switch?")) return;
+  await fetch("/api/execution/control", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      kill_switch_active: false,
+      reason: document.querySelector("#ex-kill-reason").value || "Deactivated from UI",
+    }),
+  });
+  await refreshExecutionPage();
+});
+document.querySelector("#ex-project-save")?.addEventListener("click", async () => {
+  const projectId = document.querySelector("#ex-project").value;
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/execution-control`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      execution_status: document.querySelector("#ex-project-status").value,
+      reason: document.querySelector("#ex-project-reason").value,
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) showFeedback("#ex-feedback", data.error || "failed", "is-error");
+  else showFeedback("#ex-feedback", `Project execution → ${data.control.execution_status}`, "is-ok");
+});
+document.querySelector("#ex-lock-add")?.addEventListener("click", async () => {
+  const response = await fetch("/api/repository-locks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      repository: document.querySelector("#ex-lock-repo").value,
+      lock_scope: document.querySelector("#ex-lock-scope").value,
+      reason: document.querySelector("#ex-lock-reason").value,
+      project_id: document.querySelector("#ex-project").value || null,
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) showFeedback("#ex-feedback", data.error || "failed", "is-error");
+  else await refreshExecutionPage();
+});
+document.querySelector("#ex-run-create")?.addEventListener("click", async () => {
+  try {
+    const response = await fetch("/api/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        project_id: document.querySelector("#ex-run-project").value,
+        provider_id: document.querySelector("#ex-run-provider").value,
+        packet_id: document.querySelector("#ex-run-packet").value.trim(),
+        target_branch: document.querySelector("#ex-run-branch").value.trim(),
+        operating_mode: document.querySelector("#ex-run-mode").value,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    showFeedback("#ex-feedback", `Draft run ${data.run.id}`, "is-ok");
+    await refreshExecutionPage();
+    await viewRun(data.run.id);
+  } catch (error) {
+    showFeedback("#ex-feedback", error.message, "is-error");
   }
 });
 

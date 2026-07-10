@@ -117,17 +117,23 @@ Delivered:
 
 Still forbidden: live agents, GitHub writes, auto-merge, production authority.
 
-## Stage 5 — Execution Adapter Foundation
+## Stage 5 — Execution Safety Foundation
 
-Next (planning only first).
+Status: implemented in branch `stage-5-execution-safety-foundation`.
 
 Objective:
 
-- Provider-neutral adapter interfaces for Claude, Codex, Grok, GLM.
-- Capability discovery / dry-run contracts.
-- Still no live autonomous execution until kill switch, run logs, and approval gates exist.
+- Kill switch, project pause/lock, repository locks
+- Supervised run state machine and preflight
+- Dry-run provider registry (Codex/Claude/Grok/GLM)
+- Append-only run events, approvals, budgets/timeouts
+- No live provider calls
 
-## Stage 6 — Approval Queue and Kill Switch
+## Stage 6 — Supervised Live Agent Adapter Pilot
+
+Next. One provider only, GREEN/YELLOW, feature branch, no merge/deploy.
+
+## Stage 7 — Approval Queue and Expanded Kill Switch
 
 Objective:
 

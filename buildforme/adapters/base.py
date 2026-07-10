@@ -1,0 +1,19 @@
+"""Adapter interface for future supervised providers."""
+
+from __future__ import annotations
+
+from typing import Any, Protocol
+
+
+class ProviderAdapter(Protocol):
+    def get_capabilities(self) -> list[str]: ...
+
+    def validate_request(self, run: dict[str, Any], packet: dict[str, Any]) -> list[str]: ...
+
+    def prepare_execution(self, run: dict[str, Any], packet: dict[str, Any]) -> dict[str, Any]: ...
+
+    def dry_run(self, run: dict[str, Any], packet: dict[str, Any]) -> dict[str, Any]: ...
+
+    def cancel(self, run_id: str) -> dict[str, Any]: ...
+
+    def get_status(self, run_id: str) -> dict[str, Any]: ...

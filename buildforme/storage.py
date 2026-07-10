@@ -26,6 +26,31 @@ DEFAULT_TRUTH_NAME = "project_truth.json"
 DEFAULT_RECOMMENDATIONS_NAME = "planner_recommendations.json"
 DEFAULT_EVENTS_NAME = "events.json"
 DEFAULT_BRIEFINGS_NAME = "briefings.json"
+DEFAULT_EXECUTION_CONTROL_NAME = "execution_control.json"
+DEFAULT_PROJECT_EXEC_CONTROLS_NAME = "project_execution_controls.json"
+DEFAULT_REPO_LOCKS_NAME = "repository_locks.json"
+DEFAULT_PROVIDERS_NAME = "providers.json"
+DEFAULT_RUNS_NAME = "runs.json"
+DEFAULT_RUN_EVENTS_NAME = "run_events.json"
+DEFAULT_RUN_APPROVALS_NAME = "run_approvals.json"
+DEFAULT_EXECUTION_POLICIES_NAME = "execution_policies.json"
+
+LOCK_SCOPES = {"all", "write", "merge", "production", "branch"}
+PROJECT_EXEC_STATUSES = {"enabled", "paused", "locked"}
+RUN_APPROVAL_DECISIONS = {"approved", "rejected", "pending", "expired"}
+RUN_APPROVAL_TYPES = {
+    "shan_task_approval",
+    "shan_red_risk_approval",
+    "security_review",
+    "architecture_review",
+    "budget_approval",
+    "provider_approval",
+    "merge_approval",
+    "deployment_approval",
+}
+ACTIVE_RUN_STATUSES = frozenset(
+    {"queued", "starting", "running", "cancel_requested", "awaiting_approval", "approved"}
+)
 
 PROJECT_STATUSES = {"active", "paused", "blocked", "completed", "archived"}
 STAGE_STATUSES = {"not_started", "in_progress", "blocked", "ready_for_review", "complete"}
@@ -105,6 +130,14 @@ class LocalStore:
         self.recommendations_path = self.runtime_dir / DEFAULT_RECOMMENDATIONS_NAME
         self.events_path = self.runtime_dir / DEFAULT_EVENTS_NAME
         self.briefings_path = self.runtime_dir / DEFAULT_BRIEFINGS_NAME
+        self.execution_control_path = self.runtime_dir / DEFAULT_EXECUTION_CONTROL_NAME
+        self.project_exec_controls_path = self.runtime_dir / DEFAULT_PROJECT_EXEC_CONTROLS_NAME
+        self.repo_locks_path = self.runtime_dir / DEFAULT_REPO_LOCKS_NAME
+        self.providers_path = self.runtime_dir / DEFAULT_PROVIDERS_NAME
+        self.runs_path = self.runtime_dir / DEFAULT_RUNS_NAME
+        self.run_events_path = self.runtime_dir / DEFAULT_RUN_EVENTS_NAME
+        self.run_approvals_path = self.runtime_dir / DEFAULT_RUN_APPROVALS_NAME
+        self.execution_policies_path = self.runtime_dir / DEFAULT_EXECUTION_POLICIES_NAME
 
     # —— Tasks (existing API) ——
 
@@ -726,6 +759,378 @@ class LocalStore:
         for truth in sample.get("truth") or []:
             self.upsert_truth({**truth, "project_id": project_id})
         return saved_project
+
+    # —— Stage 5: execution safety ——
+
+    def get_execution_control(self) -> dict[str, Any]:
+        if not self.execution_control_path.exists():
+            record = {
+                "id": "global",
+                "kill_switch_active": False,
+                "reason": "",
+                "activated_by": "",
+                "activated_at": None,
+                "updated_at": utc_now_iso(),
+            }
+            self._atomic_write(self.execution_control_path, record)
+            return record
+        try:
+            data = json.loads(self.execution_control_path.read_text(encoding="utf-8") or "{}")
+        except json.JSONDecodeError:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data.setdefault("id", "global")
+        data.setdefault("kill_switch_active", False)
+        return data
+
+    def set_execution_control(self, *, kill_switch_active: bool, reason: str = "", actor: str = "shan") -> dict[str, Any]:
+        previous = self.get_execution_control()
+        now = utc_now_iso()
+        record = {
+            "id": "global",
+            "kill_switch_active": bool(kill_switch_active),
+            "reason": str(reason or ""),
+            "activated_by": str(actor or "shan") if kill_switch_active else previous.get("activated_by") or "",
+            "activated_at": now if kill_switch_active else None,
+            "updated_at": now,
+            "previous_kill_switch_active": bool(previous.get("kill_switch_active")),
+        }
+        self._atomic_write(self.execution_control_path, record)
+        self.append_event(
+            {
+                "event_type": "kill_switch_activated" if kill_switch_active else "kill_switch_deactivated",
+                "project_id": None,
+                "target_type": "execution_control",
+                "target_id": "global",
+                "summary": reason or ("activated" if kill_switch_active else "deactivated"),
+            }
+        )
+        return record
+
+    def get_project_execution_control(self, project_id: str) -> dict[str, Any]:
+        data = self._load_object(
+            self.project_exec_controls_path,
+            default={"controls": []},
+            list_key="controls",
+        )
+        for item in data.get("controls") or []:
+            if str(item.get("project_id")) == str(project_id):
+                return item
+        return {
+            "project_id": project_id,
+            "execution_status": "enabled",
+            "reason": "",
+            "updated_at": utc_now_iso(),
+        }
+
+    def set_project_execution_control(
+        self,
+        project_id: str,
+        *,
+        execution_status: str,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        self.get_project(project_id)
+        if execution_status not in PROJECT_EXEC_STATUSES:
+            raise ValueError(f"execution_status must be one of {sorted(PROJECT_EXEC_STATUSES)}")
+        record = {
+            "project_id": project_id,
+            "execution_status": execution_status,
+            "reason": str(reason or ""),
+            "updated_at": utc_now_iso(),
+        }
+        data = self._load_object(
+            self.project_exec_controls_path,
+            default={"controls": []},
+            list_key="controls",
+        )
+        controls = list(data.get("controls") or [])
+        updated = False
+        for index, item in enumerate(controls):
+            if str(item.get("project_id")) == str(project_id):
+                controls[index] = record
+                updated = True
+                break
+        if not updated:
+            controls.append(record)
+        self._atomic_write(self.project_exec_controls_path, {"controls": controls})
+        self.append_event(
+            {
+                "event_type": "project_execution_control_changed",
+                "project_id": project_id,
+                "target_type": "project_execution_control",
+                "target_id": project_id,
+                "summary": f"execution_status → {execution_status}",
+            }
+        )
+        return record
+
+    def list_repository_locks(
+        self,
+        *,
+        active_only: bool = False,
+        repository: str | None = None,
+    ) -> list[dict[str, Any]]:
+        data = self._load_object(self.repo_locks_path, default={"locks": []}, list_key="locks")
+        locks = list(data.get("locks") or [])
+        if repository:
+            locks = [lock for lock in locks if str(lock.get("repository")) == str(repository)]
+        if active_only:
+            locks = [lock for lock in locks if str(lock.get("status")) == "active"]
+        return locks
+
+    def create_repository_lock(self, payload: dict[str, Any]) -> dict[str, Any]:
+        repository = _normalize_repo(str(payload.get("repository") or ""))
+        scope = str(payload.get("lock_scope") or "all")
+        if scope not in LOCK_SCOPES:
+            raise ValueError(f"lock_scope must be one of {sorted(LOCK_SCOPES)}")
+        record = {
+            "id": str(payload.get("id") or f"lock-{uuid.uuid4().hex[:10]}"),
+            "repository": repository,
+            "lock_scope": scope,
+            "status": "active",
+            "reason": str(payload.get("reason") or "").strip(),
+            "project_id": payload.get("project_id"),
+            "created_at": utc_now_iso(),
+            "released_at": None,
+        }
+        locks = self.list_repository_locks()
+        locks.append(record)
+        self._atomic_write(self.repo_locks_path, {"locks": locks})
+        self.append_event(
+            {
+                "event_type": "repository_lock_created",
+                "project_id": record.get("project_id"),
+                "target_type": "repository_lock",
+                "target_id": record["id"],
+                "summary": f"{repository} scope={scope}",
+            }
+        )
+        return record
+
+    def release_repository_lock(self, lock_id: str, *, reason: str = "") -> dict[str, Any]:
+        locks = self.list_repository_locks()
+        found = None
+        for index, item in enumerate(locks):
+            if str(item.get("id")) == str(lock_id):
+                updated = dict(item)
+                updated["status"] = "released"
+                updated["released_at"] = utc_now_iso()
+                if reason:
+                    updated["release_reason"] = reason
+                locks[index] = updated
+                found = updated
+                break
+        if not found:
+            raise KeyError(f"Lock not found: {lock_id}")
+        self._atomic_write(self.repo_locks_path, {"locks": locks})
+        self.append_event(
+            {
+                "event_type": "repository_lock_released",
+                "project_id": found.get("project_id"),
+                "target_type": "repository_lock",
+                "target_id": lock_id,
+                "summary": reason or "released",
+            }
+        )
+        return found
+
+    def list_providers(self) -> list[dict[str, Any]]:
+        from buildforme.providers import default_provider_registry
+
+        if not self.providers_path.exists():
+            providers = default_provider_registry()
+            self._atomic_write(self.providers_path, {"providers": providers})
+            return providers
+        data = self._load_object(self.providers_path, default={"providers": []}, list_key="providers")
+        providers = list(data.get("providers") or [])
+        if not providers:
+            providers = default_provider_registry()
+            self._atomic_write(self.providers_path, {"providers": providers})
+        # Force dry-run invariants
+        for item in providers:
+            item["mode"] = "dry_run"
+            item["live_execution_available"] = False
+            item["credentials_configured"] = False
+        return providers
+
+    def get_provider_record(self, provider_id: str) -> dict[str, Any]:
+        from buildforme.providers import get_provider
+
+        provider = get_provider(self.list_providers(), provider_id)
+        if not provider:
+            raise KeyError(f"Provider not found: {provider_id}")
+        return provider
+
+    def update_provider(self, provider_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        from buildforme.providers import sanitize_provider_update
+
+        providers = self.list_providers()
+        updated_list = []
+        found = None
+        for item in providers:
+            if str(item.get("provider_id")) == str(provider_id):
+                found = sanitize_provider_update(item, patch or {})
+                updated_list.append(found)
+            else:
+                updated_list.append(item)
+        if not found:
+            raise KeyError(f"Provider not found: {provider_id}")
+        self._atomic_write(self.providers_path, {"providers": updated_list})
+        return found
+
+    def get_execution_policy(self) -> dict[str, Any]:
+        default = {
+            "max_concurrent_global_runs": 1,
+            "max_concurrent_per_project": 1,
+            "default_timeout_minutes": 30,
+            "hard_max_timeout_minutes": 120,
+            "default_max_attempts": 1,
+            "hard_max_attempts": 3,
+            "updated_at": utc_now_iso(),
+        }
+        if not self.execution_policies_path.exists():
+            self._atomic_write(self.execution_policies_path, default)
+            return default
+        try:
+            data = json.loads(self.execution_policies_path.read_text(encoding="utf-8") or "{}")
+        except json.JSONDecodeError:
+            return default
+        if not isinstance(data, dict):
+            return default
+        merged = dict(default)
+        merged.update(data)
+        return merged
+
+    def list_runs(self, *, project_id: str | None = None) -> list[dict[str, Any]]:
+        data = self._load_object(self.runs_path, default={"runs": []}, list_key="runs")
+        runs = list(data.get("runs") or [])
+        if project_id is not None:
+            runs = [r for r in runs if str(r.get("project_id")) == str(project_id)]
+        return runs
+
+    def get_run(self, run_id: str) -> dict[str, Any]:
+        for item in self.list_runs():
+            if str(item.get("id")) == str(run_id):
+                return item
+        raise KeyError(f"Run not found: {run_id}")
+
+    def save_run(self, run: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(run, dict) or not run.get("id"):
+            raise ValueError("run with id required")
+        # Never persist provider secrets
+        cleaned = dict(run)
+        for key in list(cleaned.keys()):
+            low = str(key).lower()
+            if any(x in low for x in ("token", "password", "api_key", "secret", "credential")):
+                cleaned.pop(key, None)
+        cleaned["updated_at"] = utc_now_iso()
+        runs = self.list_runs()
+        updated = False
+        for index, item in enumerate(runs):
+            if str(item.get("id")) == str(cleaned.get("id")):
+                cleaned["created_at"] = item.get("created_at") or cleaned.get("created_at")
+                runs[index] = cleaned
+                updated = True
+                break
+        if not updated:
+            cleaned.setdefault("created_at", utc_now_iso())
+            runs.append(cleaned)
+        self._atomic_write(self.runs_path, {"runs": runs})
+        return cleaned
+
+    def count_active_runs(self, *, provider_id: str | None = None, project_id: str | None = None) -> int:
+        count = 0
+        for run in self.list_runs():
+            if str(run.get("status")) not in ACTIVE_RUN_STATUSES:
+                continue
+            if provider_id and str(run.get("provider_id")) != str(provider_id):
+                continue
+            if project_id and str(run.get("project_id")) != str(project_id):
+                continue
+            count += 1
+        return count
+
+    def append_run_event(
+        self,
+        run_id: str,
+        event_type: str,
+        summary: str,
+        *,
+        actor: str = "system",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        event = {
+            "id": f"revt_{uuid.uuid4().hex[:12]}",
+            "run_id": run_id,
+            "event_type": str(event_type),
+            "summary": str(summary or ""),
+            "actor": str(actor or "system"),
+            "metadata": metadata if isinstance(metadata, dict) else {},
+            "created_at": utc_now_iso(),
+        }
+        data = self._load_object(self.run_events_path, default={"events": []}, list_key="events")
+        events = list(data.get("events") or [])
+        events.append(event)
+        if len(events) > 5000:
+            events = events[-5000:]
+        self._atomic_write(self.run_events_path, {"events": events})
+        return event
+
+    def list_run_events(self, run_id: str) -> list[dict[str, Any]]:
+        data = self._load_object(self.run_events_path, default={"events": []}, list_key="events")
+        return [e for e in (data.get("events") or []) if str(e.get("run_id")) == str(run_id)]
+
+    def list_run_approvals(self, run_id: str | None = None) -> list[dict[str, Any]]:
+        data = self._load_object(self.run_approvals_path, default={"approvals": []}, list_key="approvals")
+        items = list(data.get("approvals") or [])
+        if run_id is None:
+            return items
+        return [a for a in items if str(a.get("run_id")) == str(run_id)]
+
+    def save_run_approval(self, payload: dict[str, Any]) -> dict[str, Any]:
+        requirement = str(payload.get("requirement_type") or "").strip()
+        decision = str(payload.get("decision") or "").strip()
+        if requirement not in RUN_APPROVAL_TYPES:
+            raise ValueError(f"requirement_type must be one of {sorted(RUN_APPROVAL_TYPES)}")
+        if decision not in RUN_APPROVAL_DECISIONS:
+            raise ValueError(f"decision must be one of {sorted(RUN_APPROVAL_DECISIONS)}")
+        if requirement in {"merge_approval", "deployment_approval"} and decision == "approved":
+            raise ValueError("merge/deployment approvals cannot be granted in Stage 5")
+        now = utc_now_iso()
+        record = {
+            "id": str(payload.get("id") or f"rap_{uuid.uuid4().hex[:10]}"),
+            "run_id": str(payload.get("run_id") or ""),
+            "requirement_type": requirement,
+            "decision": decision,
+            "scope": str(payload.get("scope") or ""),
+            "note": str(payload.get("note") or ""),
+            "actor": str(payload.get("actor") or "shan"),
+            "packet_id": payload.get("packet_id"),
+            "task_id": payload.get("task_id"),
+            "created_at": now,
+            "updated_at": now,
+        }
+        if not record["run_id"]:
+            raise ValueError("run_id required")
+        approvals = self.list_run_approvals()
+        # upsert same requirement for run
+        updated = False
+        for index, existing in enumerate(approvals):
+            if (
+                str(existing.get("run_id")) == record["run_id"]
+                and str(existing.get("requirement_type")) == requirement
+            ):
+                record["id"] = existing.get("id") or record["id"]
+                record["created_at"] = existing.get("created_at") or now
+                approvals[index] = record
+                updated = True
+                break
+        if not updated:
+            approvals.append(record)
+        self._atomic_write(self.run_approvals_path, {"approvals": approvals})
+        return record
 
     # —— Internals ——
 

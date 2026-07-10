@@ -16,8 +16,8 @@ from buildforme.storage import utc_now_iso
 
 MAX_STREAM_BYTES = 512_000
 MAX_EVENT_LINES = 2_000
-GRACEFUL_WAIT_SEC = 3.0
-FORCE_WAIT_SEC = 5.0
+GRACEFUL_WAIT_SEC = 2.0
+FORCE_WAIT_SEC = 3.0
 
 
 class ProcessSupervisor:
@@ -210,9 +210,14 @@ class ProcessSupervisor:
                         "detail": "process still alive after force",
                     }
                 )
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
-        t_out.join(timeout=2)
-        t_err.join(timeout=2)
+        # Never block forever on stream threads
+        t_out.join(timeout=1)
+        t_err.join(timeout=1)
         for stream in (proc.stdout, proc.stderr):
             try:
                 if stream:

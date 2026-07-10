@@ -101,7 +101,7 @@ class ProcessSupervisorHardeningTests(unittest.TestCase):
         sup = ProcessSupervisor()
         result = sup.run(
             run_id="proc-timeout",
-            argv=["python", "-c", "import time; time.sleep(30)"],
+            argv=["python", "-c", "import time; time.sleep(10)"],
             cwd=Path.cwd(),
             timeout_seconds=1,
             provider_id="codex",
@@ -114,15 +114,15 @@ class ProcessSupervisorHardeningTests(unittest.TestCase):
         sup = ProcessSupervisor()
 
         def cancel_soon():
-            time.sleep(0.4)
+            time.sleep(0.2)
             sup.cancel("proc-cancel")
 
         threading.Thread(target=cancel_soon, daemon=True).start()
         result = sup.run(
             run_id="proc-cancel",
-            argv=["python", "-c", "import time; time.sleep(30)"],
+            argv=["python", "-c", "import time; time.sleep(10)"],
             cwd=Path.cwd(),
-            timeout_seconds=20,
+            timeout_seconds=8,
             provider_id="codex",
         )
         self.assertTrue(result["cancelled"] or result["timed_out"])

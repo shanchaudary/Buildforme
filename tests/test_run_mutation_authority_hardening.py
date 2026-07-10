@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import re
+import ast
 import tempfile
 import unittest
 from pathlib import Path
@@ -68,8 +68,14 @@ class RunMutationAuthorityHardeningTests(unittest.TestCase):
         run["preflight"] = {"passed": True}
         run["approval_requirements"] = ["shan_task_approval"]
         run["scope_fingerprint"] = "evil-scope"
-        with self.assertRaisesRegex(ValueError, "authority field mutation forbidden: scope_fingerprint"):
-            self._commit(run, mutation_type="preflight_result", event_type="preflight_passed")
+        with self.assertRaisesRegex(
+            ValueError, "authority field mutation forbidden: scope_fingerprint"
+        ):
+            self._commit(
+                run,
+                mutation_type="preflight_result",
+                event_type="preflight_passed",
+            )
         stored = self.store.get_run("run-scope-same")
         self.assertEqual(stored["scope_fingerprint"], "scope-1")
         self.assertEqual(stored["row_version"], version)
@@ -83,21 +89,35 @@ class RunMutationAuthorityHardeningTests(unittest.TestCase):
         run["preflight"] = {"passed": True}
         run["approval_requirements"] = ["shan_task_approval"]
         run["scope_fingerprint"] = "evil-scope"
-        with self.assertRaisesRegex(ValueError, "authority field mutation forbidden: scope_fingerprint"):
-            self._commit(run, mutation_type="preflight_result", event_type="preflight_passed")
+        with self.assertRaisesRegex(
+            ValueError, "authority field mutation forbidden: scope_fingerprint"
+        ):
+            self._commit(
+                run,
+                mutation_type="preflight_result",
+                event_type="preflight_passed",
+            )
         stored = self.store.get_run("run-scope-edge")
         self.assertEqual(stored["status"], "awaiting_preflight")
         self.assertEqual(stored["row_version"], version)
         self.assertEqual(self.store.list_run_events("run-scope-edge"), [])
 
     def test_missing_legacy_scope_is_not_runtime_backfilled(self):
-        self._make_run("run-no-scope", status="awaiting_preflight", scope_fingerprint=None)
+        self._make_run(
+            "run-no-scope",
+            status="awaiting_preflight",
+            scope_fingerprint=None,
+        )
         run = self.store.get_run("run-no-scope")
         run["scope_fingerprint"] = "new-runtime-scope"
         run["preflight"] = {"passed": True}
-        with self.assertRaisesRegex(ValueError, "authority field mutation forbidden: scope_fingerprint"):
+        with self.assertRaisesRegex(
+            ValueError, "authority field mutation forbidden: scope_fingerprint"
+        ):
             self._commit(run, mutation_type="preflight_result")
-        self.assertIsNone(self.store.get_run("run-no-scope").get("scope_fingerprint"))
+        self.assertIsNone(
+            self.store.get_run("run-no-scope").get("scope_fingerprint")
+        )
 
     def test_same_state_metadata_cannot_fabricate_lifecycle_truth(self):
         self._make_run(
@@ -117,11 +137,17 @@ class RunMutationAuthorityHardeningTests(unittest.TestCase):
         run = self.store.get_run("run-history")
         original_history = list(run["status_history"])
         original_started = run["started_at"]
-        run["status_history"] = [{"from": "draft", "to": "completed", "actor": "attacker"}]
+        run["status_history"] = [
+            {"from": "draft", "to": "completed", "actor": "attacker"}
+        ]
         run["started_at"] = "2099-01-01T00:00:00+00:00"
         run["finished_at"] = "2099-01-01T00:00:00+00:00"
         run["process_result"] = {"ok": True, "exit_code": 0}
-        saved = self._commit(run, mutation_type="process_result", event_type="process_snapshot")
+        saved = self._commit(
+            run,
+            mutation_type="process_result",
+            event_type="process_snapshot",
+        )
         self.assertEqual(saved["status_history"], original_history)
         self.assertEqual(saved["started_at"], original_started)
         self.assertIsNone(saved["finished_at"])
@@ -142,14 +168,24 @@ class RunMutationAuthorityHardeningTests(unittest.TestCase):
         )
         history = saved["status_history"]
         events = self.store.list_run_events("run-path-history")
-        self.assertEqual([(h["from"], h["to"]) for h in history], [
+        expected_edges = [
             ("approved", "queued"),
             ("queued", "starting"),
             ("starting", "running"),
-        ])
+        ]
         self.assertEqual(
-            [(e["metadata"]["previous_status"], e["metadata"]["resulting_status"]) for e in events],
-            [(h["from"], h["to"]) for h in history],
+            [(entry["from"], entry["to"]) for entry in history],
+            expected_edges,
+        )
+        self.assertEqual(
+            [
+                (
+                    event["metadata"]["previous_status"],
+                    event["metadata"]["resulting_status"],
+                )
+                for event in events
+            ],
+            expected_edges,
         )
         self.assertTrue(saved["started_at"])
         self.assertIsNone(saved["finished_at"])
@@ -157,7 +193,10 @@ class RunMutationAuthorityHardeningTests(unittest.TestCase):
             self.assertEqual(history_entry["actor"], event["actor"])
             self.assertEqual(history_entry["at"], event["created_at"])
             self.assertEqual(history_entry["reason"], event["summary"])
-            self.assertEqual(event["metadata"]["timestamp"], event["created_at"])
+            self.assertEqual(
+                event["metadata"]["timestamp"],
+                event["created_at"],
+            )
 
     def test_terminal_path_derives_finished_at(self):
         self._make_run("run-terminal-path", status="running")
@@ -174,7 +213,7 @@ class RunMutationAuthorityHardeningTests(unittest.TestCase):
         self.assertTrue(saved["finished_at"])
         self.assertEqual(len(saved["status_history"]), 2)
 
-    def test_invalid_path_rolls_back_history_timestamps_version_and_events(self):
+    def test_invalid_path_rolls_back_everything(self):
         self._make_run("run-rollback", status="approved", started_at=None)
         before = self.store.get_run("run-rollback")
         proposed = dict(before)
@@ -187,11 +226,14 @@ class RunMutationAuthorityHardeningTests(unittest.TestCase):
                 transition_path=["approved", "running", "needs_review"],
             )
         after = self.store.get_run("run-rollback")
-        self.assertEqual(after["status"], before["status"])
-        self.assertEqual(after["status_history"], before["status_history"])
-        self.assertEqual(after["started_at"], before["started_at"])
-        self.assertEqual(after["finished_at"], before["finished_at"])
-        self.assertEqual(after["row_version"], before["row_version"])
+        for key in (
+            "status",
+            "status_history",
+            "started_at",
+            "finished_at",
+            "row_version",
+        ):
+            self.assertEqual(after[key], before[key])
         self.assertEqual(self.store.list_run_events("run-rollback"), [])
 
     def test_same_state_transition_path_is_rejected(self):
@@ -209,19 +251,31 @@ class RunMutationAuthorityHardeningTests(unittest.TestCase):
         self._make_run("run-positive", status="running")
         run = self.store.get_run("run-positive")
         run["verification"] = {"passed": True}
-        run = self._commit(run, mutation_type="verification_result", event_type="verified")
+        run = self._commit(
+            run,
+            mutation_type="verification_result",
+            event_type="verified",
+        )
         self.assertTrue(run["verification"]["passed"])
 
         run["evidence"] = {"evidence_id": "ev-1"}
         run["evidence_ids"] = ["ev-1"]
         run["final_head_sha"] = "f" * 40
         run["head_commit"] = "f" * 40
-        run = self._commit(run, mutation_type="execution_evidence_link", event_type="evidence_linked")
+        run = self._commit(
+            run,
+            mutation_type="execution_evidence_link",
+            event_type="evidence_linked",
+        )
         self.assertEqual(run["evidence"]["evidence_id"], "ev-1")
 
         run["review"] = {"status": "review_required"}
         run["result_summary"] = "ready"
-        run = self._commit(run, mutation_type="review_package", event_type="review_ready")
+        run = self._commit(
+            run,
+            mutation_type="review_package",
+            event_type="review_ready",
+        )
         self.assertEqual(run["review"]["status"], "review_required")
 
     def test_storage_status_policy_cannot_be_broadened_by_caller(self):
@@ -234,7 +288,9 @@ class RunMutationAuthorityHardeningTests(unittest.TestCase):
                 mutation_type="process_started",
                 require_db_status_in={"draft"},
             )
-        self.assertIsNone(self.store.get_run("run-policy").get("worktree_path"))
+        self.assertIsNone(
+            self.store.get_run("run-policy").get("worktree_path")
+        )
 
     def test_all_runtime_modules_forbid_setup_and_unrestricted_save_apis(self):
         modules = [
@@ -243,18 +299,31 @@ class RunMutationAuthorityHardeningTests(unittest.TestCase):
             "buildforme/review_gate.py",
             "buildforme/process_supervisor.py",
         ]
-        forbidden = [
-            re.compile(r"save_run_for_setup"),
-            re.compile(r"allow_unversioned\s*=\s*True"),
-            re.compile(r"(?:store|self\._store\(\)|self\.s6|store\.s6)\.save_run\s*\("),
-        ]
         for relative in modules:
             source = Path(relative).read_text(encoding="utf-8")
-            for pattern in forbidden:
-                self.assertIsNone(
-                    pattern.search(source),
-                    msg=f"{relative} contains forbidden runtime write API: {pattern.pattern}",
-                )
+            self.assertNotIn(
+                "save_run_for_setup",
+                source,
+                msg=f"{relative} calls fixture/setup run persistence",
+            )
+            self.assertNotIn(
+                "allow_unversioned=True",
+                source,
+                msg=f"{relative} enables unversioned run persistence",
+            )
+            tree = ast.parse(source, filename=relative)
+            unrestricted = [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "save_run"
+            ]
+            self.assertEqual(
+                unrestricted,
+                [],
+                msg=f"{relative} contains unrestricted save_run call(s)",
+            )
 
 
 if __name__ == "__main__":

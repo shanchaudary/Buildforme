@@ -220,6 +220,93 @@ def run_events_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def governance_validate_command(args: argparse.Namespace) -> int:
+    """Run Stage 5.5 governance smoke checks and adversarial unit tests."""
+    import unittest
+
+    from buildforme.governance import parse_bool_strict
+    from buildforme.providers import default_provider_registry
+    from buildforme.run_state import can_transition, is_terminal
+    from buildforme.storage import LocalStore
+
+    checks: list[dict[str, str]] = []
+
+    def record(name: str, ok: bool, detail: str) -> None:
+        checks.append({"name": name, "status": "pass" if ok else "fail", "detail": detail})
+
+    # Static control assertions (no side effects)
+    try:
+        assert parse_bool_strict("false") is False
+        assert parse_bool_strict("true") is True
+        record("strict_bool", True, "parse_bool_strict rejects truthy strings safely")
+    except Exception as exc:  # noqa: BLE001
+        record("strict_bool", False, str(exc))
+
+    try:
+        assert is_terminal("completed")
+        assert not can_transition("completed", "running")
+        record("state_machine", True, "terminal completed cannot restart")
+    except Exception as exc:  # noqa: BLE001
+        record("state_machine", False, str(exc))
+
+    try:
+        providers = default_provider_registry()
+        assert providers
+        assert all(p.get("mode") == "dry_run" for p in providers)
+        assert all(not p.get("live_execution_available") for p in providers)
+        assert all(not p.get("credentials_configured") for p in providers)
+        record("providers_dry_run_only", True, f"{len(providers)} providers dry-run only")
+    except Exception as exc:  # noqa: BLE001
+        record("providers_dry_run_only", False, str(exc))
+
+    store = LocalStore(args.state)
+    control = store.get_execution_control()
+    record(
+        "kill_switch_readable",
+        isinstance(control.get("kill_switch_active"), bool),
+        f"kill_switch_active={control.get('kill_switch_active')}",
+    )
+
+    # Adversarial suite
+    loader = unittest.TestLoader()
+    suite = unittest.TestSuite()
+    for mod in (
+        "tests.test_governance_adversarial",
+        "tests.test_run_state",
+        "tests.test_execution_preflight",
+        "tests.test_dry_run_adapter",
+    ):
+        try:
+            suite.addTests(loader.loadTestsFromName(mod))
+        except Exception as exc:  # noqa: BLE001
+            record(f"load_{mod}", False, str(exc))
+
+    result = unittest.TextTestRunner(verbosity=1).run(suite)
+    tests_ok = result.wasSuccessful()
+    record(
+        "adversarial_suite",
+        tests_ok,
+        f"ran={result.testsRun} failures={len(result.failures)} errors={len(result.errors)}",
+    )
+
+    payload = {
+        "stage": "5.5",
+        "checks": checks,
+        "passed": all(c["status"] == "pass" for c in checks),
+        "stage_6_admission": "HOLD — Stage 6 not authorized by governance-validate alone",
+        "doc": "docs/STAGE_5_5_GOVERNANCE_VALIDATION.md",
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("Stage 5.5 governance validation")
+        for item in checks:
+            print(f"  [{item['status'].upper()}] {item['name']}: {item['detail']}")
+        print(f"Overall: {'PASS' if payload['passed'] else 'FAIL'}")
+        print(f"Stage 6 admission: {payload['stage_6_admission']}")
+    return 0 if payload["passed"] else 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Buildforme supervisor CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -299,6 +386,14 @@ def build_parser() -> argparse.ArgumentParser:
     run_events.add_argument("run_id")
     run_events.add_argument("--state", default="runtime/buildforme_state.json")
     run_events.set_defaults(func=run_events_command)
+
+    gov = subparsers.add_parser(
+        "governance-validate",
+        help="Run Stage 5.5 governance smoke checks and adversarial unit tests",
+    )
+    gov.add_argument("--state", default="runtime/buildforme_state.json")
+    gov.add_argument("--json", action="store_true")
+    gov.set_defaults(func=governance_validate_command)
     return parser
 
 

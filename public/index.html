@@ -34,6 +34,12 @@
         </div>
 
         <nav class="nav" role="tablist" aria-label="App sections">
+          <button type="button" class="nav-item" data-view="constitution" role="tab" aria-selected="false">
+            <span class="nav-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 3l7 3v6c0 5-3.5 8.5-7 9-3.5-.5-7-4-7-9V6l7-3z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M9 12l2 2 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </span>
+            Constitution
+          </button>
           <button type="button" class="nav-item" data-view="execution" role="tab" aria-selected="false">
             <span class="nav-icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="12" cy="12" r="3.5" stroke="currentColor" stroke-width="1.6"/></svg>
@@ -131,6 +137,53 @@
             </button>
           </div>
         </header>
+
+        <!-- VIEW: Constitution -->
+        <section id="view-constitution" class="view" data-view-panel="constitution" hidden>
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Stage 5.6</p>
+                <h2>AI Constitution</h2>
+                <p class="muted">Immutable engineering law for every provider, packet, run, and review. Not prompt fluff.</p>
+              </div>
+              <div class="panel-actions">
+                <button type="button" class="btn btn-secondary" id="constitution-refresh-btn">Refresh providers</button>
+                <button type="button" class="btn btn-primary" id="constitution-reload-btn">Reload</button>
+              </div>
+            </div>
+            <div class="stat-grid" id="constitution-stats">
+              <div class="stat-card"><span class="stat-label">Version</span><strong id="const-version">—</strong></div>
+              <div class="stat-card"><span class="stat-label">Hash</span><strong id="const-hash" class="mono">—</strong></div>
+              <div class="stat-card"><span class="stat-label">Laws</span><strong id="const-laws-count">—</strong></div>
+              <div class="stat-card"><span class="stat-label">Document</span><strong id="const-doc-valid">—</strong></div>
+            </div>
+            <div class="split-grid">
+              <div class="card">
+                <h3>Current laws</h3>
+                <div id="constitution-laws" class="table-wrap"></div>
+              </div>
+              <div class="card">
+                <h3>Provider acknowledgements</h3>
+                <div id="constitution-acks" class="table-wrap"></div>
+                <h3 class="mt-4">Current leases</h3>
+                <div id="constitution-leases" class="table-wrap"></div>
+              </div>
+            </div>
+            <div class="split-grid">
+              <div class="card">
+                <h3>Violation history</h3>
+                <div id="constitution-violations" class="table-wrap"></div>
+              </div>
+              <div class="card">
+                <h3>Run compliance</h3>
+                <div id="constitution-run-compliance" class="table-wrap"></div>
+                <h3 class="mt-4">Reminder sample</h3>
+                <pre id="constitution-reminder" class="code-block"></pre>
+              </div>
+            </div>
+          </div>
+        </section>
 
         <!-- VIEW: Execution control -->
         <section id="view-execution" class="view" data-view-panel="execution" hidden>

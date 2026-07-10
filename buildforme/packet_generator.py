@@ -24,6 +24,9 @@ GOVERNANCE_DOCS = [
     "docs/ARCHITECTURE.md",
     "docs/OPERATING_MODEL.md",
     "docs/ROADMAP.md",
+    "governance/AI_CONSTITUTION.md",
+    "docs/AI_CONSTITUTION.md",
+    "docs/CONSTITUTION_ENGINE.md",
 ]
 
 ALWAYS_FORBIDDEN_ACTIONS = [
@@ -109,6 +112,7 @@ def generate_agent_packet(input_data: dict[str, Any]) -> dict[str, Any]:
 
     # Optional field overrides from form after import
     base = _apply_overrides(base, input_data)
+    base = _inherit_constitution(base)
     base["markdown"] = render_packet_markdown(base)
     return base
 
@@ -348,6 +352,20 @@ def render_packet_markdown(packet: dict[str, Any]) -> str:
         f"- **Auto-merge allowed:** `false` (never granted by Buildforme)",
         f"- **Human approval required:** `{_bool_from_classification(packet, 'required_human_approval')}`",
         "",
+    ]
+    # Constitution binding — version/hash/critical laws only (no full-text dump).
+    from governance.constitution_inheritance import markdown_constitution_block
+
+    binding = packet.get("constitution") if isinstance(packet.get("constitution"), dict) else {
+        "version": packet.get("constitution_version"),
+        "hash": packet.get("constitution_hash"),
+        "law_count": packet.get("constitution_law_count"),
+        "critical_laws": packet.get("constitution_critical_laws") or [],
+        "bypass_forbidden": True,
+    }
+    lines.extend(markdown_constitution_block(binding))
+    lines.extend(
+        [
         "## Mission",
         "",
         str(packet.get("objective") or "").strip() or "(missing objective)",
@@ -360,7 +378,8 @@ def render_packet_markdown(packet: dict[str, Any]) -> str:
         "",
         "Run these first. If the tree is dirty unexpectedly, **stop and report**.",
         "",
-    ]
+        ]
+    )
     for cmd in packet.get("starting_commands") or []:
         lines.append(f"- `{cmd}`")
     lines.extend(["", "## Files to inspect", ""])
@@ -519,8 +538,17 @@ def _assemble_packet(
         "created_at": now,
         "updated_at": now,
     }
+    packet = _inherit_constitution(packet)
     packet["markdown"] = render_packet_markdown(packet)
     return packet
+
+
+def _inherit_constitution(packet: dict[str, Any]) -> dict[str, Any]:
+    """Every packet automatically inherits the Constitution (Stage 5.6)."""
+    from governance.constitution_engine import get_engine
+
+    engine = get_engine()
+    return engine.attach_to_packet(packet)
 
 
 def _apply_overrides(packet: dict[str, Any], input_data: dict[str, Any]) -> dict[str, Any]:
@@ -574,6 +602,7 @@ def _apply_overrides(packet: dict[str, Any], input_data: dict[str, Any]) -> dict
             files_changed=task["files_changed"],
         )
     out["updated_at"] = utc_now_iso()
+    out = _inherit_constitution(out)
     out["markdown"] = render_packet_markdown(out)
     return out
 

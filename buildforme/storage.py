@@ -34,6 +34,8 @@ DEFAULT_RUNS_NAME = "runs.json"
 DEFAULT_RUN_EVENTS_NAME = "run_events.json"
 DEFAULT_RUN_APPROVALS_NAME = "run_approvals.json"
 DEFAULT_EXECUTION_POLICIES_NAME = "execution_policies.json"
+DEFAULT_CONSTITUTION_LEASES_NAME = "constitution_leases.json"
+DEFAULT_CONSTITUTION_VIOLATIONS_NAME = "constitution_violations.json"
 
 LOCK_SCOPES = {"all", "write", "merge", "production", "branch"}
 PROJECT_EXEC_STATUSES = {"enabled", "paused", "locked"}
@@ -137,6 +139,8 @@ class LocalStore:
         self.run_events_path = self.runtime_dir / DEFAULT_RUN_EVENTS_NAME
         self.run_approvals_path = self.runtime_dir / DEFAULT_RUN_APPROVALS_NAME
         self.execution_policies_path = self.runtime_dir / DEFAULT_EXECUTION_POLICIES_NAME
+        self.constitution_leases_path = self.runtime_dir / DEFAULT_CONSTITUTION_LEASES_NAME
+        self.constitution_violations_path = self.runtime_dir / DEFAULT_CONSTITUTION_VIOLATIONS_NAME
 
     # —— Tasks (existing API) ——
 
@@ -974,11 +978,17 @@ class LocalStore:
         if not providers:
             providers = default_provider_registry()
             self._atomic_write(self.providers_path, {"providers": providers})
-        # Force dry-run invariants
+        # Force dry-run invariants + constitution field defaults
         for item in providers:
             item["mode"] = "dry_run"
             item["live_execution_available"] = False
             item["credentials_configured"] = False
+            item.setdefault("constitution_supported", True)
+            item.setdefault("constitution_acknowledged", False)
+            item.setdefault("constitution_version", None)
+            item.setdefault("constitution_hash", None)
+            item.setdefault("constitution_last_refresh", None)
+            item.setdefault("constitution_acknowledged_at", None)
         return providers
 
     def get_provider_record(self, provider_id: str) -> dict[str, Any]:
@@ -1005,6 +1015,128 @@ class LocalStore:
             raise KeyError(f"Provider not found: {provider_id}")
         self._atomic_write(self.providers_path, {"providers": updated_list})
         return found
+
+    def set_provider_constitution_ack(self, provider_id: str, ack: dict[str, Any]) -> dict[str, Any]:
+        """Persist constitution acknowledgement fields only (Stage 5.6).
+
+        Does not accept credentials or live mode. Single authority for provider
+        constitution binding lives in governance.constitution_engine.
+        """
+        allowed = {
+            "constitution_supported",
+            "constitution_acknowledged",
+            "constitution_version",
+            "constitution_hash",
+            "constitution_last_refresh",
+            "constitution_acknowledged_at",
+            "constitution_ack_actor",
+        }
+        providers = self.list_providers()
+        updated_list = []
+        found = None
+        for item in providers:
+            if str(item.get("provider_id")) == str(provider_id):
+                record = dict(item)
+                for key, value in (ack or {}).items():
+                    if key in allowed:
+                        record[key] = value
+                # Hard invariants
+                record["mode"] = "dry_run"
+                record["live_execution_available"] = False
+                record["credentials_configured"] = False
+                record["constitution_supported"] = True
+                record["updated_at"] = utc_now_iso()
+                found = record
+                updated_list.append(record)
+            else:
+                updated_list.append(item)
+        if not found:
+            raise KeyError(f"Provider not found: {provider_id}")
+        self._atomic_write(self.providers_path, {"providers": updated_list})
+        return found
+
+    def save_constitution_lease(self, lease: dict[str, Any]) -> dict[str, Any]:
+        data = self._load_object(
+            self.constitution_leases_path, default={"leases": []}, list_key="leases"
+        )
+        leases = list(data.get("leases") or [])
+        lid = str(lease.get("lease_id") or "")
+        if not lid:
+            raise ValueError("lease_id required")
+        record = dict(lease)
+        record["updated_at"] = utc_now_iso()
+        replaced = False
+        for idx, existing in enumerate(leases):
+            if str(existing.get("lease_id")) == lid:
+                leases[idx] = record
+                replaced = True
+                break
+        if not replaced:
+            leases.insert(0, record)
+        self._atomic_write(self.constitution_leases_path, {"leases": leases[:500]})
+        return record
+
+    def list_constitution_leases(self, *, limit: int = 100, run_id: str | None = None) -> list[dict[str, Any]]:
+        data = self._load_object(
+            self.constitution_leases_path, default={"leases": []}, list_key="leases"
+        )
+        leases = list(data.get("leases") or [])
+        if run_id is not None:
+            leases = [x for x in leases if str(x.get("run_id")) == str(run_id)]
+        return leases[: max(1, min(500, int(limit)))]
+
+    def get_constitution_lease(self, lease_id: str) -> dict[str, Any]:
+        for item in self.list_constitution_leases(limit=500):
+            if str(item.get("lease_id")) == str(lease_id):
+                return item
+        raise KeyError(f"Constitution lease not found: {lease_id}")
+
+    def append_constitution_violation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        data = self._load_object(
+            self.constitution_violations_path, default={"violations": []}, list_key="violations"
+        )
+        violations = list(data.get("violations") or [])
+        record = dict(payload)
+        record.setdefault("id", f"viol-{uuid.uuid4().hex[:12]}")
+        record.setdefault("created_at", utc_now_iso())
+        record.setdefault("type", "constitution_violation")
+        violations.insert(0, record)
+        self._atomic_write(self.constitution_violations_path, {"violations": violations[:1000]})
+        # Also mirror into general events for timeline continuity
+        try:
+            self.append_event(
+                {
+                    "project_id": record.get("project_id"),
+                    "event_type": "constitution_violation",
+                    "summary": f"{record.get('law_id')}: {record.get('name')}",
+                    "metadata": {
+                        "law_id": record.get("law_id"),
+                        "severity": record.get("severity"),
+                        "run_id": record.get("run_id"),
+                        "provider_id": record.get("provider_id"),
+                    },
+                }
+            )
+        except Exception:
+            pass
+        return record
+
+    def list_constitution_violations(
+        self,
+        *,
+        limit: int = 100,
+        law_id: str | None = None,
+        run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        data = self._load_object(
+            self.constitution_violations_path, default={"violations": []}, list_key="violations"
+        )
+        items = list(data.get("violations") or [])
+        if law_id is not None:
+            items = [x for x in items if str(x.get("law_id")) == str(law_id)]
+        if run_id is not None:
+            items = [x for x in items if str(x.get("run_id")) == str(run_id)]
+        return items[: max(1, min(1000, int(limit)))]
 
     def get_execution_policy(self) -> dict[str, Any]:
         default = {
@@ -1138,6 +1270,10 @@ class LocalStore:
             "actor": validate_actor(payload.get("actor") or "shan"),
             "packet_id": payload.get("packet_id"),
             "task_id": payload.get("task_id"),
+            # Stage 5.6 — approvals bind to constitution hash / lease
+            "constitution_version": payload.get("constitution_version"),
+            "constitution_hash": payload.get("constitution_hash"),
+            "constitution_lease_id": payload.get("constitution_lease_id"),
             "created_at": now,
             "updated_at": now,
         }

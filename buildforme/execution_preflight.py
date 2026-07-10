@@ -15,6 +15,7 @@ from buildforme.governance import (
 )
 from buildforme.providers import FORBIDDEN_LIVE_CAPABILITIES, get_provider, provider_supports
 from buildforme.storage import LocalStore, utc_now_iso
+from governance.constitution_engine import get_engine
 
 READ_ONLY_MODES = frozenset({"READ_ONLY_AUDIT", "PLAN_ONLY", "DOCUMENTATION_ONLY", "REVIEW"})
 
@@ -41,6 +42,34 @@ def evaluate_run_preflight(
         add("global_kill_switch", "fail", control.get("reason") or "Kill switch is active")
     else:
         add("global_kill_switch", "pass", "Kill switch inactive")
+
+    # Stage 5.6 constitution binding (lease + provider acknowledgement)
+    engine = get_engine()
+    if str(run.get("constitution_hash") or "").strip() and str(run.get("constitution_lease_id") or "").strip():
+        binding = engine.validate_run(run)
+        if binding["valid"]:
+            add(
+                "constitution_lease",
+                "pass",
+                f"lease {run.get('constitution_lease_id')} hash={str(run.get('constitution_hash') or '')[:12]}",
+            )
+        else:
+            add("constitution_lease", "fail", "; ".join(binding["problems"]))
+    else:
+        add("constitution_lease", "fail", "run missing constitution lease/hash (fail closed)")
+
+    provider_id = str(run.get("provider_id") or "")
+    providers = store.list_providers()
+    provider_for_ack = get_provider(providers, provider_id) if provider_id else None
+    if provider_for_ack:
+        provider_for_ack = engine.attach_to_provider(provider_for_ack)
+        ack = engine.validate_provider(provider_for_ack)
+        if ack["valid"]:
+            add("constitution_provider_ack", "pass", f"{provider_id} acknowledged")
+        else:
+            add("constitution_provider_ack", "fail", "; ".join(ack["problems"]))
+    else:
+        add("constitution_provider_ack", "fail", "provider missing for constitution acknowledgement")
 
     project_id = str(run.get("project_id") or "")
     project = None

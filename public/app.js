@@ -156,6 +156,11 @@ const PAGE_META = {
     title: "Agent packets",
     desc: "Generate tool-neutral instructions for Grok, Codex, Claude, or GLM. No live agent execution.",
   },
+  constitution: {
+    kicker: "Stage 5.6",
+    title: "AI Constitution",
+    desc: "Versioned, hashed, leased engineering law. Every provider, packet, and run inherits it. No bypass.",
+  },
   execution: {
     kicker: "Safety",
     title: "Execution control",
@@ -750,6 +755,124 @@ function showView(name) {
   }
   if (name === "execution" && serverOnline) {
     refreshExecutionPage();
+  }
+  if (name === "constitution" && serverOnline) {
+    refreshConstitutionPage();
+  }
+}
+
+async function refreshConstitutionPage() {
+  const lawsEl = document.querySelector("#constitution-laws");
+  const acksEl = document.querySelector("#constitution-acks");
+  const leasesEl = document.querySelector("#constitution-leases");
+  const violEl = document.querySelector("#constitution-violations");
+  const runsEl = document.querySelector("#constitution-run-compliance");
+  const reminderEl = document.querySelector("#constitution-reminder");
+  if (!lawsEl) return;
+  try {
+    const response = await fetch("/api/constitution");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    const status = data.status || {};
+    document.querySelector("#const-version").textContent = status.version || "—";
+    document.querySelector("#const-hash").textContent = status.hash_short || (status.hash || "").slice(0, 12) || "—";
+    document.querySelector("#const-hash").title = status.hash || "";
+    document.querySelector("#const-laws-count").textContent = String(status.law_count ?? "—");
+    document.querySelector("#const-doc-valid").textContent = status.document_valid ? "valid" : "invalid";
+
+    const laws = data.laws || [];
+    lawsEl.innerHTML = `
+      <table class="data-table">
+        <thead><tr><th>ID</th><th>Name</th><th>Severity</th></tr></thead>
+        <tbody>
+          ${laws
+            .map(
+              (law) => `<tr>
+                <td class="mono">${escapeHtml(law.id || "")}</td>
+                <td>${escapeHtml(law.name || "")}</td>
+                <td><span class="pill risk-${escapeHtml(String(law.severity || "").toLowerCase())}">${escapeHtml(law.severity || "")}</span></td>
+              </tr>`
+            )
+            .join("")}
+        </tbody>
+      </table>`;
+
+    const acks = data.provider_acknowledgements || [];
+    acksEl.innerHTML = `
+      <table class="data-table">
+        <thead><tr><th>Provider</th><th>Ack</th><th>Version</th><th>Refresh</th></tr></thead>
+        <tbody>
+          ${acks
+            .map(
+              (a) => `<tr>
+                <td>${escapeHtml(a.provider_id || "")}</td>
+                <td>${a.constitution_acknowledged ? "yes" : "no"}</td>
+                <td class="mono">${escapeHtml(a.constitution_version || "—")}</td>
+                <td>${a.needs_refresh ? "needed" : "current"}</td>
+              </tr>`
+            )
+            .join("") || `<tr><td colspan="4" class="muted">No providers</td></tr>`}
+        </tbody>
+      </table>`;
+
+    const leases = data.leases || [];
+    leasesEl.innerHTML = `
+      <table class="data-table">
+        <thead><tr><th>Lease</th><th>Run</th><th>Hash</th></tr></thead>
+        <tbody>
+          ${leases
+            .slice(0, 20)
+            .map(
+              (l) => `<tr>
+                <td class="mono">${escapeHtml(String(l.lease_id || "").slice(0, 14))}</td>
+                <td class="mono">${escapeHtml(l.run_id || "—")}</td>
+                <td class="mono" title="${escapeHtml(l.constitution_hash || "")}">${escapeHtml(String(l.hash_short || (l.constitution_hash || "").slice(0, 12)))}</td>
+              </tr>`
+            )
+            .join("") || `<tr><td colspan="3" class="muted">No leases yet</td></tr>`}
+        </tbody>
+      </table>`;
+
+    const violations = data.violations || [];
+    violEl.innerHTML = `
+      <table class="data-table">
+        <thead><tr><th>Law</th><th>Severity</th><th>Evidence</th></tr></thead>
+        <tbody>
+          ${violations
+            .slice(0, 30)
+            .map(
+              (v) => `<tr>
+                <td class="mono">${escapeHtml(v.law_id || "")}</td>
+                <td>${escapeHtml(v.severity || "")}</td>
+                <td>${escapeHtml(String(v.evidence || "").slice(0, 120))}</td>
+              </tr>`
+            )
+            .join("") || `<tr><td colspan="3" class="muted">No violations recorded</td></tr>`}
+        </tbody>
+      </table>`;
+
+    const runs = data.run_compliance || [];
+    runsEl.innerHTML = `
+      <table class="data-table">
+        <thead><tr><th>Run</th><th>Status</th><th>Bound</th><th>Compliance</th></tr></thead>
+        <tbody>
+          ${runs
+            .slice(0, 20)
+            .map(
+              (r) => `<tr>
+                <td class="mono">${escapeHtml(String(r.run_id || "").slice(0, 14))}</td>
+                <td>${escapeHtml(r.status || "")}</td>
+                <td>${r.binding_valid ? "yes" : "no"}</td>
+                <td>${escapeHtml((r.compliance && r.compliance.status) || "—")}</td>
+              </tr>`
+            )
+            .join("") || `<tr><td colspan="4" class="muted">No runs</td></tr>`}
+        </tbody>
+      </table>`;
+
+    reminderEl.textContent = (data.reminder_sample && data.reminder_sample.text) || "";
+  } catch (error) {
+    lawsEl.innerHTML = `<p class="muted">Failed to load constitution: ${escapeHtml(error.message)}</p>`;
   }
 }
 
@@ -2161,6 +2284,24 @@ document.querySelector("#ex-run-create")?.addEventListener("click", async () => 
     await viewRun(data.run.id);
   } catch (error) {
     showFeedback("#ex-feedback", error.message, "is-error");
+  }
+});
+
+document.querySelector("#constitution-reload-btn")?.addEventListener("click", () => {
+  refreshConstitutionPage();
+});
+document.querySelector("#constitution-refresh-btn")?.addEventListener("click", async () => {
+  try {
+    const response = await fetch("/api/constitution/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ actor: "shan" }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    await refreshConstitutionPage();
+  } catch (error) {
+    alert(error.message || "Constitution refresh failed");
   }
 });
 

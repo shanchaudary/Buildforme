@@ -38,7 +38,7 @@ SAMPLE_PROJECT_PATH = PROJECT_ROOT / "data" / "sample_project.json"
 
 
 class BuildformeRequestHandler(BaseHTTPRequestHandler):
-    server_version = "BuildformeMVP/0.6"
+    server_version = "BuildformeMVP/0.6.5"
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urllib.parse.urlparse(self.path)
@@ -128,10 +128,51 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/providers/"):
             provider_id = path.removeprefix("/api/providers/").strip("/")
+            if provider_id.endswith("/acknowledge-constitution"):
+                self._json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "use POST"})
+                return
             try:
                 self._json(HTTPStatus.OK, {"provider": self._store().get_provider_record(provider_id)})
             except KeyError as exc:
                 self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            return
+        if path == "/api/constitution":
+            from governance.constitution_engine import get_engine
+
+            engine = get_engine()
+            self._json(HTTPStatus.OK, engine.dashboard_payload(self._store()))
+            return
+        if path == "/api/constitution/status":
+            from governance.constitution_engine import get_engine
+
+            self._json(HTTPStatus.OK, {"status": get_engine().status()})
+            return
+        if path == "/api/constitution/laws":
+            from governance.constitution_engine import get_engine
+
+            engine = get_engine()
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "version": engine.version(),
+                    "hash": engine.content_hash(),
+                    "laws": engine.laws(),
+                },
+            )
+            return
+        if path == "/api/constitution/violations":
+            limit = _safe_int(_first_query_value(parsed, "limit"), default=100, maximum=500)
+            self._json(
+                HTTPStatus.OK,
+                {"violations": self._store().list_constitution_violations(limit=limit)},
+            )
+            return
+        if path == "/api/constitution/leases":
+            limit = _safe_int(_first_query_value(parsed, "limit"), default=50, maximum=200)
+            self._json(
+                HTTPStatus.OK,
+                {"leases": self._store().list_constitution_leases(limit=limit)},
+            )
             return
         if path == "/api/runs":
             project_id = _first_query_value(parsed, "project_id")
@@ -176,6 +217,16 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
         path = parsed.path
         if path == "/api/classify":
             self._classify(save=False)
+            return
+        if path == "/api/constitution/validate":
+            self._constitution_validate()
+            return
+        if path == "/api/constitution/refresh":
+            self._constitution_refresh()
+            return
+        if path.startswith("/api/providers/") and path.endswith("/acknowledge-constitution"):
+            provider_id = path.removeprefix("/api/providers/").removesuffix("/acknowledge-constitution").strip("/")
+            self._provider_acknowledge_constitution(provider_id)
             return
         if path == "/api/tasks":
             self._classify(save=True)
@@ -640,6 +691,121 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
         except Exception as exc:  # noqa: BLE001
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def _constitution_validate(self) -> None:
+        from governance.constitution_engine import get_engine
+
+        try:
+            body = self._read_json() if self.headers.get("Content-Length") else {}
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        engine = get_engine()
+        if body.get("output") is not None:
+            result = engine.validate_output(body.get("output"), context=body.get("context") or {})
+            if not result.get("passed", True):
+                engine.record_validation_violations(
+                    self._store(),
+                    result,
+                    run_id=body.get("run_id"),
+                    packet_id=body.get("packet_id"),
+                    provider_id=body.get("provider_id"),
+                    lease_id=body.get("lease_id"),
+                )
+            self._json(HTTPStatus.OK, result)
+            return
+        self._json(HTTPStatus.OK, engine.full_validation_suite(self._store()))
+
+    def _constitution_refresh(self) -> None:
+        from governance.constitution_engine import get_engine
+
+        try:
+            body = self._read_json() if int(self.headers.get("Content-Length") or 0) else {}
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        engine = get_engine()
+        store = self._store()
+        provider_id = body.get("provider_id")
+        targets = [provider_id] if provider_id else [p.get("provider_id") for p in store.list_providers()]
+        results = []
+        for pid in targets:
+            if not pid:
+                continue
+            try:
+                provider = store.get_provider_record(str(pid))
+            except KeyError:
+                continue
+            refreshed = engine.refresh_provider(provider, actor=str(body.get("actor") or "shan"))
+            saved = store.set_provider_constitution_ack(
+                str(pid),
+                {
+                    "constitution_supported": True,
+                    "constitution_acknowledged": True,
+                    "constitution_version": refreshed.get("constitution_version"),
+                    "constitution_hash": refreshed.get("constitution_hash"),
+                    "constitution_last_refresh": refreshed.get("constitution_last_refresh"),
+                    "constitution_acknowledged_at": refreshed.get("constitution_acknowledged_at"),
+                    "constitution_ack_actor": refreshed.get("constitution_ack_actor"),
+                },
+            )
+            results.append(
+                {
+                    "provider_id": pid,
+                    "acknowledged": saved.get("constitution_acknowledged"),
+                    "version": saved.get("constitution_version"),
+                    "hash": saved.get("constitution_hash"),
+                }
+            )
+        self._json(
+            HTTPStatus.OK,
+            {
+                "version": engine.version(),
+                "hash": engine.content_hash(),
+                "refreshed": results,
+                "reminder_sample": engine.reminder(phase="provider_refresh"),
+            },
+        )
+
+    def _provider_acknowledge_constitution(self, provider_id: str) -> None:
+        from governance.constitution_engine import get_engine
+
+        try:
+            body = self._read_json() if int(self.headers.get("Content-Length") or 0) else {}
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        engine = get_engine()
+        store = self._store()
+        try:
+            provider = store.get_provider_record(provider_id)
+        except KeyError as exc:
+            self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            return
+        refreshed = engine.acknowledge_provider(provider, actor=str(body.get("actor") or "shan"))
+        saved = store.set_provider_constitution_ack(
+            provider_id,
+            {
+                "constitution_supported": True,
+                "constitution_acknowledged": True,
+                "constitution_version": refreshed.get("constitution_version"),
+                "constitution_hash": refreshed.get("constitution_hash"),
+                "constitution_last_refresh": refreshed.get("constitution_last_refresh"),
+                "constitution_acknowledged_at": refreshed.get("constitution_acknowledged_at"),
+                "constitution_ack_actor": refreshed.get("constitution_ack_actor"),
+            },
+        )
+        self._json(
+            HTTPStatus.OK,
+            {
+                "provider": saved,
+                "full_constitution_delivered": True,
+                "policy": "subsequent_executions_receive_reminder_only",
+            },
+        )
 
     def _put_provider(self, provider_id: str) -> None:
         try:

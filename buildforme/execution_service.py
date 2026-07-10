@@ -25,6 +25,7 @@ from buildforme.governance import (
 from buildforme.providers import get_provider
 from buildforme.run_state import can_transition, is_terminal, transition_run
 from buildforme.storage import LocalStore, utc_now_iso
+from governance.constitution_engine import get_engine
 
 DEFAULT_BUDGET = {
     "max_tokens": None,
@@ -51,10 +52,21 @@ def create_run(store: LocalStore, payload: dict[str, Any]) -> dict[str, Any]:
     if str(provider.get("mode")) != "dry_run" or provider.get("live_execution_available"):
         raise ValueError("provider must be dry_run only")
 
+    engine = get_engine()
+    # LAW-020: no provider executes without constitution acknowledgement.
+    provider = engine.attach_to_provider(provider)
+    ack = engine.validate_provider(provider)
+    if not ack["valid"]:
+        raise ValueError(
+            "provider has not acknowledged the Constitution: " + "; ".join(ack["problems"])
+        )
+
     packet = payload.get("packet") if isinstance(payload.get("packet"), dict) else None
     packet_id = payload.get("packet_id")
     if not packet and packet_id:
         packet = store.get_packet(str(packet_id))
+    if isinstance(packet, dict) and not packet.get("constitution_hash"):
+        packet = engine.attach_to_packet(packet)
 
     risk = str(payload.get("risk") or (packet or {}).get("risk") or "YELLOW").upper()
     mode = str(payload.get("operating_mode") or (packet or {}).get("operating_mode") or "IMPLEMENTATION").upper()
@@ -115,6 +127,9 @@ def create_run(store: LocalStore, payload: dict[str, Any]) -> dict[str, Any]:
         "live_execution": False,
         "mode": "dry_run",
     }
+    # Stage 5.6: immutable constitution lease for this run
+    run = engine.attach_to_run(run, actor="system")
+    store.save_constitution_lease(run["constitution_lease"])
     run["scope_fingerprint"] = compute_run_scope_fingerprint(run, packet)
 
     # Policy scan on all material text
@@ -128,7 +143,17 @@ def create_run(store: LocalStore, payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"sensitive paths cannot be allowed: {sensitive[:5]}")
 
     saved = store.save_run(run)
-    store.append_run_event(saved["id"], "run_created", "Draft supervised run created", actor="system")
+    store.append_run_event(
+        saved["id"],
+        "run_created",
+        "Draft supervised run created",
+        actor="system",
+        metadata={
+            "constitution_version": saved.get("constitution_version"),
+            "constitution_hash": saved.get("constitution_hash"),
+            "constitution_lease_id": saved.get("constitution_lease_id"),
+        },
+    )
     return saved
 
 
@@ -199,8 +224,8 @@ def record_run_approval(
 
     packet = run.get("packet") if isinstance(run.get("packet"), dict) else None
     fingerprint = compute_run_scope_fingerprint(run, packet)
-
-    record = store.save_run_approval(
+    engine = get_engine()
+    approval_payload = engine.attach_to_approval(
         {
             "run_id": run_id,
             "requirement_type": requirement_type,
@@ -211,8 +236,11 @@ def record_run_approval(
             "actor": actor,
             "packet_id": run.get("packet_id"),
             "task_id": run.get("task_id"),
-        }
+        },
+        run=run,
     )
+
+    record = store.save_run_approval(approval_payload)
     store.append_run_event(
         run_id,
         "approval_recorded",
@@ -286,11 +314,35 @@ def execute_dry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
     if control.get("kill_switch_active"):
         raise ValueError("kill switch active")
 
+    # Stage 5.6: revalidate constitution lease + provider acknowledgement at dry-run
+    engine = get_engine()
+    providers = store.list_providers()
+    provider = get_provider(providers, str(run.get("provider_id") or ""))
+    if not provider:
+        raise ValueError("provider missing at dry-run")
+    provider = engine.attach_to_provider(provider)
+    ack = engine.validate_provider(provider)
+    if not ack["valid"]:
+        raise ValueError("provider constitution acknowledgement invalid: " + "; ".join(ack["problems"]))
+    binding = engine.validate_run(run)
+    if not binding["valid"]:
+        raise ValueError("run constitution binding invalid: " + "; ".join(binding["problems"]))
+
     run = transition_run(run, "queued", "system", "dry-run queued")
     run = transition_run(run, "starting", "system", "dry-run starting")
     run = transition_run(run, "running", "system", "dry-run running")
     store.save_run(run)
-    store.append_run_event(run_id, "dry_run_started", "Dry-run adapter invoked", actor="system")
+    store.append_run_event(
+        run_id,
+        "dry_run_started",
+        "Dry-run adapter invoked",
+        actor="system",
+        metadata={
+            "constitution_lease_id": run.get("constitution_lease_id"),
+            "constitution_hash": run.get("constitution_hash"),
+            "constitution_reminder": (run.get("constitution_reminder") or {}).get("phase"),
+        },
+    )
 
     packet = run.get("packet") if isinstance(run.get("packet"), dict) else {}
     if not packet and run.get("packet_id"):
@@ -301,9 +353,52 @@ def execute_dry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
 
     adapter = DryRunAdapter(provider_id=str(run.get("provider_id") or "dry_run"))
     result = adapter.dry_run(run, packet)
+    # Validate dry-run output claims against constitution (no live work)
+    validation = engine.validate_output(
+        {
+            "summary": result.get("summary"),
+            "text": str(result.get("summary") or ""),
+            "claims_complete": True,
+            "evidence": ["dry_run_adapter", "no_network", "no_shell"],
+            "tests": ["dry_run_invariants"],
+        },
+        context={
+            "verified_capabilities": ["dry_run"],
+            "acceptance_criteria": (packet or {}).get("acceptance_criteria") or [],
+        },
+    )
+    if not validation.get("passed", True):
+        engine.record_validation_violations(
+            store,
+            validation,
+            run_id=run_id,
+            packet_id=str(run.get("packet_id") or "") or None,
+            provider_id=str(run.get("provider_id") or "") or None,
+            lease_id=str(run.get("constitution_lease_id") or "") or None,
+        )
+        run = store.get_run(run_id)
+        run["constitution_compliance"] = {
+            "status": "violations",
+            "violations": validation.get("violations") or [],
+            "validated_at": utc_now_iso(),
+        }
+        store.save_run(run)
+        raise ValueError("constitution validation rejected dry-run completion")
+
     run = store.get_run(run_id)
     run["dry_run_result"] = result
     run["result_summary"] = result.get("summary")
+    run["constitution_compliance"] = {
+        "status": "compliant",
+        "violations": [],
+        "validated_at": utc_now_iso(),
+        "reminder_phase": "completion",
+    }
+    # Phase reminder at completion (compact, not full constitution)
+    run["constitution_reminder"] = engine.reminder(
+        phase="completion",
+        lease=run.get("constitution_lease") if isinstance(run.get("constitution_lease"), dict) else None,
+    )
     run = transition_run(run, "needs_review", "system", "dry-run complete")
     run = transition_run(run, "completed", "system", "dry-run accepted as completed (no live work)")
     saved = store.save_run(run)
@@ -312,9 +407,15 @@ def execute_dry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
         "dry_run_completed",
         result.get("summary") or "completed",
         actor="system",
-        metadata={"network_calls": [], "github_writes": [], "shell_commands_executed": []},
+        metadata={
+            "network_calls": [],
+            "github_writes": [],
+            "shell_commands_executed": [],
+            "constitution_compliance": "compliant",
+            "constitution_hash": saved.get("constitution_hash"),
+        },
     )
-    return {"run": saved, "dry_run": result}
+    return {"run": saved, "dry_run": result, "constitution_validation": validation}
 
 
 def cancel_run(store: LocalStore, run_id: str, *, actor: str = "shan", reason: str = "") -> dict[str, Any]:

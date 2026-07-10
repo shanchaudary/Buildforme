@@ -44,6 +44,7 @@ It:
 | 4 Chief planner | #3 | Projects, roadmap, truth, ranking, briefing |
 | 5 Execution safety | #4 | Kill switch, locks, run state machine, preflight, dry-run providers |
 | 5.5 Governance hardening | #5 → Stage 5 branch; **#7 → main** | Adversarial fixes, fingerprints, fail-closed controls |
+| 5.6 AI Constitution | *(this branch → PR)* | Constitutional law engine, leases, inheritance, UI |
 
 ### Closed / do not reopen
 
@@ -114,6 +115,16 @@ It:
 - Doc: `docs/STAGE_5_5_GOVERNANCE_VALIDATION.md`
 - CLI: `python -m buildforme.cli governance-validate`
 
+### Stage 5.6 — AI Constitution & Governance Engine
+- `governance/AI_CONSTITUTION.json` + `.md` — 20 immutable engineering laws
+- `governance/constitution_*.py` — hash, lease, inheritance, validator, audit, engine
+- Packets/runs/approvals/providers inherit constitution version + hash
+- Provider must acknowledge before run create; leases immutable per run
+- Compact reminders (not full re-inject every prompt)
+- UI: Constitution page; CLI: `constitution-status|validate|refresh|export`
+- Docs: `docs/AI_CONSTITUTION.md`, `CONSTITUTION_ENGINE.md`, `CONSTITUTION_LEASES.md`, `ENGINEERING_LAWS.md`
+- **Still no live providers / secrets / GitHub writes / Stage 6**
+
 ---
 
 ## 4. Safety laws (never weaken)
@@ -145,6 +156,9 @@ python -m buildforme.cli generate-packet data/sample_task.json
 python -m buildforme.cli load-sample-project
 python -m buildforme.cli plan buildforme --local-only
 python -m buildforme.cli governance-validate
+python -m buildforme.cli constitution-validate
+python -m buildforme.cli constitution-refresh
+python -m buildforme.cli constitution-status
 python -m buildforme.cli serve
 # open http://127.0.0.1:8787
 ```

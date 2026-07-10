@@ -32,6 +32,23 @@ class _Fixture(unittest.TestCase):
             (Path(__file__).resolve().parent.parent / "data" / "sample_project.json").read_text(encoding="utf-8")
         )
         self.store.load_sample_project(sample, replace=True)
+        from governance.constitution_engine import get_engine
+
+        engine = get_engine()
+        for provider in self.store.list_providers():
+            refreshed = engine.acknowledge_provider(provider, actor="shan")
+            self.store.set_provider_constitution_ack(
+                str(provider["provider_id"]),
+                {
+                    "constitution_supported": True,
+                    "constitution_acknowledged": True,
+                    "constitution_version": refreshed["constitution_version"],
+                    "constitution_hash": refreshed["constitution_hash"],
+                    "constitution_last_refresh": refreshed["constitution_last_refresh"],
+                    "constitution_acknowledged_at": refreshed["constitution_acknowledged_at"],
+                    "constitution_ack_actor": "shan",
+                },
+            )
         packet = generate_agent_packet(
             {
                 "source_type": "manual",

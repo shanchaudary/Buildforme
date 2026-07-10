@@ -18,6 +18,7 @@ Implemented in this branch:
 - **Stage 2 GitHub Work Queue**: open PRs/issues, CI status, risk, recommended next task, local-only approvals.
 - **Stage 3 Agent Packet Generator**: tool-neutral handoff packets for Grok/Codex/Claude/GLM (no live execution).
 - **Stage 4 Chief Planner**: projects, roadmap, project truth, deterministic next-action ranking, founder briefing.
+- **Stage 5 Execution Safety Foundation**: kill switch, locks, run state machine, preflight, dry-run providers only.
 - Optional read-only GitHub inspection for repositories, issues, pull requests, changed files, and commit checks.
 - GitHub issue template for agent tasks.
 - Pull request template with supervision gates.
@@ -102,7 +103,19 @@ http://127.0.0.1:8787
 6. **Agent packets** — generate / copy / save / download handoff packets  
 7. **Chief planner** — ranked next action, blockers, briefing  
 8. **Projects** — registry, roadmap stages, planned tasks, project truth  
-9. **Risk policy** — GREEN/YELLOW/RED/BLACK guide  
+9. **Execution control** — kill switch, locks, dry-run supervised runs  
+10. **Risk policy** — GREEN/YELLOW/RED/BLACK guide  
+
+### Execution safety (Stage 5)
+
+```bash
+python -m buildforme.cli execution-status
+python -m buildforme.cli providers
+python -m buildforme.cli kill-switch on --reason "maintenance"
+python -m buildforme.cli kill-switch off --reason "clear"
+```
+
+All providers are **dry-run only**. No live Run button. No credentials stored.
 
 ### Chief planner
 

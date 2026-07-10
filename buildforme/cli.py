@@ -127,6 +127,99 @@ def briefing_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def execution_status_command(args: argparse.Namespace) -> int:
+    from buildforme.storage import LocalStore
+
+    store = LocalStore(args.state)
+    control = store.get_execution_control()
+    locks = store.list_repository_locks(active_only=True)
+    runs = [r for r in store.list_runs() if r.get("status") not in {"completed", "cancelled", "failed", "rejected", "preflight_failed", "blocked", "timed_out"}]
+    payload = {
+        "control": control,
+        "active_locks": locks,
+        "active_or_open_runs": runs,
+        "providers": store.list_providers(),
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"Kill switch: {'ON' if control.get('kill_switch_active') else 'off'}")
+        print(f"Reason: {control.get('reason') or '(none)'}")
+        print(f"Active locks: {len(locks)}")
+        print(f"Open runs: {len(runs)}")
+        print("Providers: " + ", ".join(f"{p.get('provider_id')}=dry_run" for p in payload["providers"]))
+    return 0
+
+
+def kill_switch_command(args: argparse.Namespace) -> int:
+    from buildforme.storage import LocalStore
+
+    store = LocalStore(args.state)
+    active = args.state_arg == "on"
+    control = store.set_execution_control(kill_switch_active=active, reason=args.reason, actor="cli")
+    print(json.dumps(control, indent=2, sort_keys=True))
+    return 0
+
+
+def providers_command(args: argparse.Namespace) -> int:
+    from buildforme.storage import LocalStore
+
+    providers = LocalStore(args.state).list_providers()
+    if args.json:
+        print(json.dumps({"providers": providers}, indent=2, sort_keys=True))
+    else:
+        for p in providers:
+            print(
+                f"{p.get('provider_id')}: enabled={p.get('enabled')} mode={p.get('mode')} "
+                f"live={p.get('live_execution_available')} creds={p.get('credentials_configured')}"
+            )
+    return 0
+
+
+def run_create_command(args: argparse.Namespace) -> int:
+    from buildforme.execution_service import create_run
+    from buildforme.storage import LocalStore
+
+    store = LocalStore(args.state)
+    run = create_run(
+        store,
+        {
+            "project_id": args.project,
+            "provider_id": args.provider,
+            "packet_id": args.packet_id,
+            "target_branch": args.branch,
+        },
+    )
+    print(json.dumps(run, indent=2, sort_keys=True))
+    return 0
+
+
+def run_preflight_command(args: argparse.Namespace) -> int:
+    from buildforme.execution_service import run_preflight
+    from buildforme.storage import LocalStore
+
+    result = run_preflight(LocalStore(args.state), args.run_id)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get("preflight", {}).get("passed") else 2
+
+
+def run_dry_run_command(args: argparse.Namespace) -> int:
+    from buildforme.execution_service import execute_dry_run
+    from buildforme.storage import LocalStore
+
+    result = execute_dry_run(LocalStore(args.state), args.run_id)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def run_events_command(args: argparse.Namespace) -> int:
+    from buildforme.storage import LocalStore
+
+    events = LocalStore(args.state).list_run_events(args.run_id)
+    print(json.dumps({"events": events}, indent=2, sort_keys=True))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Buildforme supervisor CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -167,6 +260,45 @@ def build_parser() -> argparse.ArgumentParser:
     briefing_parser.add_argument("--state", default="runtime/buildforme_state.json")
     briefing_parser.add_argument("--json", action="store_true")
     briefing_parser.set_defaults(func=briefing_command)
+
+    exec_parser = subparsers.add_parser("execution-status", help="Show kill switch, locks, active runs")
+    exec_parser.add_argument("--state", default="runtime/buildforme_state.json")
+    exec_parser.add_argument("--json", action="store_true")
+    exec_parser.set_defaults(func=execution_status_command)
+
+    kill_parser = subparsers.add_parser("kill-switch", help="Activate or deactivate global kill switch")
+    kill_parser.add_argument("state_arg", choices=["on", "off"])
+    kill_parser.add_argument("--reason", default="")
+    kill_parser.add_argument("--state", default="runtime/buildforme_state.json")
+    kill_parser.set_defaults(func=kill_switch_command)
+
+    providers_parser = subparsers.add_parser("providers", help="List dry-run provider profiles")
+    providers_parser.add_argument("--state", default="runtime/buildforme_state.json")
+    providers_parser.add_argument("--json", action="store_true")
+    providers_parser.set_defaults(func=providers_command)
+
+    run_create = subparsers.add_parser("run-create", help="Create draft supervised run from packet id")
+    run_create.add_argument("packet_id")
+    run_create.add_argument("--project", required=True)
+    run_create.add_argument("--provider", default="codex")
+    run_create.add_argument("--branch", required=True)
+    run_create.add_argument("--state", default="runtime/buildforme_state.json")
+    run_create.set_defaults(func=run_create_command)
+
+    run_pre = subparsers.add_parser("run-preflight", help="Run preflight on a supervised run")
+    run_pre.add_argument("run_id")
+    run_pre.add_argument("--state", default="runtime/buildforme_state.json")
+    run_pre.set_defaults(func=run_preflight_command)
+
+    run_dry = subparsers.add_parser("run-dry-run", help="Execute dry-run for an approved run")
+    run_dry.add_argument("run_id")
+    run_dry.add_argument("--state", default="runtime/buildforme_state.json")
+    run_dry.set_defaults(func=run_dry_run_command)
+
+    run_events = subparsers.add_parser("run-events", help="List events for a run")
+    run_events.add_argument("run_id")
+    run_events.add_argument("--state", default="runtime/buildforme_state.json")
+    run_events.set_defaults(func=run_events_command)
     return parser
 
 

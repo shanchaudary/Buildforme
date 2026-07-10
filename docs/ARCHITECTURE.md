@@ -82,6 +82,24 @@ dashboard Chief planner / Projects
 optional → packet_generator.py (Stage 3 handoff)
 ```
 
+### Stage 5 — Execution safety foundation
+
+```text
+kill switch / project execution control / repository locks
+    ↓
+supervised run record (state machine)
+    ↓
+execution_preflight.py  (deny-by-default checks)
+    ↓
+local approvals (not GitHub)
+    ↓
+DryRunAdapter  (no network / shell / GitHub writes)
+    ↓
+append-only run_events.json
+```
+
+Live provider calls are forbidden until a later stage.
+
 ## Future Components
 
 ```text
@@ -93,15 +111,9 @@ Agent packet generator (Stage 3 — implemented)
     ↓
 Chief planner / roadmap brain (Stage 4 — implemented)
     ↓
-Execution adapter foundation (Stage 5)
-    ├── Claude adapter contract
-    ├── Codex adapter contract
-    ├── Grok adapter contract
-    └── GLM adapter contract
+Execution safety foundation (Stage 5 — implemented, dry-run only)
     ↓
-Supervised agent runs (later)
-    ↓
-Approval queue / kill switch
+Supervised live agent pilot (Stage 6 — one provider, no merge/deploy)
     ↓
 Human merge decision (never auto-merge by default)
 ```

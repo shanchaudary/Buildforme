@@ -17,6 +17,14 @@ from pathlib import Path
 from typing import Any
 
 from buildforme.briefing import build_founder_briefing
+from buildforme.execution_service import (
+    cancel_run,
+    create_run,
+    execute_dry_run,
+    record_run_approval,
+    retry_run,
+    run_preflight,
+)
 from buildforme.github_client import GitHubClient, GitHubClientError
 from buildforme.packet_generator import generate_agent_packet
 from buildforme.planner import plan_project, recommendation_to_packet_input
@@ -30,7 +38,7 @@ SAMPLE_PROJECT_PATH = PROJECT_ROOT / "data" / "sample_project.json"
 
 
 class BuildformeRequestHandler(BaseHTTPRequestHandler):
-    server_version = "BuildformeMVP/0.5"
+    server_version = "BuildformeMVP/0.6"
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urllib.parse.urlparse(self.path)
@@ -101,6 +109,52 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/briefing":
             self._json(HTTPStatus.OK, {"last_generated_at": self._store().last_briefing_at()})
+            return
+        if path == "/api/execution/control":
+            self._json(HTTPStatus.OK, {"control": self._store().get_execution_control()})
+            return
+        if path == "/api/execution/policy":
+            self._json(HTTPStatus.OK, {"policy": self._store().get_execution_policy()})
+            return
+        if path == "/api/repository-locks":
+            active = (_first_query_value(parsed, "active") or "").lower() in {"1", "true", "yes"}
+            self._json(
+                HTTPStatus.OK,
+                {"locks": self._store().list_repository_locks(active_only=active)},
+            )
+            return
+        if path == "/api/providers":
+            self._json(HTTPStatus.OK, {"providers": self._store().list_providers()})
+            return
+        if path.startswith("/api/providers/"):
+            provider_id = path.removeprefix("/api/providers/").strip("/")
+            try:
+                self._json(HTTPStatus.OK, {"provider": self._store().get_provider_record(provider_id)})
+            except KeyError as exc:
+                self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            return
+        if path == "/api/runs":
+            project_id = _first_query_value(parsed, "project_id")
+            self._json(HTTPStatus.OK, {"runs": self._store().list_runs(project_id=project_id)})
+            return
+        if path.startswith("/api/runs/") and path.endswith("/events"):
+            run_id = path.removeprefix("/api/runs/").removesuffix("/events").strip("/")
+            self._json(HTTPStatus.OK, {"events": self._store().list_run_events(run_id)})
+            return
+        if path.startswith("/api/runs/"):
+            run_id = path.removeprefix("/api/runs/").strip("/")
+            try:
+                run = self._store().get_run(run_id)
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        "run": run,
+                        "events": self._store().list_run_events(run_id),
+                        "approvals": self._store().list_run_approvals(run_id),
+                    },
+                )
+            except KeyError as exc:
+                self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
             return
         if path.startswith("/api/projects/"):
             if self._get_project_routes(path, parsed):
@@ -176,10 +230,49 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             # /api/projects/{id}/recommendation/{target_id}/packet
             self._packet_from_recommendation(path)
             return
+        if path == "/api/repository-locks":
+            self._create_lock()
+            return
+        if path == "/api/runs":
+            self._create_run()
+            return
+        if path.startswith("/api/runs/") and path.endswith("/preflight"):
+            self._run_action(path, "preflight")
+            return
+        if path.startswith("/api/runs/") and path.endswith("/approve"):
+            self._run_action(path, "approve")
+            return
+        if path.startswith("/api/runs/") and path.endswith("/reject"):
+            self._run_action(path, "reject")
+            return
+        if path.startswith("/api/runs/") and path.endswith("/dry-run"):
+            self._run_action(path, "dry-run")
+            return
+        if path.startswith("/api/runs/") and path.endswith("/cancel"):
+            self._run_action(path, "cancel")
+            return
+        if path.startswith("/api/runs/") and path.endswith("/retry"):
+            self._run_action(path, "retry")
+            return
         self._json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
     def do_PUT(self) -> None:  # noqa: N802
         path = urllib.parse.urlparse(self.path).path
+        if path == "/api/execution/control":
+            self._put_execution_control()
+            return
+        if path.startswith("/api/projects/") and path.endswith("/execution-control"):
+            project_id = path.removeprefix("/api/projects/").removesuffix("/execution-control").strip("/")
+            self._put_project_execution_control(project_id)
+            return
+        if path.startswith("/api/repository-locks/") and path.endswith("/release"):
+            lock_id = path.removeprefix("/api/repository-locks/").removesuffix("/release").strip("/")
+            self._release_lock(lock_id)
+            return
+        if path.startswith("/api/providers/"):
+            provider_id = path.removeprefix("/api/providers/").strip("/")
+            self._put_provider(provider_id)
+            return
         if path.startswith("/api/projects/") and path.count("/") == 3:
             project_id = path.removeprefix("/api/projects/").strip("/")
             self._upsert_project(project_id=project_id)
@@ -479,10 +572,165 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             if resource == "recommendation":
                 self._plan_project(project_id, refresh=False, recommendation_only=True)
                 return True
+            if resource == "execution-control":
+                self._json(
+                    HTTPStatus.OK,
+                    {"control": self._store().get_project_execution_control(project_id)},
+                )
+                return True
         except KeyError as exc:
             self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
             return True
         return False
+
+    def _put_execution_control(self) -> None:
+        try:
+            payload = self._read_json()
+            if not isinstance(payload, dict):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
+                return
+            control = self._store().set_execution_control(
+                kill_switch_active=bool(payload.get("kill_switch_active")),
+                reason=str(payload.get("reason") or ""),
+                actor=str(payload.get("actor") or "shan"),
+            )
+            self._json(HTTPStatus.OK, {"control": control})
+        except Exception as exc:  # noqa: BLE001
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def _put_project_execution_control(self, project_id: str) -> None:
+        try:
+            payload = self._read_json()
+            if not isinstance(payload, dict):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
+                return
+            control = self._store().set_project_execution_control(
+                project_id,
+                execution_status=str(payload.get("execution_status") or "enabled"),
+                reason=str(payload.get("reason") or ""),
+            )
+            self._json(HTTPStatus.OK, {"control": control})
+        except (KeyError, ValueError) as exc:
+            code = HTTPStatus.NOT_FOUND if isinstance(exc, KeyError) else HTTPStatus.BAD_REQUEST
+            self._json(code, {"error": str(exc)})
+
+    def _create_lock(self) -> None:
+        try:
+            payload = self._read_json()
+            if not isinstance(payload, dict):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
+                return
+            lock = self._store().create_repository_lock(payload)
+            self._json(HTTPStatus.OK, {"lock": lock})
+        except (json.JSONDecodeError, ValueError) as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def _release_lock(self, lock_id: str) -> None:
+        try:
+            payload = self._read_json() if int(self.headers.get("Content-Length") or "0") else {}
+            if not isinstance(payload, dict):
+                payload = {}
+            lock = self._store().release_repository_lock(lock_id, reason=str(payload.get("reason") or ""))
+            self._json(HTTPStatus.OK, {"lock": lock})
+        except KeyError as exc:
+            self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+        except Exception as exc:  # noqa: BLE001
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def _put_provider(self, provider_id: str) -> None:
+        try:
+            payload = self._read_json()
+            if not isinstance(payload, dict):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
+                return
+            # Reject credential fields
+            for key in payload:
+                low = str(key).lower()
+                if any(x in low for x in ("token", "secret", "password", "credential", "api_key")):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "credential fields are not accepted"})
+                    return
+            provider = self._store().update_provider(provider_id, payload)
+            self._json(HTTPStatus.OK, {"provider": provider})
+        except KeyError as exc:
+            self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+        except Exception as exc:  # noqa: BLE001
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def _create_run(self) -> None:
+        try:
+            payload = self._read_json()
+            if not isinstance(payload, dict):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON object required"})
+                return
+            run = create_run(self._store(), payload)
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "run": run,
+                    "note": "Draft supervised run created. Dry-run only. No live provider execution.",
+                },
+            )
+        except (KeyError, ValueError, json.JSONDecodeError) as exc:
+            code = HTTPStatus.NOT_FOUND if isinstance(exc, KeyError) else HTTPStatus.BAD_REQUEST
+            self._json(code, {"error": str(exc)})
+
+    def _run_action(self, path: str, action: str) -> None:
+        run_id = path.removeprefix("/api/runs/").rsplit("/", 1)[0].strip("/")
+        try:
+            payload = self._read_json() if int(self.headers.get("Content-Length") or "0") else {}
+            if not isinstance(payload, dict):
+                payload = {}
+            store = self._store()
+            if action == "preflight":
+                result = run_preflight(store, run_id)
+                self._json(HTTPStatus.OK, result)
+                return
+            if action == "approve":
+                result = record_run_approval(
+                    store,
+                    run_id,
+                    requirement_type=str(payload.get("requirement_type") or "shan_task_approval"),
+                    decision="approved",
+                    note=str(payload.get("note") or ""),
+                    actor=str(payload.get("actor") or "shan"),
+                )
+                self._json(HTTPStatus.OK, result)
+                return
+            if action == "reject":
+                result = record_run_approval(
+                    store,
+                    run_id,
+                    requirement_type=str(payload.get("requirement_type") or "shan_task_approval"),
+                    decision="rejected",
+                    note=str(payload.get("note") or ""),
+                    actor=str(payload.get("actor") or "shan"),
+                )
+                self._json(HTTPStatus.OK, result)
+                return
+            if action == "dry-run":
+                result = execute_dry_run(store, run_id)
+                self._json(HTTPStatus.OK, result)
+                return
+            if action == "cancel":
+                run = cancel_run(
+                    store,
+                    run_id,
+                    actor=str(payload.get("actor") or "shan"),
+                    reason=str(payload.get("reason") or ""),
+                )
+                self._json(HTTPStatus.OK, {"run": run})
+                return
+            if action == "retry":
+                run = retry_run(store, run_id)
+                self._json(HTTPStatus.OK, {"run": run})
+                return
+            self._json(HTTPStatus.NOT_FOUND, {"error": "unknown action"})
+        except KeyError as exc:
+            self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+        except ValueError as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        except Exception as exc:  # noqa: BLE001
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
     def _upsert_project(self, project_id: str | None = None) -> None:
         try:

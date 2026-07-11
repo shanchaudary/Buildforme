@@ -30,7 +30,6 @@ jobs:
 
   remediate-stage7-packet7b-isolation:
     if: github.event_name == 'pull_request' && github.head_ref == 'stage-7-independent-multi-agent-review-loop'
-    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:

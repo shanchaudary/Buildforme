@@ -3,13 +3,21 @@ set +e
 report=stage7_packet7c_validation.txt
 : > "$report"
 
-python scripts/apply_stage7_packet7c.py 2>&1 | tee -a "$report"
-apply_status=${PIPESTATUS[0]}
+echo '== correct Packet 7C patcher ==' | tee -a "$report"
+python scripts/fix_stage7_packet7c_patcher.py 2>&1 | tee -a "$report"
+fix_status=${PIPESTATUS[0]}
+apply_status=99
 syntax_status=99
 focused_status=99
 full_status=99
 policy_status=99
 constitution_status=99
+
+if [ "$fix_status" -eq 0 ]; then
+  echo '== apply Packet 7C ==' | tee -a "$report"
+  python scripts/apply_stage7_packet7c.py 2>&1 | tee -a "$report"
+  apply_status=${PIPESTATUS[0]}
+fi
 
 if [ "$apply_status" -eq 0 ]; then
   python -m py_compile \
@@ -53,7 +61,7 @@ PY
   constitution_status=${PIPESTATUS[0]}
 fi
 
-echo "statuses apply=$apply_status syntax=$syntax_status focused=$focused_status full=$full_status policy=$policy_status constitution=$constitution_status" | tee -a "$report"
+echo "statuses fix=$fix_status apply=$apply_status syntax=$syntax_status focused=$focused_status full=$full_status policy=$policy_status constitution=$constitution_status" | tee -a "$report"
 
 git config user.name "Buildforme Governance Bot"
 git config user.email "actions@users.noreply.github.com"
@@ -89,8 +97,12 @@ YAML
 }
 
 restore_ci
-if [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status" -eq 0 ] && [ "$full_status" -eq 0 ] && [ "$policy_status" -eq 0 ] && [ "$constitution_status" -eq 0 ]; then
-  rm -f "$report" scripts/apply_stage7_packet7c.py scripts/run_stage7_packet7c_gate.sh
+if [ "$fix_status" -eq 0 ] && [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status" -eq 0 ] && [ "$full_status" -eq 0 ] && [ "$policy_status" -eq 0 ] && [ "$constitution_status" -eq 0 ]; then
+  rm -f "$report" stage7_packet7c_validation.txt
+  rm -f \
+    scripts/apply_stage7_packet7c.py \
+    scripts/fix_stage7_packet7c_patcher.py \
+    scripts/run_stage7_packet7c_gate.sh
   git add -A -- \
     .github/workflows/ci.yml \
     buildforme/provider_discovery.py \
@@ -100,7 +112,9 @@ if [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status
     tests/test_stage7_packet7c_claude_reviewer.py \
     tests/test_stage7_packet7c_contract.py \
     docs/STAGE_7_INDEPENDENT_MULTI_AGENT_REVIEW.md \
+    stage7_packet7c_validation.txt \
     scripts/apply_stage7_packet7c.py \
+    scripts/fix_stage7_packet7c_patcher.py \
     scripts/run_stage7_packet7c_gate.sh
   git diff --cached --check || exit 1
   git commit -m "Add verified Claude independent reviewer contract" || exit 1

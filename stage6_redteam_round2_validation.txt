@@ -1,9 +1,551 @@
+== correct red-team patcher ==
+Stage 6 red-team cancel patch scoped to ProcessSupervisor.cancel
 == apply red-team round 2 ==
+Stage 6 red-team hardening round 2 applied
+== syntax and diff ==
+  File "buildforme/provider_discovery.py", line 306
+    combined = stdout + "
+                        ^
+SyntaxError: unterminated string literal (detected at line 306)
+== focused red-team tests ==
+test_stage6_redteam_round2 (unittest.loader._FailedTest.test_stage6_redteam_round2) ... ERROR
+
+======================================================================
+ERROR: test_stage6_redteam_round2 (unittest.loader._FailedTest.test_stage6_redteam_round2)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_stage6_redteam_round2
 Traceback (most recent call last):
-  File "/home/runner/work/Buildforme/Buildforme/scripts/apply_stage6_redteam_round2.py", line 723, in <module>
-    text = replace_once(
-           ^^^^^^^^^^^^^
-  File "/home/runner/work/Buildforme/Buildforme/scripts/apply_stage6_redteam_round2.py", line 11, in replace_once
-    raise RuntimeError(f"{label}: expected one match, found {count}")
-RuntimeError: cancel passes Windows job: expected one match, found 2
-statuses apply=1 syntax=99 focused=99 full=99 policy=99 constitution=99
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 419, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 362, in _get_module_from_name
+    __import__(name)
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_stage6_redteam_round2.py", line 16, in <module>
+    from buildforme.execution_service import cancel_run
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 14, in <module>
+    from buildforme.adapters.dry_run import DryRunAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/__init__.py", line 4, in <module>
+    from buildforme.adapters.registry import all_providers_have_adapters, get_adapter, list_live_adapter_ids
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/registry.py", line 7, in <module>
+    from buildforme.adapters.claude_cli import ClaudeCliAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/claude_cli.py", line 8, in <module>
+    from buildforme.adapters.cli_base import CliProviderAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/cli_base.py", line 11, in <module>
+    from buildforme.provider_discovery import health_check_provider
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/provider_discovery.py", line 306
+    combined = stdout + "
+                        ^
+SyntaxError: unterminated string literal (detected at line 306)
+
+
+----------------------------------------------------------------------
+Ran 1 test in 0.000s
+
+FAILED (errors=1)
+test_stage6_final_blockers (unittest.loader._FailedTest.test_stage6_final_blockers) ... ERROR
+
+======================================================================
+ERROR: test_stage6_final_blockers (unittest.loader._FailedTest.test_stage6_final_blockers)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_stage6_final_blockers
+Traceback (most recent call last):
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 419, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 362, in _get_module_from_name
+    __import__(name)
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_stage6_final_blockers.py", line 20, in <module>
+    from buildforme.provider_discovery import probe_authentication
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/provider_discovery.py", line 306
+    combined = stdout + "
+                        ^
+SyntaxError: unterminated string literal (detected at line 306)
+
+
+----------------------------------------------------------------------
+Ran 1 test in 0.000s
+
+FAILED (errors=1)
+
+----------------------------------------------------------------------
+Ran 0 tests in 0.000s
+
+OK
+test_authority_fields_rejected_same_state (test_run_mutation_authority.RunMutationAuthorityTests.test_authority_fields_rejected_same_state) ... ok
+test_caller_cannot_expand_allowlist (test_run_mutation_authority.RunMutationAuthorityTests.test_caller_cannot_expand_allowlist) ... ok
+test_duplicate_completion_second_stale (test_run_mutation_authority.RunMutationAuthorityTests.test_duplicate_completion_second_stale) ... ok
+test_explicit_path_succeeds_with_edge_events (test_run_mutation_authority.RunMutationAuthorityTests.test_explicit_path_succeeds_with_edge_events) ... ok
+test_immediate_edge_enforced_no_silent_multihop (test_run_mutation_authority.RunMutationAuthorityTests.test_immediate_edge_enforced_no_silent_multihop) ... ok
+test_invalid_middle_edge_rolls_back (test_run_mutation_authority.RunMutationAuthorityTests.test_invalid_middle_edge_rolls_back) ... ok
+test_protected_fields_defined (test_run_mutation_authority.RunMutationAuthorityTests.test_protected_fields_defined) ... ok
+test_runtime_modules_no_setup_write_apis (test_run_mutation_authority.RunMutationAuthorityTests.test_runtime_modules_no_setup_write_apis) ... ok
+test_runtime_service_has_no_unrestricted_save_run (test_run_mutation_authority.RunMutationAuthorityTests.test_runtime_service_has_no_unrestricted_save_run) ... ERROR
+test_same_state_metadata_with_event (test_run_mutation_authority.RunMutationAuthorityTests.test_same_state_metadata_with_event) ... ok
+test_stale_completion_cannot_overwrite_cancel (test_run_mutation_authority.RunMutationAuthorityTests.test_stale_completion_cannot_overwrite_cancel) ... ok
+test_stale_timeout_cannot_overwrite_terminal (test_run_mutation_authority.RunMutationAuthorityTests.test_stale_timeout_cannot_overwrite_terminal) ... ok
+test_terminal_protection_matrix (test_run_mutation_authority.RunMutationAuthorityTests.test_terminal_protection_matrix) ... ok
+test_unauthorized_extra_field_rejected (test_run_mutation_authority.RunMutationAuthorityTests.test_unauthorized_extra_field_rejected) ... ok
+test_unknown_mutation_type_rejected (test_run_mutation_authority.RunMutationAuthorityTests.test_unknown_mutation_type_rejected) ... ok
+test_unversioned_update_rejected (test_run_mutation_authority.RunMutationAuthorityTests.test_unversioned_update_rejected) ... ok
+test_valid_mutation_writes_event_and_bumps_version (test_run_mutation_authority.RunMutationAuthorityTests.test_valid_mutation_writes_event_and_bumps_version) ... ok
+test_run_mutation_authority_hardening (unittest.loader._FailedTest.test_run_mutation_authority_hardening) ... ERROR
+
+======================================================================
+ERROR: test_runtime_service_has_no_unrestricted_save_run (test_run_mutation_authority.RunMutationAuthorityTests.test_runtime_service_has_no_unrestricted_save_run)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_run_mutation_authority.py", line 340, in test_runtime_service_has_no_unrestricted_save_run
+    import buildforme.execution_service as es
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 15, in <module>
+    from buildforme.adapters.registry import get_adapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/__init__.py", line 4, in <module>
+    from buildforme.adapters.registry import all_providers_have_adapters, get_adapter, list_live_adapter_ids
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/registry.py", line 7, in <module>
+    from buildforme.adapters.claude_cli import ClaudeCliAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/claude_cli.py", line 8, in <module>
+    from buildforme.adapters.cli_base import CliProviderAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/cli_base.py", line 11, in <module>
+    from buildforme.provider_discovery import health_check_provider
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/provider_discovery.py", line 306
+    combined = stdout + "
+                        ^
+SyntaxError: unterminated string literal (detected at line 306)
+
+======================================================================
+ERROR: test_run_mutation_authority_hardening (unittest.loader._FailedTest.test_run_mutation_authority_hardening)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_run_mutation_authority_hardening
+Traceback (most recent call last):
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 419, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 362, in _get_module_from_name
+    __import__(name)
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_run_mutation_authority_hardening.py", line 10, in <module>
+    from buildforme.execution_service import execute_supervised, record_run_approval
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 14, in <module>
+    from buildforme.adapters.dry_run import DryRunAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/__init__.py", line 4, in <module>
+    from buildforme.adapters.registry import all_providers_have_adapters, get_adapter, list_live_adapter_ids
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/registry.py", line 7, in <module>
+    from buildforme.adapters.claude_cli import ClaudeCliAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/claude_cli.py", line 8, in <module>
+    from buildforme.adapters.cli_base import CliProviderAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/cli_base.py", line 11, in <module>
+    from buildforme.provider_discovery import health_check_provider
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/provider_discovery.py", line 306
+    combined = stdout + "
+                        ^
+SyntaxError: unterminated string literal (detected at line 306)
+
+
+----------------------------------------------------------------------
+Ran 18 tests in 0.844s
+
+FAILED (errors=2)
+== full suite ==
+..EE..EEE................E....................................E...............E........E........E.....EEEE......................
+======================================================================
+ERROR: test_constitution (unittest.loader._FailedTest.test_constitution)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_constitution
+Traceback (most recent call last):
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 419, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 362, in _get_module_from_name
+    __import__(name)
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_constitution.py", line 10, in <module>
+    from buildforme.execution_service import create_run, execute_dry_run, record_run_approval, run_preflight
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 14, in <module>
+    from buildforme.adapters.dry_run import DryRunAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/__init__.py", line 4, in <module>
+    from buildforme.adapters.registry import all_providers_have_adapters, get_adapter, list_live_adapter_ids
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/registry.py", line 7, in <module>
+    from buildforme.adapters.claude_cli import ClaudeCliAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/claude_cli.py", line 8, in <module>
+    from buildforme.adapters.cli_base import CliProviderAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/cli_base.py", line 11, in <module>
+    from buildforme.provider_discovery import health_check_provider
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/provider_discovery.py", line 306
+    combined = stdout + "
+                        ^
+SyntaxError: unterminated string literal (detected at line 306)
+
+
+======================================================================
+ERROR: test_constitution_binding_adversarial (unittest.loader._FailedTest.test_constitution_binding_adversarial)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_constitution_binding_adversarial
+Traceback (most recent call last):
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 419, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 362, in _get_module_from_name
+    __import__(name)
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_constitution_binding_adversarial.py", line 10, in <module>
+    from buildforme.execution_service import create_run, record_run_approval, run_preflight
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 15, in <module>
+    from buildforme.adapters.registry import get_adapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/__init__.py", line 4, in <module>
+    from buildforme.adapters.registry import all_providers_have_adapters, get_adapter, list_live_adapter_ids
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/registry.py", line 7, in <module>
+    from buildforme.adapters.claude_cli import ClaudeCliAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/claude_cli.py", line 8, in <module>
+    from buildforme.adapters.cli_base import CliProviderAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/cli_base.py", line 11, in <module>
+    from buildforme.provider_discovery import health_check_provider
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/provider_discovery.py", line 306
+    combined = stdout + "
+                        ^
+SyntaxError: unterminated string literal (detected at line 306)
+
+
+======================================================================
+ERROR: test_evidence_fingerprint (unittest.loader._FailedTest.test_evidence_fingerprint)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_evidence_fingerprint
+Traceback (most recent call last):
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 419, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 362, in _get_module_from_name
+    __import__(name)
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_evidence_fingerprint.py", line 16, in <module>
+    from buildforme.execution_service import (
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 15, in <module>
+    from buildforme.adapters.registry import get_adapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/__init__.py", line 4, in <module>
+    from buildforme.adapters.registry import all_providers_have_adapters, get_adapter, list_live_adapter_ids
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/registry.py", line 7, in <module>
+    from buildforme.adapters.claude_cli import ClaudeCliAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/claude_cli.py", line 8, in <module>
+    from buildforme.adapters.cli_base import CliProviderAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/cli_base.py", line 11, in <module>
+    from buildforme.provider_discovery import health_check_provider
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/provider_discovery.py", line 306
+    combined = stdout + "
+                        ^
+SyntaxError: unterminated string literal (detected at line 306)
+
+
+======================================================================
+ERROR: test_execution_preflight (unittest.loader._FailedTest.test_execution_preflight)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_execution_preflight
+Traceback (most recent call last):
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 419, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 362, in _get_module_from_name
+    __import__(name)
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_execution_preflight.py", line 7, in <module>
+    from buildforme.execution_service import create_run, execute_dry_run, record_run_approval, run_preflight
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 15, in <module>
+    from buildforme.adapters.registry import get_adapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/__init__.py", line 4, in <module>
+    from buildforme.adapters.registry import all_providers_have_adapters, get_adapter, list_live_adapter_ids
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/registry.py", line 7, in <module>
+    from buildforme.adapters.claude_cli import ClaudeCliAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/claude_cli.py", line 8, in <module>
+    from buildforme.adapters.cli_base import CliProviderAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/cli_base.py", line 11, in <module>
+    from buildforme.provider_discovery import health_check_provider
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/provider_discovery.py", line 306
+    combined = stdout + "
+                        ^
+SyntaxError: unterminated string literal (detected at line 306)
+
+
+======================================================================
+ERROR: test_founder_decision_evidence (unittest.loader._FailedTest.test_founder_decision_evidence)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_founder_decision_evidence
+Traceback (most recent call last):
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 419, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 362, in _get_module_from_name
+    __import__(name)
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_founder_decision_evidence.py", line 16, in <module>
+    from buildforme.execution_service import (
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 15, in <module>
+    from buildforme.adapters.registry import get_adapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/__init__.py", line 4, in <module>
+    from buildforme.adapters.registry import all_providers_have_adapters, get_adapter, list_live_adapter_ids
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/registry.py", line 7, in <module>
+    from buildforme.adapters.claude_cli import ClaudeCliAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/claude_cli.py", line 8, in <module>
+    from buildforme.adapters.cli_base import CliProviderAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/cli_base.py", line 11, in <module>
+    from buildforme.provider_discovery import health_check_provider
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/provider_discovery.py", line 306
+    combined = stdout + "
+                        ^
+SyntaxError: unterminated string literal (detected at line 306)
+
+
+======================================================================
+ERROR: test_governance_adversarial (unittest.loader._FailedTest.test_governance_adversarial)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_governance_adversarial
+Traceback (most recent call last):
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 419, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 362, in _get_module_from_name
+    __import__(name)
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_governance_adversarial.py", line 13, in <module>
+    from buildforme.execution_service import (
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 15, in <module>
+    from buildforme.adapters.registry import get_adapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/__init__.py", line 4, in <module>
+    from buildforme.adapters.registry import all_providers_have_adapters, get_adapter, list_live_adapter_ids
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/registry.py", line 7, in <module>
+    from buildforme.adapters.claude_cli import ClaudeCliAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/claude_cli.py", line 8, in <module>
+    from buildforme.adapters.cli_base import CliProviderAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/cli_base.py", line 11, in <module>
+    from buildforme.provider_discovery import health_check_provider
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/provider_discovery.py", line 306
+    combined = stdout + "
+                        ^
+SyntaxError: unterminated string literal (detected at line 306)
+
+
+======================================================================
+ERROR: test_planner_api (unittest.loader._FailedTest.test_planner_api)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_planner_api
+Traceback (most recent call last):
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 419, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 362, in _get_module_from_name
+    __import__(name)
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_planner_api.py", line 9, in <module>
+    from buildforme.server import BuildformeRequestHandler
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/server.py", line 20, in <module>
+    from buildforme.execution_service import (
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 15, in <module>
+    from buildforme.adapters.registry import get_adapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/__init__.py", line 4, in <module>
+    from buildforme.adapters.registry import all_providers_have_adapters, get_adapter, list_live_adapter_ids
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/registry.py", line 7, in <module>
+    from buildforme.adapters.claude_cli import ClaudeCliAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/claude_cli.py", line 8, in <module>
+    from buildforme.adapters.cli_base import CliProviderAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/cli_base.py", line 11, in <module>
+    from buildforme.provider_discovery import health_check_provider
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/provider_discovery.py", line 306
+    combined = stdout + "
+                        ^
+SyntaxError: unterminated string literal (detected at line 306)
+
+
+======================================================================
+ERROR: test_run_approval_atomic (unittest.loader._FailedTest.test_run_approval_atomic)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_run_approval_atomic
+Traceback (most recent call last):
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 419, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 362, in _get_module_from_name
+    __import__(name)
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_run_approval_atomic.py", line 11, in <module>
+    from buildforme.execution_service import create_run, record_run_approval, run_preflight
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 15, in <module>
+    from buildforme.adapters.registry import get_adapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/__init__.py", line 4, in <module>
+    from buildforme.adapters.registry import all_providers_have_adapters, get_adapter, list_live_adapter_ids
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/registry.py", line 7, in <module>
+    from buildforme.adapters.claude_cli import ClaudeCliAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/claude_cli.py", line 8, in <module>
+    from buildforme.adapters.cli_base import CliProviderAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/cli_base.py", line 11, in <module>
+    from buildforme.provider_discovery import health_check_provider
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/provider_discovery.py", line 306
+    combined = stdout + "
+                        ^
+SyntaxError: unterminated string literal (detected at line 306)
+
+
+======================================================================
+ERROR: test_runtime_service_has_no_unrestricted_save_run (test_run_mutation_authority.RunMutationAuthorityTests.test_runtime_service_has_no_unrestricted_save_run)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_run_mutation_authority.py", line 340, in test_runtime_service_has_no_unrestricted_save_run
+    import buildforme.execution_service as es
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 15, in <module>
+    from buildforme.adapters.registry import get_adapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/__init__.py", line 4, in <module>
+    from buildforme.adapters.registry import all_providers_have_adapters, get_adapter, list_live_adapter_ids
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/registry.py", line 7, in <module>
+    from buildforme.adapters.claude_cli import ClaudeCliAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/claude_cli.py", line 8, in <module>
+    from buildforme.adapters.cli_base import CliProviderAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/cli_base.py", line 11, in <module>
+    from buildforme.provider_discovery import health_check_provider
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/provider_discovery.py", line 306
+    combined = stdout + "
+                        ^
+SyntaxError: unterminated string literal (detected at line 306)
+
+======================================================================
+ERROR: test_run_mutation_authority_hardening (unittest.loader._FailedTest.test_run_mutation_authority_hardening)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_run_mutation_authority_hardening
+Traceback (most recent call last):
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 419, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 362, in _get_module_from_name
+    __import__(name)
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_run_mutation_authority_hardening.py", line 10, in <module>
+    from buildforme.execution_service import execute_supervised, record_run_approval
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 15, in <module>
+    from buildforme.adapters.registry import get_adapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/__init__.py", line 4, in <module>
+    from buildforme.adapters.registry import all_providers_have_adapters, get_adapter, list_live_adapter_ids
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/registry.py", line 7, in <module>
+    from buildforme.adapters.claude_cli import ClaudeCliAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/claude_cli.py", line 8, in <module>
+    from buildforme.adapters.cli_base import CliProviderAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/cli_base.py", line 11, in <module>
+    from buildforme.provider_discovery import health_check_provider
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/provider_discovery.py", line 306
+    combined = stdout + "
+                        ^
+SyntaxError: unterminated string literal (detected at line 306)
+
+
+======================================================================
+ERROR: test_server (unittest.loader._FailedTest.test_server)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_server
+Traceback (most recent call last):
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 419, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 362, in _get_module_from_name
+    __import__(name)
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_server.py", line 11, in <module>
+    from buildforme.server import BuildformeRequestHandler
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/server.py", line 20, in <module>
+    from buildforme.execution_service import (
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 15, in <module>
+    from buildforme.adapters.registry import get_adapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/__init__.py", line 4, in <module>
+    from buildforme.adapters.registry import all_providers_have_adapters, get_adapter, list_live_adapter_ids
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/registry.py", line 7, in <module>
+    from buildforme.adapters.claude_cli import ClaudeCliAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/claude_cli.py", line 8, in <module>
+    from buildforme.adapters.cli_base import CliProviderAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/cli_base.py", line 11, in <module>
+    from buildforme.provider_discovery import health_check_provider
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/provider_discovery.py", line 306
+    combined = stdout + "
+                        ^
+SyntaxError: unterminated string literal (detected at line 306)
+
+
+======================================================================
+ERROR: test_stage6_execution (unittest.loader._FailedTest.test_stage6_execution)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_stage6_execution
+Traceback (most recent call last):
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 419, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 362, in _get_module_from_name
+    __import__(name)
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_stage6_execution.py", line 14, in <module>
+    from buildforme.adapters.registry import all_providers_have_adapters, list_live_adapter_ids
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/__init__.py", line 4, in <module>
+    from buildforme.adapters.registry import all_providers_have_adapters, get_adapter, list_live_adapter_ids
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/registry.py", line 7, in <module>
+    from buildforme.adapters.claude_cli import ClaudeCliAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/claude_cli.py", line 8, in <module>
+    from buildforme.adapters.cli_base import CliProviderAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/cli_base.py", line 11, in <module>
+    from buildforme.provider_discovery import health_check_provider
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/provider_discovery.py", line 306
+    combined = stdout + "
+                        ^
+SyntaxError: unterminated string literal (detected at line 306)
+
+
+======================================================================
+ERROR: test_stage6_final_blockers (unittest.loader._FailedTest.test_stage6_final_blockers)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_stage6_final_blockers
+Traceback (most recent call last):
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 419, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 362, in _get_module_from_name
+    __import__(name)
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_stage6_final_blockers.py", line 20, in <module>
+    from buildforme.provider_discovery import probe_authentication
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/provider_discovery.py", line 306
+    combined = stdout + "
+                        ^
+SyntaxError: unterminated string literal (detected at line 306)
+
+
+======================================================================
+ERROR: test_stage6_redteam_round2 (unittest.loader._FailedTest.test_stage6_redteam_round2)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_stage6_redteam_round2
+Traceback (most recent call last):
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 419, in _find_test_path
+    module = self._get_module_from_name(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/loader.py", line 362, in _get_module_from_name
+    __import__(name)
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_stage6_redteam_round2.py", line 16, in <module>
+    from buildforme.execution_service import cancel_run
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/execution_service.py", line 15, in <module>
+    from buildforme.adapters.registry import get_adapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/__init__.py", line 4, in <module>
+    from buildforme.adapters.registry import all_providers_have_adapters, get_adapter, list_live_adapter_ids
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/registry.py", line 7, in <module>
+    from buildforme.adapters.claude_cli import ClaudeCliAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/claude_cli.py", line 8, in <module>
+    from buildforme.adapters.cli_base import CliProviderAdapter
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/adapters/cli_base.py", line 11, in <module>
+    from buildforme.provider_discovery import health_check_provider
+  File "/home/runner/work/Buildforme/Buildforme/buildforme/provider_discovery.py", line 306
+    combined = stdout + "
+                        ^
+SyntaxError: unterminated string literal (detected at line 306)
+
+
+----------------------------------------------------------------------
+Ran 128 tests in 2.483s
+
+FAILED (errors=14)
+== policy smoke ==
+{
+  "classification": {
+    "auto_merge_allowed": false,
+    "auto_run_allowed": true,
+    "reasons": [
+      "Low-risk work detected: audit",
+      "Low-risk work detected: docs",
+      "Low-risk work detected: read-only"
+    ],
+    "required_actions": [
+      "Run scoped checks",
+      "Report final status"
+    ],
+    "required_human_approval": false,
+    "risk": "GREEN"
+  },
+  "valid": true,
+  "validation_problems": []
+}
+== constitution ==
+{'passed': True, 'version': '1.0.0', 'hash': '706f30bcb091767687c91905e9421c98ae64cdac18861bdd892efc596aadabe6', 'law_count': 20, 'checks': [{'name': 'document_structure', 'ok': True, 'detail': 'ok'}, {'name': 'hash_stable', 'ok': True, 'detail': '706f30bcb091'}, {'name': 'law_count_20', 'ok': True, 'detail': 'laws=20'}, {'name': 'law_020_present', 'ok': True, 'detail': 'Governance Cannot Be Bypassed'}], 'document': {'valid': True, 'problems': [], 'law_count': 20, 'version': '1.0.0', 'hash': '706f30bcb091767687c91905e9421c98ae64cdac18861bdd892efc596aadabe6', 'law_ids': ['LAW-001', 'LAW-002', 'LAW-003', 'LAW-004', 'LAW-005', 'LAW-006', 'LAW-007', 'LAW-008', 'LAW-009', 'LAW-010', 'LAW-011', 'LAW-012', 'LAW-013', 'LAW-014', 'LAW-015', 'LAW-016', 'LAW-017', 'LAW-018', 'LAW-019', 'LAW-020']}}
+statuses correction=0 apply=0 syntax=1 focused=1 full=1 policy=0 constitution=0

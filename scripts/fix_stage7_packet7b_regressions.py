@@ -17,17 +17,23 @@ if text.count(old) != 1:
     raise RuntimeError(f"schema regression file loop count={text.count(old)}")
 text = text.replace(old, new, 1)
 
-old = '''with self.assertRaisesRegex(ValueError, "not pending|append-only"):
+runtime_anchor = '''text = text.replace(helper_anchor, helper + helper_anchor, 1)
+path.write_text(text, encoding="utf-8")
 '''
-new = '''with self.assertRaisesRegex(
-            ValueError, "not pending|append-only|requires pending assignment"
-        ):
-'''
-if text.count(old) != 1:
-    raise RuntimeError(f"append-only regression expectation count={text.count(old)}")
-text = text.replace(old, new, 1)
+runtime_replacement = '''text = text.replace(helper_anchor, helper + helper_anchor, 1)
+append_only_old = '        with self.assertRaisesRegex(ValueError, "not pending|append-only"):\\n'
+append_only_new = (
+    '        with self.assertRaisesRegex(\\n'
+    '            ValueError, "not pending|append-only|requires pending assignment"\\n'
+    '        ):\\n'
+)
+if text.count(append_only_old) != 1:
+    raise RuntimeError(
+        f"append-only regression expectation count={text.count(append_only_old)}"
+    )
+text = text.replace(append_only_old, append_only_new, 1)
 
-old = '''        with self.assertRaisesRegex(ValueError, "diverge"):
+divergence_old = \'\'\'        with self.assertRaisesRegex(ValueError, "diverge"):
             self.store.submit_review_report_atomic(
                 cycle_id=cycle["cycle_id"],
                 assignment_id=assignment["assignment_id"],
@@ -35,8 +41,8 @@ old = '''        with self.assertRaisesRegex(ValueError, "diverge"):
                 findings=divergent,
                 actor="reviewer",
             )
-'''
-new = '''        with self.assertRaisesRegex(
+\'\'\'
+divergence_new = \'\'\'        with self.assertRaisesRegex(
             ValueError, "direct review report submission disabled"
         ):
             self.store.submit_review_report_atomic(
@@ -46,10 +52,17 @@ new = '''        with self.assertRaisesRegex(
                 findings=divergent,
                 actor="reviewer",
             )
+\'\'\'
+if text.count(divergence_old) != 1:
+    raise RuntimeError(
+        f"legacy divergence expectation count={text.count(divergence_old)}"
+    )
+text = text.replace(divergence_old, divergence_new, 1)
+path.write_text(text, encoding="utf-8")
 '''
-if text.count(old) != 1:
-    raise RuntimeError(f"legacy divergence expectation count={text.count(old)}")
-text = text.replace(old, new, 1)
+if text.count(runtime_anchor) != 1:
+    raise RuntimeError(f"Packet 7A runtime patch anchor count={text.count(runtime_anchor)}")
+text = text.replace(runtime_anchor, runtime_replacement, 1)
 
 old = '''from buildforme.review_execution import (
     REVIEW_COMMAND_CONTRACTS,

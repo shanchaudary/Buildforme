@@ -35,7 +35,8 @@ echo "statuses fix=$fix_status focused=$focused_status full=$full_status policy=
 
 git config user.name "Buildforme Governance Bot"
 git config user.email "actions@users.noreply.github.com"
-cat > .github/workflows/ci.yml <<'YAML'
+restore_original_ci() {
+  cat > .github/workflows/ci.yml <<'YAML'
 name: Buildforme CI
 
 on:
@@ -63,6 +64,9 @@ jobs:
       - name: Run policy smoke check
         run: python -m buildforme.cli classify data/sample_task.json
 YAML
+}
+
+restore_original_ci
 rm -f scripts/fix_stage7_cleanup_regressions.py scripts/run_stage7_cleanup_fix_gate.sh stage7_cleanup_diagnostic.txt
 
 if [ "$fix_status" -eq 0 ] && [ "$focused_status" -eq 0 ] && [ "$full_status" -eq 0 ] && [ "$policy_status" -eq 0 ] && [ "$constitution_status" -eq 0 ] && [ "$diff_status" -eq 0 ]; then
@@ -72,11 +76,10 @@ if [ "$fix_status" -eq 0 ] && [ "$focused_status" -eq 0 ] && [ "$full_status" -e
     tests/test_stage7_review_authority.py \
     stage7_cleanup_diagnostic.txt \
     scripts/fix_stage7_cleanup_regressions.py \
-    scripts/run_stage7_cleanup_fix_gate.sh \
-    stage7_cleanup_fix_validation.txt
-  git diff --cached --check
-  git commit -m "Restore Stage 7 red-team regression expectations"
-  git push origin HEAD:stage-7-independent-multi-agent-review-loop
+    scripts/run_stage7_cleanup_fix_gate.sh
+  git diff --cached --check || exit 1
+  git commit -m "Restore Stage 7 red-team regression expectations" || exit 1
+  git push origin HEAD:stage-7-independent-multi-agent-review-loop || exit 1
   exit 0
 fi
 
@@ -84,37 +87,10 @@ cp "$report" /tmp/stage7_cleanup_fix_validation.txt
 git restore .
 git clean -fd tests scripts
 git clean -f stage7_cleanup_fix_validation.txt
-cat > .github/workflows/ci.yml <<'YAML'
-name: Buildforme CI
-
-on:
-  pull_request:
-  push:
-    branches:
-      - main
-      - founder-control-plane-mvp
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Run unit tests
-        run: python -m unittest discover -s tests -p 'test_*.py'
-
-      - name: Run policy smoke check
-        run: python -m buildforme.cli classify data/sample_task.json
-YAML
+restore_original_ci
 cp /tmp/stage7_cleanup_fix_validation.txt "$report"
 git add .github/workflows/ci.yml
 git add -f "$report"
-git commit -m "Record Stage 7 cleanup fix failure"
-git push origin HEAD:stage-7-independent-multi-agent-review-loop
+git commit -m "Record Stage 7 cleanup fix failure" || exit 1
+git push origin HEAD:stage-7-independent-multi-agent-review-loop || exit 1
 exit 1

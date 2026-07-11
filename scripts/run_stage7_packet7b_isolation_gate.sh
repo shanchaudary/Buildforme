@@ -13,6 +13,12 @@ policy_status=99
 constitution_status=99
 
 if [ "$apply_status" -eq 0 ]; then
+  # The permanent contract requires the final tree to contain no gate machinery.
+  # Preserve temporary copies outside the repository, then remove the files before tests.
+  cp scripts/apply_stage7_packet7b_isolation.py /tmp/apply_stage7_packet7b_isolation.py
+  cp scripts/run_stage7_packet7b_isolation_gate.sh /tmp/run_stage7_packet7b_isolation_gate.sh
+  rm -f scripts/apply_stage7_packet7b_isolation.py scripts/run_stage7_packet7b_isolation_gate.sh
+
   echo '== syntax and diff ==' | tee -a "$report"
   python -m py_compile buildforme/review_execution.py tests/test_stage7_review_execution.py 2>&1 | tee -a "$report"
   syntax_status=${PIPESTATUS[0]}
@@ -90,10 +96,10 @@ YAML
 }
 
 if [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status" -eq 0 ] && [ "$full_status" -eq 0 ] && [ "$policy_status" -eq 0 ] && [ "$constitution_status" -eq 0 ]; then
-  rm -f "$report" scripts/apply_stage7_packet7b_isolation.py scripts/run_stage7_packet7b_isolation_gate.sh
+  rm -f "$report"
   restore_ci
   git diff --check
-  git add -A -- .github/workflows/ci.yml buildforme/review_execution.py tests/test_stage7_review_execution.py docs/STAGE_7_INDEPENDENT_MULTI_AGENT_REVIEW.md scripts/apply_stage7_packet7b_isolation.py scripts/run_stage7_packet7b_isolation_gate.sh
+  git add -A -- .github/workflows/ci.yml buildforme/review_execution.py tests/test_stage7_review_execution.py docs/STAGE_7_INDEPENDENT_MULTI_AGENT_REVIEW.md scripts/apply_stage7_packet7b_isolation.py scripts/run_stage7_packet7b_isolation_gate.sh stage7_packet7b_isolation_validation.txt
   git diff --cached --check
   git commit -m "Isolate Stage 7 reviewer workspaces"
   git push origin HEAD:stage-7-independent-multi-agent-review-loop

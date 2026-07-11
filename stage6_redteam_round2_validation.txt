@@ -1,7 +1,147 @@
 == correct red-team patcher ==
-Traceback (most recent call last):
-  File "/home/runner/work/Buildforme/Buildforme/scripts/fix_stage6_redteam_round2_patcher.py", line 73, in <module>
-    raise RuntimeError(f"expected three top-level fingerprint assertions, found {count}")
-RuntimeError: expected three top-level fingerprint assertions, found 1
+Stage 6 red-team patcher and regression-test corrections applied
 == apply red-team round 2 ==
-statuses correction=1 apply=1 syntax=99 focused=99 full=99 policy=99 constitution=99
+Stage 6 red-team hardening round 2 applied
+== syntax and diff ==
+== focused red-team tests ==
+test_exit_zero_without_positive_login_marker_is_not_ready (test_stage6_redteam_round2.AuthProbeAuthorityTests.test_exit_zero_without_positive_login_marker_is_not_ready) ... ok
+test_official_codex_logged_in_marker_is_ready (test_stage6_redteam_round2.AuthProbeAuthorityTests.test_official_codex_logged_in_marker_is_ready) ... ok
+test_provider_record_cannot_override_auth_command_or_success (test_stage6_redteam_round2.AuthProbeAuthorityTests.test_provider_record_cannot_override_auth_command_or_success) ... ok
+test_unverified_claude_status_contract_fails_closed (test_stage6_redteam_round2.AuthProbeAuthorityTests.test_unverified_claude_status_contract_fails_closed) ... ok
+test_prestart_cancel_uses_lifecycle_proof_not_registry (test_stage6_redteam_round2.CancellationRegistryLossTests.test_prestart_cancel_uses_lifecycle_proof_not_registry) ... ok
+test_running_cancel_after_registry_loss_fails_closed (test_stage6_redteam_round2.CancellationRegistryLossTests.test_running_cancel_after_registry_loss_fails_closed) ... ok
+test_supervisor_registry_miss_is_not_termination_proof (test_stage6_redteam_round2.CancellationRegistryLossTests.test_supervisor_registry_miss_is_not_termination_proof) ... ok
+test_exclusive_maintenance_lock_blocks_other_process_transactions (test_stage6_redteam_round2.MigrationCoordinationTests.test_exclusive_maintenance_lock_blocks_other_process_transactions) ... FAIL
+/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/case.py:622: ResourceWarning: unclosed file <_io.TextIOWrapper name=4 encoding='UTF-8'>
+  with outcome.testPartExecutor(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/case.py:622: ResourceWarning: unclosed file <_io.TextIOWrapper name=6 encoding='UTF-8'>
+  with outcome.testPartExecutor(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+test_migration_method_holds_maintenance_lock_contract (test_stage6_redteam_round2.MigrationCoordinationTests.test_migration_method_holds_maintenance_lock_contract) ... ok
+test_every_material_preview_and_governance_field_is_fingerprinted (test_stage6_redteam_round2.OutcomeFingerprintCoverageTests.test_every_material_preview_and_governance_field_is_fingerprinted) ... ok
+test_windows_job_contract_is_present_and_duplicate_terminator_removed (test_stage6_redteam_round2.WindowsJobContractTests.test_windows_job_contract_is_present_and_duplicate_terminator_removed) ... ok
+
+======================================================================
+FAIL: test_exclusive_maintenance_lock_blocks_other_process_transactions (test_stage6_redteam_round2.MigrationCoordinationTests.test_exclusive_maintenance_lock_blocks_other_process_transactions)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_stage6_redteam_round2.py", line 226, in test_exclusive_maintenance_lock_blocks_other_process_transactions
+    self.assertIsNone(proc.poll(), "writer bypassed exclusive migration lock")
+AssertionError: 1 is not None : writer bypassed exclusive migration lock
+
+----------------------------------------------------------------------
+Ran 11 tests in 0.706s
+
+FAILED (failures=1)
+test_active_run_blocks_migration_without_write (test_stage6_final_blockers.AtomicMigrationTests.test_active_run_blocks_migration_without_write) ... ok
+test_import_error_rolls_back_all_prior_imports (test_stage6_final_blockers.AtomicMigrationTests.test_import_error_rolls_back_all_prior_imports) ... ok
+test_successful_import_atomically_replaces_authority (test_stage6_final_blockers.AtomicMigrationTests.test_successful_import_atomically_replaces_authority) ... ok
+test_bad_evidence_rolls_back_run_event_and_evidence (test_stage6_final_blockers.OutcomeEvidenceAtomicityTests.test_bad_evidence_rolls_back_run_event_and_evidence) ... ok
+test_cancelled_status_rejects_unconfirmed_termination (test_stage6_final_blockers.OutcomeEvidenceAtomicityTests.test_cancelled_status_rejects_unconfirmed_termination) ... ok
+test_outcome_evidence_and_terminal_transition_commit_atomically (test_stage6_final_blockers.OutcomeEvidenceAtomicityTests.test_outcome_evidence_and_terminal_transition_commit_atomically) ... ok
+test_cancel_confirms_stubborn_child_tree_is_gone (test_stage6_final_blockers.ProcessTerminationTruthTests.test_cancel_confirms_stubborn_child_tree_is_gone) ... ok
+test_env_marker_does_not_override_failed_executable_probe (test_stage6_final_blockers.ProviderAuthenticationProbeTests.test_env_marker_does_not_override_failed_executable_probe) ... ok
+test_provider_without_probe_contract_fails_closed (test_stage6_final_blockers.ProviderAuthenticationProbeTests.test_provider_without_probe_contract_fails_closed) ... ok
+test_successful_executable_probe_can_verify_cached_login_without_env_marker (test_stage6_final_blockers.ProviderAuthenticationProbeTests.test_successful_executable_probe_can_verify_cached_login_without_env_marker) ... ok
+test_strict_smoke_rejects_missing_required_file_and_unverified_auth (test_stage6_final_blockers.SmokeAcceptanceTests.test_strict_smoke_rejects_missing_required_file_and_unverified_auth) ... ok
+
+----------------------------------------------------------------------
+Ran 11 tests in 2.265s
+
+OK
+
+----------------------------------------------------------------------
+Ran 0 tests in 0.000s
+
+OK
+test_authority_fields_rejected_same_state (test_run_mutation_authority.RunMutationAuthorityTests.test_authority_fields_rejected_same_state) ... ok
+test_caller_cannot_expand_allowlist (test_run_mutation_authority.RunMutationAuthorityTests.test_caller_cannot_expand_allowlist) ... ok
+test_duplicate_completion_second_stale (test_run_mutation_authority.RunMutationAuthorityTests.test_duplicate_completion_second_stale) ... ok
+test_explicit_path_succeeds_with_edge_events (test_run_mutation_authority.RunMutationAuthorityTests.test_explicit_path_succeeds_with_edge_events) ... ok
+test_immediate_edge_enforced_no_silent_multihop (test_run_mutation_authority.RunMutationAuthorityTests.test_immediate_edge_enforced_no_silent_multihop) ... ok
+test_invalid_middle_edge_rolls_back (test_run_mutation_authority.RunMutationAuthorityTests.test_invalid_middle_edge_rolls_back) ... ok
+test_protected_fields_defined (test_run_mutation_authority.RunMutationAuthorityTests.test_protected_fields_defined) ... ok
+test_runtime_modules_no_setup_write_apis (test_run_mutation_authority.RunMutationAuthorityTests.test_runtime_modules_no_setup_write_apis) ... ok
+test_runtime_service_has_no_unrestricted_save_run (test_run_mutation_authority.RunMutationAuthorityTests.test_runtime_service_has_no_unrestricted_save_run) ... ok
+test_same_state_metadata_with_event (test_run_mutation_authority.RunMutationAuthorityTests.test_same_state_metadata_with_event) ... ok
+test_stale_completion_cannot_overwrite_cancel (test_run_mutation_authority.RunMutationAuthorityTests.test_stale_completion_cannot_overwrite_cancel) ... ok
+test_stale_timeout_cannot_overwrite_terminal (test_run_mutation_authority.RunMutationAuthorityTests.test_stale_timeout_cannot_overwrite_terminal) ... ok
+test_terminal_protection_matrix (test_run_mutation_authority.RunMutationAuthorityTests.test_terminal_protection_matrix) ... ok
+test_unauthorized_extra_field_rejected (test_run_mutation_authority.RunMutationAuthorityTests.test_unauthorized_extra_field_rejected) ... ok
+test_unknown_mutation_type_rejected (test_run_mutation_authority.RunMutationAuthorityTests.test_unknown_mutation_type_rejected) ... ok
+test_unversioned_update_rejected (test_run_mutation_authority.RunMutationAuthorityTests.test_unversioned_update_rejected) ... ok
+test_valid_mutation_writes_event_and_bumps_version (test_run_mutation_authority.RunMutationAuthorityTests.test_valid_mutation_writes_event_and_bumps_version) ... ok
+test_all_runtime_modules_forbid_setup_and_unrestricted_save_apis (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_all_runtime_modules_forbid_setup_and_unrestricted_save_apis) ... ok
+test_approval_rejects_missing_bound_scope_before_lease_or_write (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_approval_rejects_missing_bound_scope_before_lease_or_write) ... ok
+test_dry_run_cannot_use_supervised_completion_mutation (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_dry_run_cannot_use_supervised_completion_mutation) ... ok
+test_explicit_path_derives_history_and_matching_events (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_explicit_path_derives_history_and_matching_events) ... ok
+test_failure_and_cancel_edges_remain_authorized (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_failure_and_cancel_edges_remain_authorized) ... ok
+test_generic_status_transition_cannot_bypass_review (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_generic_status_transition_cannot_bypass_review) ... ok
+test_initial_preflight_edge_may_set_approval_requirements (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_initial_preflight_edge_may_set_approval_requirements) ... ok
+test_invalid_path_rolls_back_everything (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_invalid_path_rolls_back_everything) ... ok
+test_live_execution_rejects_mismatched_bound_scope (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_live_execution_rejects_mismatched_bound_scope) ... ok
+test_live_execution_rejects_missing_bound_scope_before_other_authority (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_live_execution_rejects_missing_bound_scope_before_other_authority) ... ok
+test_live_run_cannot_complete_through_dry_run_mutation (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_live_run_cannot_complete_through_dry_run_mutation) ... ok
+test_metadata_mutation_types_cannot_claim_completion_edges (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_metadata_mutation_types_cannot_claim_completion_edges) ... ok
+test_missing_legacy_scope_is_not_runtime_backfilled (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_missing_legacy_scope_is_not_runtime_backfilled) ... ok
+test_positive_verification_evidence_and_review_mutations (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_positive_verification_evidence_and_review_mutations) ... ok
+test_preflight_cannot_rewrite_bound_scope_during_transition (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_preflight_cannot_rewrite_bound_scope_during_transition) ... ok
+test_preflight_cannot_rewrite_bound_scope_same_state (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_preflight_cannot_rewrite_bound_scope_same_state) ... ok
+test_same_state_metadata_cannot_fabricate_lifecycle_truth (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_same_state_metadata_cannot_fabricate_lifecycle_truth) ... ok
+test_same_state_preflight_cannot_rewrite_approval_requirements (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_same_state_preflight_cannot_rewrite_approval_requirements) ... ok
+test_same_state_transition_path_is_rejected (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_same_state_transition_path_is_rejected) ... ok
+test_storage_status_policy_cannot_be_broadened_by_caller (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_storage_status_policy_cannot_be_broadened_by_caller) ... ok
+test_terminal_path_derives_finished_at (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_terminal_path_derives_finished_at) ... ok
+test_transition_only_mutation_cannot_be_used_same_state (test_run_mutation_authority_hardening.RunMutationAuthorityHardeningTests.test_transition_only_mutation_cannot_be_used_same_state) ... ok
+
+----------------------------------------------------------------------
+Ran 39 tests in 2.033s
+
+OK
+== full suite ==
+...................................................................................................................................................................................................................................................../opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/case.py:657: ResourceWarning: unclosed <socket.socket fd=3, family=2, type=1, proto=0, laddr=('127.0.0.1', 42019)>
+  function, args, kwargs = self._cleanups.pop()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+...................................F/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/case.py:622: ResourceWarning: unclosed file <_io.TextIOWrapper name=4 encoding='UTF-8'>
+  with outcome.testPartExecutor(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/hostedtoolcache/Python/3.11.15/x64/lib/python3.11/unittest/case.py:622: ResourceWarning: unclosed file <_io.TextIOWrapper name=6 encoding='UTF-8'>
+  with outcome.testPartExecutor(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+.........................
+======================================================================
+FAIL: test_exclusive_maintenance_lock_blocks_other_process_transactions (test_stage6_redteam_round2.MigrationCoordinationTests.test_exclusive_maintenance_lock_blocks_other_process_transactions)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_stage6_redteam_round2.py", line 226, in test_exclusive_maintenance_lock_blocks_other_process_transactions
+    self.assertIsNone(proc.poll(), "writer bypassed exclusive migration lock")
+AssertionError: 1 is not None : writer bypassed exclusive migration lock
+
+----------------------------------------------------------------------
+Ran 306 tests in 24.599s
+
+FAILED (failures=1)
+== policy smoke ==
+{
+  "classification": {
+    "auto_merge_allowed": false,
+    "auto_run_allowed": true,
+    "reasons": [
+      "Low-risk work detected: audit",
+      "Low-risk work detected: docs",
+      "Low-risk work detected: read-only"
+    ],
+    "required_actions": [
+      "Run scoped checks",
+      "Report final status"
+    ],
+    "required_human_approval": false,
+    "risk": "GREEN"
+  },
+  "valid": true,
+  "validation_problems": []
+}
+== constitution ==
+{'passed': True, 'version': '1.0.0', 'hash': '706f30bcb091767687c91905e9421c98ae64cdac18861bdd892efc596aadabe6', 'law_count': 20, 'checks': [{'name': 'document_structure', 'ok': True, 'detail': 'ok'}, {'name': 'hash_stable', 'ok': True, 'detail': '706f30bcb091'}, {'name': 'law_count_20', 'ok': True, 'detail': 'laws=20'}, {'name': 'law_020_present', 'ok': True, 'detail': 'Governance Cannot Be Bypassed'}], 'document': {'valid': True, 'problems': [], 'law_count': 20, 'version': '1.0.0', 'hash': '706f30bcb091767687c91905e9421c98ae64cdac18861bdd892efc596aadabe6', 'law_ids': ['LAW-001', 'LAW-002', 'LAW-003', 'LAW-004', 'LAW-005', 'LAW-006', 'LAW-007', 'LAW-008', 'LAW-009', 'LAW-010', 'LAW-011', 'LAW-012', 'LAW-013', 'LAW-014', 'LAW-015', 'LAW-016', 'LAW-017', 'LAW-018', 'LAW-019', 'LAW-020']}}
+statuses correction=0 apply=0 syntax=0 focused=1 full=1 policy=0 constitution=0

@@ -19,6 +19,8 @@ class Packet7BIsolationContractTests(unittest.TestCase):
         self.assertIn('"constitution_reminder": get_engine().reminder(', source)
         self.assertIn('phase="independent_review"', source)
         self.assertIn('"constitution_reminder",', source)
+        self.assertIn('engine.content_hash()', source)
+        self.assertIn('canonical Constitution text does not match', source)
 
     def test_review_executor_has_no_unrestricted_run_write(self):
         tree = ast.parse(Path("buildforme/review_execution.py").read_text(encoding="utf-8"))

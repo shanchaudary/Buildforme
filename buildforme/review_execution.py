@@ -429,6 +429,12 @@ def _require_bound_review_material(
         cycle.get("constitution_lease_id") or ""
     ):
         raise ValueError("review cycle Constitution lease is stale")
+    engine = get_engine()
+    if str(engine.content_hash() or "") != str(cycle.get("constitution_hash") or ""):
+        raise ValueError(
+            "canonical Constitution text does not match the review cycle hash; "
+            "historical law text is unavailable and reviewer execution is blocked"
+        )
 
     evidence = store.get_latest_execution_evidence(str(run.get("id") or ""))
     problems = validate_evidence_for_storage(evidence)

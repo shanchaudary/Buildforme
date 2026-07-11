@@ -45,11 +45,12 @@ jobs:
           rm -f scripts/apply_stage7_packet7d_repair_authority.py
           python -m py_compile buildforme/repair_contracts.py buildforme/repair_service.py buildforme/db.py buildforme/execution_store.py buildforme/storage.py tests/test_stage7_packet7d_repair_authority.py tests/test_stage7_packet7d_contract.py
           git diff --check
-      - name: Run focused repair authority tests
-        run: |
-          python -m unittest discover -s tests -p 'test_stage7_packet7d*.py' -v
-          python -m unittest discover -s tests -p 'test_stage7_review_authority.py' -v
-          python -m unittest discover -s tests -p 'test_stage7_review_execution.py' -v
+      - name: Run Packet 7D authority tests
+        run: python -m unittest discover -s tests -p 'test_stage7_packet7d*.py' -v
+      - name: Run Packet 7A authority regressions
+        run: python -m unittest discover -s tests -p 'test_stage7_review_authority.py' -v
+      - name: Run Packet 7B execution regressions
+        run: python -m unittest discover -s tests -p 'test_stage7_review_execution.py' -v
       - name: Run full validation
         run: |
           python -m unittest discover -s tests -p 'test_*.py'

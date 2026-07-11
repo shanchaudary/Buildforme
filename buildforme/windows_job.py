@@ -93,6 +93,9 @@ if os.name == "nt":
     kernel32.TerminateJobObject.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel32.CloseHandle.restype = wintypes.BOOL
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+    ntdll.NtResumeProcess.restype = ctypes.c_long
 
 
 class WindowsJob:
@@ -142,6 +145,24 @@ class WindowsJob:
         except Exception:
             job.close()
             raise
+
+    @staticmethod
+    def resume_process(process: Any) -> None:
+        """Resume a subprocess launched with CREATE_SUSPENDED.
+
+        The root process cannot execute or spawn children until Job Object
+        assignment has completed.  Any missing/invalid native handle fails closed.
+        """
+        if os.name != "nt":
+            return
+        native_handle = getattr(process, "_handle", None)
+        if not native_handle:
+            raise WindowsJobError("subprocess native process handle unavailable")
+        status = int(ntdll.NtResumeProcess(native_handle))
+        if status != 0:
+            raise WindowsJobError(
+                f"NtResumeProcess failed with NTSTATUS 0x{status & 0xFFFFFFFF:08X}"
+            )
 
     def active_processes(self) -> int:
         if os.name != "nt":

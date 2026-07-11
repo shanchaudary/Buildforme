@@ -114,8 +114,12 @@ class ProcessSupervisor:
         }
         # Own session/process group so termination cannot hit the parent (CI/test runner).
         if os.name == "nt":
-            # CREATE_NEW_PROCESS_GROUP = 0x00000200
-            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            # The process must not execute before Job Object assignment.  Starting
+            # suspended closes the child-spawn escape window between Popen and
+            # AssignProcessToJobObject.
+            create_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            create_suspended = getattr(subprocess, "CREATE_SUSPENDED", 0x00000004)
+            popen_kwargs["creationflags"] = create_group | create_suspended
         else:
             popen_kwargs["start_new_session"] = True
 
@@ -125,26 +129,33 @@ class ProcessSupervisor:
             if os.name == "nt":
                 try:
                     windows_job = WindowsJob.create_and_assign(proc.pid)
+                    WindowsJob.resume_process(proc)
                 except Exception as exc:
+                    if windows_job is not None:
+                        try:
+                            windows_job.terminate(exit_code=1)
+                        except Exception:
+                            pass
                     terminated = terminate_process_tree(
                         proc,
-                        reason="windows_job_assignment_failed",
+                        reason="windows_job_assignment_or_resume_failed",
+                        windows_job=windows_job,
                     )
                     confirmation = dict(terminated.get("confirmation") or {})
                     confirmation["confirmed"] = False
                     problems = list(confirmation.get("problems") or [])
                     problems.append(redact_text(str(exc))[:300])
                     confirmation["problems"] = problems
-                    return redact_process_result(
+                    result = redact_process_result(
                         {
                             "ok": False,
                             "exit_code": proc.returncode,
                             "stdout": "",
-                            "stderr": "Windows Job Object assignment failed",
+                            "stderr": "Windows suspended-launch containment failed",
                             "timed_out": False,
                             "cancelled": False,
                             "duration_seconds": 0,
-                            "error": "Windows Job Object assignment failed",
+                            "error": "Windows suspended-launch containment failed",
                             "argv": argv,
                             "cwd": str(cwd_path),
                             "env_names": env_names,
@@ -156,6 +167,9 @@ class ProcessSupervisor:
                             "pid": proc.pid,
                         }
                     )
+                    if windows_job is not None:
+                        windows_job.close()
+                    return result
             if stdin_bytes is not None and proc.stdin is not None:
                 try:
                     # text mode expects str
@@ -274,6 +288,7 @@ class ProcessSupervisor:
                 reason="wait_timeout_escalate",
                 graceful_wait_sec=0.1,
                 force_wait_sec=FORCE_WAIT_SEC,
+                windows_job=windows_job,
             )
             term_log.extend(terminated["log"])
             termination_confirmation = terminated["confirmation"]

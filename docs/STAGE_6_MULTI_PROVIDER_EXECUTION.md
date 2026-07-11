@@ -90,3 +90,8 @@ Complete only when multi-provider architecture is real, isolation + evidence + i
 - Outcome fingerprints bind the full caller-produced immutable evidence bundle, including timestamps, previews, and governance fields.
 - Authentication probe commands and success semantics are code-owned. Provider records cannot supply commands or success exit codes.
 - Migration holds an exclusive cross-process coordination lock from active-run check through snapshot, validation, and atomic replacement. Normal DB reads/writes hold shared locks.
+
+
+## Windows suspended-launch containment
+
+Windows provider processes are created with `CREATE_SUSPENDED`, assigned to a kill-on-close Job Object, and resumed only after assignment succeeds. This prevents a provider from spawning an uncontained child in the interval between process creation and Job Object assignment. Every termination escalation carries the same Job Object proof authority.

@@ -88,7 +88,7 @@ class KillSwitchAdversarialTests(_Fixture):
         with self.assertRaises(ValueError):
             # even if we force status, dry-run rechecks
             run["status"] = "approved"
-            self.store.save_run(run)
+            self.store.save_run_for_setup(run)
             execute_dry_run(self.store, run["id"])
 
     def test_kill_switch_string_false_not_truthy(self):
@@ -121,7 +121,7 @@ class KillSwitchAdversarialTests(_Fixture):
         current = self.store.get_run(run["id"])
         if current["status"] != "approved":
             current["status"] = "approved"
-            self.store.save_run(current)
+            self.store.save_run_for_setup(current)
         self.store.set_execution_control(kill_switch_active=True, reason="late kill")
         with self.assertRaises(ValueError):
             execute_dry_run(self.store, run["id"])
@@ -139,7 +139,12 @@ class ProjectControlAdversarialTests(_Fixture):
                 "objective": "x",
             }
         )
-        # Wipe controls file to simulate missing governance record
+        # Wipe Stage 6 SQLite authority (and legacy JSON) to simulate missing control
+        with self.store.s6.db.transaction() as conn:
+            conn.execute(
+                "DELETE FROM project_execution_controls WHERE project_id=?",
+                ("emptyctl",),
+            )
         path = self.store.project_exec_controls_path
         if path.exists():
             path.write_text('{"controls": []}\n', encoding="utf-8")
@@ -251,7 +256,7 @@ class ApprovalIntegrityTests(_Fixture):
         packet["objective"] = "Changed after approval"
         run["packet"] = packet
         run["objective"] = packet["objective"]
-        self.store.save_run(run)
+        self.store.save_run_for_setup(run)
         if self.store.get_run(run["id"])["status"] == "approved":
             with self.assertRaises(ValueError):
                 execute_dry_run(self.store, run["id"])
@@ -376,7 +381,7 @@ class RetryAndMainBranchTests(_Fixture):
     def test_retry_red_blocked(self):
         run = self._run(risk="RED", operating_mode="PLAN_ONLY", requested_capabilities=["read_repository"])
         run["status"] = "failed"
-        self.store.save_run(run)
+        self.store.save_run_for_setup(run)
         with self.assertRaises(ValueError):
             retry_run(self.store, run["id"])
 

@@ -188,14 +188,20 @@
         <!-- VIEW: Execution control -->
         <section id="view-execution" class="view" data-view-panel="execution" hidden>
           <div class="local-only-banner">
-            Dry-run only. No coding provider is called. Local approval is not GitHub approval, merge authority, or deployment authority. There is no Run live action in Stage 5.
+            Stage 6 supervised execution: multi-provider CLI adapters, isolated worktrees, evidence, and independent verification.
+            No merge, deploy, or production authority. Provider cannot self-accept. Local approval ≠ GitHub merge.
           </div>
 
           <div class="metrics queue-metrics">
             <article class="metric"><span class="metric-label">Kill switch</span><strong class="metric-value" id="ex-kill">—</strong></article>
             <article class="metric"><span class="metric-label">Active locks</span><strong class="metric-value" id="ex-locks">—</strong></article>
-            <article class="metric"><span class="metric-label">Providers</span><strong class="metric-value" id="ex-providers">4 dry-run</strong></article>
+            <article class="metric"><span class="metric-label">Providers ready</span><strong class="metric-value" id="ex-providers">—</strong></article>
             <article class="metric"><span class="metric-label">Open runs</span><strong class="metric-value" id="ex-runs">—</strong></article>
+          </div>
+          <div class="card" style="margin-bottom:16px">
+            <div class="card-head"><div><h2>Provider health</h2><p class="card-sub">Discovered CLIs · honest unavailable · no secrets</p></div><span class="chip chip-accent">Stage 6</span></div>
+            <div id="ex-provider-health" class="table-wrap"></div>
+            <p id="ex-provider-recommend" class="card-sub" style="margin-top:10px"></p>
           </div>
 
           <div class="split packet-split">
@@ -244,6 +250,12 @@
               <div class="form-grid-2">
                 <div class="field"><label for="ex-run-packet">Saved packet id</label><input id="ex-run-packet" placeholder="pkt_..." /></div>
                 <div class="field"><label for="ex-run-branch">Target branch</label><input id="ex-run-branch" value="stage-5-execution-safety-foundation" /></div>
+              </div>
+              <div class="field"><label for="ex-run-exec-mode">Execution mode</label>
+                <select id="ex-run-exec-mode">
+                  <option value="dry_run">dry_run</option>
+                  <option value="live_supervised">live_supervised</option>
+                </select>
               </div>
               <div class="field"><label for="ex-run-mode">Operating mode</label>
                 <select id="ex-run-mode">

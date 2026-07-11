@@ -73,6 +73,31 @@ def can_transition(current: str, target: str) -> bool:
     return target in _TRANSITIONS.get(current, frozenset())
 
 
+def can_reach(current: str, target: str, *, max_depth: int = 12) -> bool:
+    """True if target is reachable from current via zero or more allowed edges."""
+    current = str(current or "").strip()
+    target = str(target or "").strip()
+    if current == target:
+        return True
+    if current not in RUN_STATUSES or target not in RUN_STATUSES:
+        return False
+    seen: set[str] = {current}
+    frontier = [current]
+    depth = 0
+    while frontier and depth < max_depth:
+        depth += 1
+        nxt_frontier: list[str] = []
+        for node in frontier:
+            for cand in _TRANSITIONS.get(node, frozenset()):
+                if cand == target:
+                    return True
+                if cand not in seen:
+                    seen.add(cand)
+                    nxt_frontier.append(cand)
+        frontier = nxt_frontier
+    return False
+
+
 def allowed_transitions(status: str) -> list[str]:
     status = str(status or "").strip()
     return sorted(_TRANSITIONS.get(status, frozenset()))

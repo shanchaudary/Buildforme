@@ -162,9 +162,9 @@ const PAGE_META = {
     desc: "Versioned, hashed, leased engineering law. Every provider, packet, and run inherits it. No bypass.",
   },
   execution: {
-    kicker: "Safety",
+    kicker: "Stage 6",
     title: "Execution control",
-    desc: "Kill switch, locks, dry-run providers, supervised runs. No live agent calls.",
+    desc: "Kill switch, locks, multi-provider discovery, dry-run and live supervised worktrees. No merge/deploy.",
   },
   planner: {
     kicker: "Control plane",
@@ -2046,10 +2046,12 @@ document.querySelector("#truth-form")?.addEventListener("submit", async (event) 
 // —— Stage 5 execution control ——
 async function refreshExecutionPage() {
   try {
-    const [ctrlRes, locksRes, provRes, runsRes, projRes, packetsRes] = await Promise.all([
+    const [ctrlRes, locksRes, provRes, healthRes, recRes, runsRes, projRes, packetsRes] = await Promise.all([
       fetch("/api/execution/control"),
       fetch("/api/repository-locks?active=true"),
       fetch("/api/providers"),
+      fetch("/api/providers/health"),
+      fetch("/api/providers/recommend?risk=YELLOW&mode=IMPLEMENTATION"),
       fetch("/api/runs"),
       fetch("/api/projects"),
       fetch("/api/packets"),
@@ -2057,6 +2059,8 @@ async function refreshExecutionPage() {
     const control = (await ctrlRes.json()).control || {};
     const locks = (await locksRes.json()).locks || [];
     const providers = (await provRes.json()).providers || [];
+    const health = (await healthRes.json()).providers || [];
+    const recommendation = await recRes.json();
     const runs = (await runsRes.json()).runs || [];
     const projects = ((await projRes.json()).projects || []).filter((p) => p.status !== "archived");
     const packets = (await packetsRes.json()).packets || [];
@@ -2064,6 +2068,8 @@ async function refreshExecutionPage() {
     setText("#ex-kill", control.kill_switch_active ? "ON" : "off");
     setText("#ex-locks", locks.length);
     setText("#ex-runs", runs.length);
+    const readyCount = health.filter((h) => h.live_ready).length;
+    setText("#ex-providers", `${readyCount}/${health.length || 4} live-ready`);
     setText(
       "#ex-kill-detail",
       control.kill_switch_active
@@ -2078,31 +2084,66 @@ async function refreshExecutionPage() {
     };
     fillProjects(document.querySelector("#ex-project"));
     fillProjects(document.querySelector("#ex-run-project"));
+    const healthById = Object.fromEntries(health.map((h) => [h.provider_id, h]));
     const provSel = document.querySelector("#ex-run-provider");
     if (provSel) {
       provSel.innerHTML = providers
-        .map((p) => `<option value="${escapeHtml(p.provider_id)}">${escapeHtml(p.display_name)} (dry-run)</option>`)
+        .map((p) => {
+          const h = healthById[p.provider_id] || {};
+          const tag = h.live_ready ? "live-ready" : h.available ? "discovered" : "unavailable";
+          return `<option value="${escapeHtml(p.provider_id)}">${escapeHtml(p.display_name)} (${tag})</option>`;
+        })
         .join("");
     }
     if (packets[0] && document.querySelector("#ex-run-packet") && !document.querySelector("#ex-run-packet").value) {
       document.querySelector("#ex-run-packet").value = packets[packets.length - 1].id || "";
     }
 
+    const healthEl = document.querySelector("#ex-provider-health");
+    if (healthEl) {
+      healthEl.innerHTML = `
+        <table class="data-table">
+          <thead><tr><th>Provider</th><th>Status</th><th>Executable</th><th>Version</th><th>Ack</th><th>Reasons</th></tr></thead>
+          <tbody>
+            ${health
+              .map(
+                (h) => `<tr>
+                <td>${escapeHtml(h.provider_id || "")}</td>
+                <td>${escapeHtml(h.status || "")}</td>
+                <td class="mono">${escapeHtml(h.executable || "—")}</td>
+                <td>${escapeHtml(String(h.version || "—").slice(0, 40))}</td>
+                <td>${h.constitution_acknowledged ? "yes" : "no"}</td>
+                <td>${escapeHtml((h.unsupported_reasons || []).join("; ") || "—")}</td>
+              </tr>`
+              )
+              .join("")}
+          </tbody>
+        </table>`;
+    }
+    const recEl = document.querySelector("#ex-provider-recommend");
+    if (recEl) {
+      const top = recommendation.recommendation || {};
+      recEl.textContent = top.provider_id
+        ? `Recommended: ${top.provider_id} (score ${top.score}) — ${(top.reasons || []).slice(0, 3).join("; ")}`
+        : "No recommendation available";
+    }
+
     const provList = document.querySelector("#ex-provider-list");
     provList.innerHTML = providers
-      .map(
-        (p) => `<article class="queue-item">
+      .map((p) => {
+        const h = healthById[p.provider_id] || {};
+        return `<article class="queue-item">
         <div class="queue-item-head"><h3 class="queue-item-title">${escapeHtml(p.display_name)}</h3>
-        <span class="chip">dry-run only</span></div>
+        <span class="chip">${escapeHtml(h.status || "unknown")}</span></div>
         <div class="queue-meta">
           <span>enabled: ${p.enabled ? "yes" : "no"}</span>
-          <span>live: false</span>
-          <span>creds: false</span>
+          <span>live_ready: ${h.live_ready ? "yes" : "no"}</span>
+          <span>ack: ${p.constitution_acknowledged ? "yes" : "no"}</span>
           <span>risk: ${(p.supported_risk_levels || []).join("/")}</span>
         </div>
         <p class="queue-action">Caps: ${(p.capabilities || []).join(", ")}</p>
-      </article>`,
-      )
+      </article>`;
+      })
       .join("") || `<div class="empty-inline">No providers</div>`;
 
     const lockList = document.querySelector("#ex-lock-list");
@@ -2141,6 +2182,7 @@ async function refreshExecutionPage() {
           <div class="queue-meta">
             <span>${escapeHtml(r.status)}</span>
             <span>${escapeHtml(r.provider_id)}</span>
+            <span>${escapeHtml(r.execution_mode || r.mode || "dry_run")}</span>
             <span>${escapeHtml(r.target_branch || "")}</span>
             <span>${escapeHtml(r.project_id || "")}</span>
           </div>
@@ -2148,7 +2190,9 @@ async function refreshExecutionPage() {
             <button type="button" class="btn btn-secondary btn-sm" data-view-run="${escapeHtml(r.id)}">View</button>
             <button type="button" class="btn btn-secondary btn-sm" data-preflight="${escapeHtml(r.id)}">Preflight</button>
             <button type="button" class="btn btn-secondary btn-sm" data-approve="${escapeHtml(r.id)}">Approve local</button>
-            <button type="button" class="btn btn-primary btn-sm" data-dry="${escapeHtml(r.id)}">Execute dry-run</button>
+            <button type="button" class="btn btn-primary btn-sm" data-dry="${escapeHtml(r.id)}">Dry-run</button>
+            <button type="button" class="btn btn-primary btn-sm" data-execute="${escapeHtml(r.id)}">Execute supervised</button>
+            <button type="button" class="btn btn-secondary btn-sm" data-review-accept="${escapeHtml(r.id)}">Accept for PR prep</button>
             <button type="button" class="btn btn-danger btn-sm" data-cancel="${escapeHtml(r.id)}">Cancel</button>
           </div>
         </article>`,
@@ -2172,6 +2216,20 @@ async function refreshExecutionPage() {
     );
     runList.querySelectorAll("[data-dry]").forEach((btn) =>
       btn.addEventListener("click", () => runAction(btn.getAttribute("data-dry"), "dry-run")),
+    );
+    runList.querySelectorAll("[data-execute]").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        if (!confirm("Execute live supervised provider in isolated worktree? No merge/deploy.")) return;
+        runAction(btn.getAttribute("data-execute"), "execute");
+      }),
+    );
+    runList.querySelectorAll("[data-review-accept]").forEach((btn) =>
+      btn.addEventListener("click", () =>
+        runAction(btn.getAttribute("data-review-accept"), "review", {
+          decision: "accept_for_pr_prep",
+          note: "Founder accept for PR prep only",
+        }),
+      ),
     );
     runList.querySelectorAll("[data-cancel]").forEach((btn) =>
       btn.addEventListener("click", () => runAction(btn.getAttribute("data-cancel"), "cancel", { reason: "UI cancel" })),
@@ -2266,6 +2324,7 @@ document.querySelector("#ex-lock-add")?.addEventListener("click", async () => {
 });
 document.querySelector("#ex-run-create")?.addEventListener("click", async () => {
   try {
+    const modeEl = document.querySelector("#ex-run-exec-mode");
     const response = await fetch("/api/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2275,6 +2334,7 @@ document.querySelector("#ex-run-create")?.addEventListener("click", async () => 
         packet_id: document.querySelector("#ex-run-packet").value.trim(),
         target_branch: document.querySelector("#ex-run-branch").value.trim(),
         operating_mode: document.querySelector("#ex-run-mode").value,
+        execution_mode: modeEl ? modeEl.value : "dry_run",
       }),
     });
     const data = await response.json();

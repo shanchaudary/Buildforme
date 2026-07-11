@@ -217,15 +217,13 @@ Under `runtime/` (typical):
 
 ## 9. Recommended next stage (when Shan approves)
 
-### Stage 6 — Supervised Live Agent Adapter Pilot (NOT started)
+### Stage 6 — Multi-Provider Supervised Execution (AUTHORIZED)
 
-Only after:
+Canonical directive: `docs/COMPLETE_BUILD_DIRECTIVE.md` and `docs/STAGE_6_MULTI_PROVIDER_EXECUTION.md`.
 
-1. Stage 5 + 5.5 are on main and smoke-tested (done for merge; re-smoke if needed)
-2. Shan **explicitly** approves Stage 6
-3. Scope remains: **one provider**, **one repo**, **GREEN/YELLOW only**, feature branch, **no merge/deploy**, kill switch + run logs enforced
+Stage 6 is a **complete multi-provider** stage (Codex/Claude/Grok/GLM CLI architecture), not a single-provider pilot.
 
-Do **not** start Stage 6 in a new session unless Shan asks for it by name.
+After Stage 6: continue Stages 7–10 per the complete-build directive. Cascada is a proving project only—not architecture.
 
 ---
 

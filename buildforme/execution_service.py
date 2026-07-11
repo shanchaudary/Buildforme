@@ -1,15 +1,20 @@
-"""Supervised run orchestration for Stage 5 (dry-run only).
+"""Supervised run orchestration for Stage 5 dry-run + Stage 6 live CLI.
 
 Stage 5.5: fail-closed gates, scope fingerprints, revalidation at action time.
 Stage 5.6: canonical Constitution leases and approval binding.
+Stage 6: multi-provider supervised execution, worktrees, evidence, verification, review.
 """
 
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from pathlib import Path
+from typing import Any  # noqa: I001
 
 from buildforme.adapters.dry_run import DryRunAdapter
+from buildforme.adapters.registry import get_adapter
+from buildforme.evidence import build_evidence_bundle
+from buildforme.outcome_evidence import build_run_outcome_evidence
 from buildforme.execution_preflight import evaluate_run_preflight
 from buildforme.governance import (
     canonicalize_repository,
@@ -22,15 +27,22 @@ from buildforme.governance import (
     validate_capabilities,
     validate_safe_id,
 )
+from buildforme.provider_discovery import health_check_provider
 from buildforme.providers import get_provider
+from buildforme.redaction import redact_event, redact_text
+from buildforme.repository_binding import pin_baseline, resolve_registered_repository
+from buildforme.review_gate import apply_founder_review_decision, build_review_package
 from buildforme.run_state import can_transition, is_terminal, transition_run
 from buildforme.storage import LocalStore, utc_now_iso
+from buildforme.verification import verify_run_result
+from buildforme.worktree import (
+    collect_diff,
+    create_isolated_worktree,
+    remove_worktree,
+)
 from governance.constitution_binding_guard import validate_approval_binding
 from governance.constitution_engine import get_engine
-from governance.constitution_lease import (
-    persist_lease_append_only,
-    validate_run_lease_against_store,
-)
+from governance.constitution_lease import validate_run_lease_against_store
 
 DEFAULT_BUDGET = {
     "max_tokens": None,
@@ -89,8 +101,15 @@ def create_run(store: LocalStore, payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Unknown provider: {provider_id}")
     if not provider.get("enabled"):
         raise ValueError(f"Provider disabled: {provider_id}")
-    if str(provider.get("mode")) != "dry_run" or provider.get("live_execution_available"):
-        raise ValueError("provider must be dry_run only")
+    execution_mode = str(payload.get("execution_mode") or "dry_run").strip().lower().replace("-", "_")
+    if execution_mode not in {"dry_run", "live_supervised"}:
+        raise ValueError("execution_mode must be dry_run or live_supervised")
+    # Registry may still say dry_run; live admission is gated at execute time by discovery.
+    provider_mode = str(provider.get("mode") or "dry_run").lower().replace("-", "_")
+    if provider_mode not in {"dry_run", "live_supervised"}:
+        raise ValueError("provider mode invalid")
+    if provider_mode not in {"dry_run", "live_supervised"}:
+        raise ValueError("provider must not enable unrestricted live mode")
 
     engine = get_engine()
     provider = engine.attach_to_provider(provider)
@@ -134,6 +153,11 @@ def create_run(store: LocalStore, payload: dict[str, Any]) -> dict[str, Any]:
     branch = validate_branch(
         payload.get("target_branch") or (packet or {}).get("target_branch") or ""
     )
+    # Reject untrusted filesystem path authority from payload
+    if payload.get("repo_root") or payload.get("repository_root") or payload.get("local_path"):
+        raise ValueError(
+            "repo_root/local_path cannot authorize execution; register repository binding on the project"
+        )
 
     requested = payload.get("requested_capabilities")
     if not isinstance(requested, list) or not requested:
@@ -158,6 +182,31 @@ def create_run(store: LocalStore, payload: dict[str, Any]) -> dict[str, Any]:
     run_id = str(payload.get("id") or f"run-{uuid.uuid4().hex[:12]}")
     validate_safe_id(run_id, field="run_id")
 
+    # Pin repository + baseline BEFORE lease/scope/approval (Stage 6 hard requirement)
+    repository_local_path = None
+    baseline_commit = None
+    baseline_ref = str(payload.get("baseline_ref") or "HEAD")
+    if execution_mode == "live_supervised":
+        binding = resolve_registered_repository(store, project=project)
+        if canonicalize_repository(str(binding.get("repository"))) != repository:
+            repository = canonicalize_repository(str(binding.get("repository")))
+        repository_local_path = str(binding.get("local_path"))
+        pinned = pin_baseline(Path(repository_local_path), baseline_ref=baseline_ref)
+        baseline_commit = pinned["baseline_commit"]
+        baseline_ref = pinned["baseline_ref"]
+    else:
+        baseline_commit = payload.get("baseline_commit")
+        repository_local_path = payload.get("repository_local_path")
+
+    # Authoritative execution branch established before worktree/approval
+    requested_target_branch = branch
+    if execution_mode == "live_supervised":
+        base_name = branch if branch.startswith("feature/") else f"feature/{branch}"
+        execution_branch = f"{base_name.rstrip('/')}-{run_id[-8:]}"
+        validate_branch(execution_branch)
+    else:
+        execution_branch = branch
+
     now = utc_now_iso()
     run = {
         "id": run_id,
@@ -167,7 +216,12 @@ def create_run(store: LocalStore, payload: dict[str, Any]) -> dict[str, Any]:
         "packet": packet,
         "provider_id": provider_id,
         "repository": repository,
-        "target_branch": branch,
+        "repository_local_path": repository_local_path,
+        "baseline_ref": baseline_ref,
+        "baseline_commit": baseline_commit,
+        "requested_target_branch": requested_target_branch,
+        "execution_branch": execution_branch,
+        "target_branch": execution_branch,  # legacy field tracks execution branch for worktree
         "operating_mode": mode,
         "risk": risk,
         "status": "draft",
@@ -187,14 +241,19 @@ def create_run(store: LocalStore, payload: dict[str, Any]) -> dict[str, Any]:
         "updated_at": now,
         "started_at": None,
         "finished_at": None,
-        "live_execution": False,
-        "mode": "dry_run",
+        "live_execution": execution_mode == "live_supervised",
+        "mode": execution_mode,
+        "execution_mode": execution_mode,
+        "transport": "cli" if execution_mode == "live_supervised" else "dry_run",
+        "worktree": None,
+        "evidence": None,
+        "verification": None,
+        "review": None,
+        "task_lock_id": None,
+        "evidence_ids": [],
     }
-    run = engine.attach_to_run(run, actor="system")
-    persist_lease_append_only(store, run["constitution_lease"])
-    _require_canonical_run_lease(store, run)
-    run["scope_fingerprint"] = compute_run_scope_fingerprint(run, packet)
-
+    # Build lease + scope in memory; validate BLACK/sensitive BEFORE any persistence
+    # so a rejected run cannot leave orphan locks or leases.
     black_hits = contains_black_instruction(material_text_blob(run, packet))
     if black_hits:
         raise ValueError(
@@ -207,49 +266,199 @@ def create_run(store: LocalStore, payload: dict[str, Any]) -> dict[str, Any]:
     if sensitive:
         raise ValueError(f"sensitive paths cannot be allowed: {sensitive[:5]}")
 
-    saved = store.save_run(run)
-    store.append_run_event(
-        saved["id"],
-        "run_created",
-        "Draft supervised run created",
-        actor="system",
-        metadata={
-            "constitution_version": saved.get("constitution_version"),
-            "constitution_hash": saved.get("constitution_hash"),
-            "constitution_lease_id": saved.get("constitution_lease_id"),
-            "constitution_lease_fingerprint": saved.get(
-                "constitution_lease_fingerprint"
-            ),
+    run = engine.attach_to_run(run, actor="system")
+    run["scope_fingerprint"] = compute_run_scope_fingerprint(run, packet)
+    if payload.get("idempotency_key"):
+        run["idempotency_key"] = str(payload.get("idempotency_key"))
+
+    task_lock_payload = None
+    if execution_mode == "live_supervised" and (payload.get("task_id") or packet_id):
+        lock_key = str(payload.get("task_id") or packet_id or run_id)
+        task_lock_payload = {
+            "task_key": lock_key,
+            "project_id": project_id,
+            "run_id": run_id,
+            "reason": "live supervised run create",
+        }
+
+    # Atomic admission: lock + lease + run + initial event (single SQLite transaction)
+    lease = run.get("constitution_lease") if isinstance(run.get("constitution_lease"), dict) else None
+    saved = store.admit_run_atomic(
+        run=run,
+        lease=lease,
+        task_lock=task_lock_payload,
+        event_type="run_created",
+        event_summary="Draft supervised run created",
+        event_actor="system",
+        event_metadata={
+            "constitution_version": run.get("constitution_version"),
+            "constitution_hash": run.get("constitution_hash"),
+            "constitution_lease_id": run.get("constitution_lease_id"),
+            "constitution_lease_fingerprint": run.get("constitution_lease_fingerprint"),
+            "execution_mode": execution_mode,
         },
     )
+    _require_canonical_run_lease(store, saved)
     return saved
+
+
+def _persist_transition(
+    store: LocalStore,
+    run: dict[str, Any],
+    *,
+    event_type: str,
+    event_summary: str = "",
+    actor: str = "system",
+    event_metadata: dict[str, Any] | None = None,
+    require_db_status_in: set[str] | frozenset[str] | None = None,
+    mutation_type: str = "status_transition",
+    transition_path: list[str] | None = None,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Atomic run mutation + event with mandatory optimistic concurrency."""
+    expected = run.get("row_version")
+    if expected is None:
+        raise ValueError("run mutation requires row_version on payload")
+    return store.commit_run_mutation(
+        run,
+        expected_row_version=int(expected),
+        mutation_type=mutation_type,
+        event_type=event_type,
+        event_summary=event_summary,
+        event_actor=actor,
+        event_metadata=event_metadata,
+        require_db_status_in=require_db_status_in,
+        transition_path=transition_path,
+        evidence=evidence,
+    )
+
+
+def _reload(store: LocalStore, run_id: str) -> dict[str, Any]:
+    return store.get_run(run_id)
+
+
+def _require_bound_scope(run: dict[str, Any]) -> str:
+    packet = run.get("packet") if isinstance(run.get("packet"), dict) else None
+    stored = str(run.get("scope_fingerprint") or "")
+    if not stored:
+        raise ValueError(
+            "run missing governed scope_fingerprint; recreate through constitutional admission"
+        )
+    computed = compute_run_scope_fingerprint(run, packet)
+    if computed != stored:
+        raise ValueError(
+            "run scope fingerprint mismatch; bound authority changed and requires a new run"
+        )
+    return computed
+
+
+def _termination_confirmed(process_result: dict[str, Any]) -> bool:
+    confirmation = process_result.get("termination_confirmation")
+    return bool(
+        process_result.get("cleanup_ok")
+        and isinstance(confirmation, dict)
+        and confirmation.get("confirmed")
+    )
+
+
+def _commit_terminal_outcome(
+    store: LocalStore,
+    *,
+    run_id: str,
+    process_result: dict[str, Any],
+    outcome: str,
+    target_status: str,
+    event_type: str,
+    event_summary: str,
+    mutation_type: str,
+    transition_path: list[str] | None = None,
+    worktree: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    current = store.get_run(run_id)
+    previous_status = str(current.get("status") or "")
+    previous_version = int(current.get("row_version") or 1)
+    proposed = dict(current)
+    path = list(transition_path) if transition_path else None
+    if path:
+        if path[0] != previous_status or path[-1] != target_status:
+            raise ValueError("terminal outcome transition path does not match stored state")
+        for nxt in path[1:]:
+            proposed = transition_run(proposed, nxt, "system", event_summary)
+    elif previous_status != target_status:
+        proposed = transition_run(proposed, target_status, "system", event_summary)
+    proposed["process_result"] = process_result
+    proposed["result_summary"] = event_summary
+    evidence = build_run_outcome_evidence(
+        run=current,
+        outcome=outcome,
+        previous_status=previous_status,
+        resulting_status=target_status,
+        previous_row_version=previous_version,
+        process_result=process_result,
+        reason=event_summary,
+        worktree=worktree,
+    )
+    saved = _persist_transition(
+        store,
+        proposed,
+        event_type=event_type,
+        event_summary=event_summary,
+        require_db_status_in={previous_status},
+        mutation_type=mutation_type,
+        transition_path=path,
+        evidence=evidence,
+    )
+    return saved, evidence
+
+
+def _startup_transition_path(from_status: str) -> list[str]:
+    """Explicit path approved→queued→starting→running from current status."""
+    full = ["approved", "queued", "starting", "running"]
+    status = str(from_status or "")
+    if status not in full:
+        raise ValueError(f"cannot build startup path from status {status!r}")
+    return full[full.index(status) :]
+
+
+def _dry_run_completion_path(from_status: str) -> list[str]:
+    full = ["running", "needs_review", "completed"]
+    status = str(from_status or "")
+    if status == "needs_review":
+        return ["needs_review", "completed"]
+    if status not in full:
+        raise ValueError(f"cannot build dry-run completion path from {status!r}")
+    return full[full.index(status) :]
 
 
 def run_preflight(store: LocalStore, run_id: str) -> dict[str, Any]:
     run = store.get_run(validate_safe_id(run_id, field="run_id"))
     if is_terminal(str(run.get("status"))):
         raise ValueError("cannot preflight terminal run")
+    _require_bound_scope(run)
     status = str(run.get("status"))
     if status == "draft":
         run = transition_run(run, "awaiting_preflight", "system", "preflight requested")
-        store.save_run(run)
+        run = _persist_transition(
+            store,
+            run,
+            event_type="preflight_started",
+            event_summary="Preflight evaluation started",
+            mutation_type="status_transition",
+        )
     elif status not in {"awaiting_preflight", "awaiting_approval", "approved"}:
         raise ValueError(f"cannot preflight from status {status}")
-
-    store.append_run_event(
-        run_id,
-        "preflight_started",
-        "Preflight evaluation started",
-        actor="system",
-    )
+    else:
+        store.append_run_event(
+            run_id,
+            "preflight_started",
+            "Preflight evaluation started",
+            actor="system",
+        )
     result = evaluate_run_preflight(run, store)
     run = store.get_run(run_id)
+    _require_bound_scope(run)
     run["preflight"] = result
     run["approval_requirements"] = list(result.get("required_approvals") or [])
-    run["scope_fingerprint"] = compute_run_scope_fingerprint(
-        run,
-        run.get("packet") if isinstance(run.get("packet"), dict) else None,
-    )
     run["updated_at"] = utc_now_iso()
 
     if result.get("passed"):
@@ -261,11 +470,12 @@ def run_preflight(store: LocalStore, run_id: str) -> dict[str, Any]:
                     "system",
                     "preflight passed; approvals required",
                 )
-            store.append_run_event(
-                run_id,
-                "preflight_passed",
-                "Preflight passed; awaiting approval",
-                actor="system",
+            saved = _persist_transition(
+                store,
+                run,
+                event_type="preflight_passed",
+                event_summary="Preflight passed; awaiting approval",
+                mutation_type="preflight_result",
             )
         else:
             if str(run.get("status")) in {"awaiting_preflight", "awaiting_approval"}:
@@ -283,24 +493,25 @@ def run_preflight(store: LocalStore, run_id: str) -> dict[str, Any]:
                         "system",
                         "preflight passed; no approvals required",
                     )
-            store.append_run_event(
-                run_id,
-                "preflight_passed",
-                "Preflight passed; auto-approved for dry-run",
-                actor="system",
+            saved = _persist_transition(
+                store,
+                run,
+                event_type="preflight_passed",
+                event_summary="Preflight passed; auto-approved for dry-run",
+                mutation_type="preflight_result",
             )
     else:
         if str(run.get("status")) == "awaiting_preflight":
             run = transition_run(run, "preflight_failed", "system", "preflight failed")
         elif can_transition(str(run.get("status")), "blocked"):
             run = transition_run(run, "blocked", "system", "preflight failed")
-        store.append_run_event(
-            run_id,
-            "preflight_failed",
-            "; ".join(result.get("blocking_reasons") or ["failed"]),
-            actor="system",
+        saved = _persist_transition(
+            store,
+            run,
+            event_type="preflight_failed",
+            event_summary="; ".join(result.get("blocking_reasons") or ["failed"]),
+            mutation_type="preflight_result",
         )
-    saved = store.save_run(run)
     return {"run": saved, "preflight": result}
 
 
@@ -312,23 +523,25 @@ def record_run_approval(
     decision: str,
     note: str = "",
     actor: str = "shan",
+    idempotency_key: str | None = None,
 ) -> dict[str, Any]:
-    run = store.get_run(validate_safe_id(run_id, field="run_id"))
+    """Record an approval attempt via one atomic store transaction.
+
+    Does not separately save approval, append events, or save_run transitions.
+    """
+    run_id = validate_safe_id(run_id, field="run_id")
+    run = store.get_run(run_id)
+    _require_bound_scope(run)
     _require_canonical_run_lease(store, run)
     actor = validate_actor(actor)
     risk = str(run.get("risk") or "")
     if risk == "BLACK" and decision == "approved":
         raise ValueError("BLACK risk cannot be approved for execution")
-    if str(run.get("status")) not in {
-        "awaiting_approval",
-        "awaiting_preflight",
-        "approved",
-        "draft",
-    }:
-        if is_terminal(str(run.get("status"))):
-            raise ValueError("cannot approve terminal run")
+    if is_terminal(str(run.get("status"))) and str(run.get("status")) not in {"approved"}:
+        raise ValueError("cannot approve terminal run")
 
     packet = run.get("packet") if isinstance(run.get("packet"), dict) else None
+    # Scope and constitution fields derived from stored run only (never caller authority)
     fingerprint = compute_run_scope_fingerprint(run, packet)
     engine = get_engine()
     approval_payload = engine.attach_to_approval(
@@ -342,80 +555,55 @@ def record_run_approval(
             "actor": actor,
             "packet_id": run.get("packet_id"),
             "task_id": run.get("task_id"),
+            "project_id": run.get("project_id"),
+            "provider_id": run.get("provider_id"),
+            "repository": run.get("repository"),
+            "baseline_commit": run.get("baseline_commit"),
+            "execution_branch": run.get("execution_branch"),
+            "requested_capabilities": list(run.get("requested_capabilities") or []),
+            "risk": run.get("risk"),
+            "constitution_lease_fingerprint": run.get("constitution_lease_fingerprint"),
+            "idempotency_key": str(idempotency_key).strip() if idempotency_key else None,
         },
         run=run,
     )
-    record = store.save_run_approval(approval_payload)
-    record_problems = validate_approval_binding(
-        record,
+    # Pre-check binding before txn (txn re-validates against live scope)
+    pre_problems = validate_approval_binding(
+        approval_payload,
         run,
         expected_scope_fingerprint=fingerprint,
     )
-    if record_problems:
-        raise ValueError(
-            "stored approval lost constitutional binding: "
-            + "; ".join(record_problems)
-        )
+    if pre_problems:
+        raise ValueError("approval binding invalid: " + "; ".join(pre_problems))
 
-    store.append_run_event(
-        run_id,
-        "approval_recorded",
-        f"{requirement_type} → {decision}",
-        actor=actor,
-        metadata={
+    expected_version = int(run.get("row_version") or 1)
+    committed = store.commit_run_approval(
+        run_id=run_id,
+        expected_row_version=expected_version,
+        approval_payload=approval_payload,
+        event_type="approval_recorded",
+        event_summary=f"{requirement_type} → {decision}",
+        event_actor=actor,
+        event_metadata={
             "requirement_type": requirement_type,
             "decision": decision,
             "scope_fingerprint": fingerprint,
             "constitution_lease_id": run.get("constitution_lease_id"),
+            "idempotency_key": approval_payload.get("idempotency_key"),
         },
     )
-
-    if decision == "rejected":
-        if can_transition(str(run.get("status")), "rejected"):
-            run = transition_run(run, "rejected", actor, note or "approval rejected")
-            store.save_run(run)
-        return {"approval": record, "run": store.get_run(run_id)}
-
-    current_run = store.get_run(run_id)
-    _require_canonical_run_lease(store, current_run)
-    current_fp = compute_run_scope_fingerprint(current_run, packet)
-    if current_fp != fingerprint:
-        raise ValueError("Approval invalidated: run scope changed during approval")
-
-    required = list(current_run.get("approval_requirements") or [])
-    approvals = store.list_run_approvals(run_id=run_id)
-    approved = _current_approved_types(
-        approvals,
-        current_run,
-        current_fp,
-        fail_on_invalid=False,
-    )
-
-    run = store.get_run(run_id)
-    if (
-        str(run.get("status")) == "awaiting_approval"
-        and required
-        and all(requirement in approved for requirement in required)
-    ):
-        run = transition_run(
-            run,
-            "approved",
-            actor,
-            "all required approvals present for current scope and constitution lease",
-        )
-        store.save_run(run)
-        store.append_run_event(
-            run_id,
-            "run_approved",
-            "Run approved for dry-run",
-            actor=actor,
-        )
-    return {"approval": record, "run": store.get_run(run_id)}
+    return {
+        "approval": committed["approval"],
+        "run": committed["run"],
+        "event": committed.get("event"),
+        "replayed": bool(committed.get("replayed")),
+    }
 
 
 def execute_dry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
     run_id = validate_safe_id(run_id, field="run_id")
     run = store.get_run(run_id)
+    _require_bound_scope(run)
     if str(run.get("status")) not in {"approved", "queued"}:
         raise ValueError(
             f"run must be approved before dry-run (status={run.get('status')})"
@@ -431,12 +619,12 @@ def execute_dry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
                 "preflight failed before dry-run",
             )
         run["preflight"] = preflight
-        store.save_run(run)
-        store.append_run_event(
-            run_id,
-            "preflight_failed",
-            "Blocked at dry-run gate",
-            actor="system",
+        _persist_transition(
+            store,
+            run,
+            event_type="preflight_failed",
+            event_summary="Blocked at dry-run gate",
+            mutation_type="preflight_result",
         )
         raise ValueError(
             "preflight failed: "
@@ -482,25 +670,26 @@ def execute_dry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
         )
     _require_canonical_run_lease(store, run)
 
-    run = transition_run(run, "queued", "system", "dry-run queued")
-    run = transition_run(run, "starting", "system", "dry-run starting")
-    run = transition_run(run, "running", "system", "dry-run running")
-    store.save_run(run)
-    store.append_run_event(
-        run_id,
-        "dry_run_started",
-        "Dry-run adapter invoked",
-        actor="system",
-        metadata={
+    path = _startup_transition_path(str(run.get("status") or "approved"))
+    # Apply intermediate transitions in memory for status_history only
+    cursor = str(run.get("status") or "")
+    for nxt in path[1:]:
+        run = transition_run(run, nxt, "system", f"dry-run advance to {nxt}")
+        cursor = nxt
+    run = _persist_transition(
+        store,
+        run,
+        event_type="dry_run_started",
+        event_summary="Dry-run adapter invoked",
+        event_metadata={
             "constitution_lease_id": run.get("constitution_lease_id"),
-            "constitution_lease_fingerprint": run.get(
-                "constitution_lease_fingerprint"
-            ),
+            "constitution_lease_fingerprint": run.get("constitution_lease_fingerprint"),
             "constitution_hash": run.get("constitution_hash"),
-            "constitution_reminder": (run.get("constitution_reminder") or {}).get(
-                "phase"
-            ),
+            "constitution_reminder": (run.get("constitution_reminder") or {}).get("phase"),
         },
+        require_db_status_in={path[0]},
+        mutation_type="process_started",
+        transition_path=path,
     )
 
     packet = run.get("packet") if isinstance(run.get("packet"), dict) else {}
@@ -534,16 +723,23 @@ def execute_dry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
             provider_id=str(run.get("provider_id") or "") or None,
             lease_id=str(run.get("constitution_lease_id") or "") or None,
         )
-        run = store.get_run(run_id)
+        run = _reload(store, run_id)
         run["constitution_compliance"] = {
             "status": "violations",
             "violations": validation.get("violations") or [],
             "validated_at": utc_now_iso(),
         }
-        store.save_run(run)
+        _persist_transition(
+            store,
+            run,
+            event_type="constitution_rejected",
+            event_summary="constitution validation rejected dry-run completion",
+            require_db_status_in={"running", "starting", "queued"},
+            mutation_type="constitution_compliance",
+        )
         raise ValueError("constitution validation rejected dry-run completion")
 
-    run = store.get_run(run_id)
+    run = _reload(store, run_id)
     _require_canonical_run_lease(store, run)
     run["dry_run_result"] = result
     run["result_summary"] = result.get("summary")
@@ -561,34 +757,673 @@ def execute_dry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
             else None
         ),
     )
-    run = transition_run(run, "needs_review", "system", "dry-run complete")
-    run = transition_run(
+    path = _dry_run_completion_path(str(run.get("status") or "running"))
+    for nxt in path[1:]:
+        run = transition_run(run, nxt, "system", f"dry-run complete to {nxt}")
+    saved = _persist_transition(
+        store,
         run,
-        "completed",
-        "system",
-        "dry-run accepted as completed (no live work)",
-    )
-    saved = store.save_run(run)
-    store.append_run_event(
-        run_id,
-        "dry_run_completed",
-        result.get("summary") or "completed",
-        actor="system",
-        metadata={
+        event_type="dry_run_completed",
+        event_summary=result.get("summary") or "completed",
+        event_metadata={
             "network_calls": [],
             "github_writes": [],
             "shell_commands_executed": [],
             "constitution_compliance": "compliant",
-            "constitution_hash": saved.get("constitution_hash"),
-            "constitution_lease_fingerprint": saved.get(
-                "constitution_lease_fingerprint"
-            ),
+            "constitution_hash": run.get("constitution_hash"),
+            "constitution_lease_fingerprint": run.get("constitution_lease_fingerprint"),
         },
+        require_db_status_in={path[0]},
+        mutation_type="dry_run_finished",
+        transition_path=path,
     )
     return {
         "run": saved,
         "dry_run": result,
         "constitution_validation": validation,
+    }
+
+
+def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
+    """Stage 6 live supervised provider execution in an isolated worktree.
+
+    Repository root comes only from registered project binding + approved baseline SHA.
+    Provider cannot mark final acceptance.
+    """
+    run_id = validate_safe_id(run_id, field="run_id")
+    run = store.get_run(run_id)
+    if str(run.get("execution_mode") or run.get("mode") or "dry_run") != "live_supervised":
+        raise ValueError("run execution_mode must be live_supervised (use run-dry-run for dry_run)")
+    _require_bound_scope(run)
+    if str(run.get("status")) not in {"approved", "queued"}:
+        raise ValueError(f"run must be approved before supervised execution (status={run.get('status')})")
+    if not run.get("baseline_commit"):
+        raise ValueError("run missing approved baseline_commit — recreate run to pin baseline before approval")
+    if not run.get("repository_local_path"):
+        raise ValueError("run missing repository_local_path binding")
+
+    _require_canonical_run_lease(store, run)
+    # Re-validate approvals against current scope (includes baseline SHA)
+    current_fp = compute_run_scope_fingerprint(
+        run, run.get("packet") if isinstance(run.get("packet"), dict) else None
+    )
+    if run.get("scope_fingerprint") and str(run.get("scope_fingerprint")) != current_fp:
+        raise ValueError("approval scope stale: run scope fingerprint changed (baseline/packet/provider)")
+
+    pre = evaluate_run_preflight(run, store)
+    if not pre.get("passed"):
+        if can_transition(str(run.get("status")), "blocked"):
+            run = transition_run(run, "blocked", "system", "preflight failed before live execution")
+        run["preflight"] = pre
+        _persist_transition(
+            store,
+            run,
+            event_type="preflight_failed",
+            event_summary="preflight failed before live execution",
+            mutation_type="preflight_result",
+        )
+        raise ValueError("preflight failed: " + "; ".join(pre.get("blocking_reasons") or []))
+
+    control = store.get_execution_control()
+    if control.get("kill_switch_active"):
+        raise ValueError("kill switch active")
+
+    required = list(run.get("approval_requirements") or [])
+    if required:
+        approvals = store.list_run_approvals(run_id=run_id)
+        approved = _current_approved_types(approvals, run, current_fp, fail_on_invalid=True)
+        missing = [r for r in required if r not in approved]
+        if missing:
+            raise ValueError(f"missing valid approvals: {', '.join(missing)}")
+
+    provider_id = str(run.get("provider_id") or "")
+    provider = get_provider(store.list_providers(), provider_id)
+    if not provider:
+        raise ValueError("provider missing")
+    engine = get_engine()
+    provider = engine.attach_to_provider(provider)
+    ack = engine.validate_provider(provider)
+    if not ack["valid"]:
+        raise ValueError("provider constitution acknowledgement invalid: " + "; ".join(ack["problems"]))
+
+    # Live-ready requires verified auth (unknown is not enough)
+    health = health_check_provider(provider_id, provider)
+    if not health.get("live_ready"):
+        raise ValueError(
+            "provider not live-ready: " + "; ".join(health.get("unsupported_reasons") or ["unavailable"])
+        )
+
+    packet = run.get("packet") if isinstance(run.get("packet"), dict) else {}
+    if not packet and run.get("packet_id"):
+        try:
+            packet = store.get_packet(str(run["packet_id"]))
+        except KeyError:
+            packet = {}
+
+    adapter = get_adapter(provider_id, mode="live_supervised", provider_record=provider)
+    prep = adapter.prepare_execution(run, packet)
+    if not prep.get("prepared"):
+        raise ValueError("adapter prepare failed: " + "; ".join(prep.get("problems") or ["unknown"]))
+
+    root = Path(str(run["repository_local_path"])).resolve()
+    approved_baseline = str(run["baseline_commit"])
+    run_branch = str(run.get("execution_branch") or "")
+    if not run_branch:
+        raise ValueError("run missing execution_branch established at create time")
+
+    worktree_meta = create_isolated_worktree(
+        repo_root=root,
+        branch=run_branch,
+        baseline_commit=approved_baseline,
+        run_id=run_id,
+        allow_dirty_main=False,
+        allow_existing_branch=False,
+        require_clean_parent=True,
+    )
+    if str(worktree_meta.get("baseline_commit")) != approved_baseline:
+        raise ValueError("worktree baseline does not match approved baseline")
+    run["worktree"] = worktree_meta
+    run["worktree_path"] = worktree_meta.get("worktree_path")
+    run["workspace_root"] = worktree_meta.get("workspace_root")
+    run["provider_version"] = (prep.get("health") or {}).get("version") or health.get("version")
+    path = _startup_transition_path(str(run.get("status") or "approved"))
+    for nxt in path[1:]:
+        run = transition_run(run, nxt, "system", f"supervised advance to {nxt}")
+    run = _persist_transition(
+        store,
+        run,
+        event_type="supervised_started",
+        event_summary=redact_text(f"Live supervised execution via {provider_id}"),
+        event_metadata={
+            "worktree": worktree_meta.get("worktree_path"),
+            "baseline": approved_baseline,
+            "execution_branch": run_branch,
+            "requested_target_branch": run.get("requested_target_branch"),
+            "constitution_lease_id": run.get("constitution_lease_id"),
+        },
+        require_db_status_in={path[0]},
+        mutation_type="process_started",
+        transition_path=path,
+    )
+
+    def on_event(event: dict[str, Any]) -> None:
+        if store.get_execution_control().get("kill_switch_active"):
+            try:
+                adapter.cancel(run_id)
+            except Exception:
+                pass
+        try:
+            cleaned = redact_event(event if isinstance(event, dict) else {"message": str(event)})
+            store.append_run_event(
+                run_id,
+                str(cleaned.get("type") or "process_event"),
+                redact_text(str(cleaned.get("message") or ""))[:500],
+                actor="system",
+                metadata={
+                    k: v
+                    for k, v in cleaned.items()
+                    if k not in {"message", "type"} and k != "stdout"
+                },
+            )
+        except Exception:
+            pass
+
+    try:
+        if store.get_execution_control().get("kill_switch_active"):
+            raise ValueError("kill switch active during start")
+        process_result = adapter.execute(
+            run,
+            packet,
+            worktree_path=worktree_meta["worktree_path"],
+            on_event=on_event,
+        )
+    except Exception as exc:
+        message = redact_text(str(exc)[:500])
+        process_result = {
+            "ok": False,
+            "exit_code": None,
+            "stdout": "",
+            "stderr": message,
+            "error": message,
+            "timed_out": False,
+            "cancelled": False,
+            "unavailable": False,
+            "cleanup_ok": False,
+            "termination_log": [],
+            "termination_confirmation": {
+                "confirmed": False,
+                "reason": "adapter raised without a confirmed supervisor result",
+                "live_pids": [],
+            },
+        }
+        try:
+            run, _outcome_evidence = _commit_terminal_outcome(
+                store,
+                run_id=run_id,
+                process_result=process_result,
+                outcome="failed",
+                target_status="failed",
+                event_type="supervised_failed",
+                event_summary=message,
+                mutation_type="failure_detail",
+                worktree=worktree_meta,
+            )
+        except ValueError:
+            run = _reload(store, run_id)
+        _release_run_locks(store, run)
+        raise
+
+    run = _reload(store, run_id)
+    if process_result.get("cancelled") or str(run.get("status")) == "cancel_requested":
+        status = str(run.get("status") or "")
+        confirmed = _termination_confirmed(process_result)
+        try:
+            if confirmed:
+                path = (
+                    ["running", "cancel_requested", "cancelled"]
+                    if status == "running"
+                    else ["cancel_requested", "cancelled"]
+                )
+                run, outcome_evidence = _commit_terminal_outcome(
+                    store,
+                    run_id=run_id,
+                    process_result=process_result,
+                    outcome="cancelled",
+                    target_status="cancelled",
+                    event_type="supervised_cancelled",
+                    event_summary="provider process cancelled with confirmed tree termination",
+                    mutation_type="cancel",
+                    transition_path=path,
+                    worktree=worktree_meta,
+                )
+                result = {"run": run, "process": process_result, "cancelled": True, "evidence": outcome_evidence}
+            else:
+                run, outcome_evidence = _commit_terminal_outcome(
+                    store,
+                    run_id=run_id,
+                    process_result=process_result,
+                    outcome="termination_unconfirmed",
+                    target_status="failed",
+                    event_type="supervised_cancel_cleanup_failed",
+                    event_summary="cancellation requested but process-tree termination was not confirmed",
+                    mutation_type="failure_detail",
+                    worktree=worktree_meta,
+                )
+                result = {"run": run, "process": process_result, "cancelled": False, "termination_unconfirmed": True, "evidence": outcome_evidence}
+        except ValueError:
+            run = _reload(store, run_id)
+            result = {"run": run, "process": process_result, "stale_outcome_suppressed": True}
+        _release_run_locks(store, run)
+        return result
+
+    if process_result.get("timed_out"):
+        confirmed = _termination_confirmed(process_result)
+        target = "timed_out" if confirmed else "failed"
+        outcome = "timed_out" if confirmed else "termination_unconfirmed"
+        event_type = "supervised_timed_out" if confirmed else "supervised_timeout_cleanup_failed"
+        summary = (
+            "provider timeout with confirmed process-tree termination"
+            if confirmed
+            else "provider timeout but process-tree termination was not confirmed"
+        )
+        try:
+            run, outcome_evidence = _commit_terminal_outcome(
+                store,
+                run_id=run_id,
+                process_result=process_result,
+                outcome=outcome,
+                target_status=target,
+                event_type=event_type,
+                event_summary=summary,
+                mutation_type="failure_detail",
+                worktree=worktree_meta,
+            )
+        except ValueError:
+            run = _reload(store, run_id)
+            outcome_evidence = {}
+        _release_run_locks(store, run)
+        return {"run": run, "process": process_result, "timed_out": confirmed, "termination_unconfirmed": not confirmed, "evidence": outcome_evidence}
+
+    if process_result.get("unavailable"):
+        summary = str(process_result.get("error") or "provider unavailable")
+        try:
+            run, outcome_evidence = _commit_terminal_outcome(
+                store,
+                run_id=run_id,
+                process_result=process_result,
+                outcome="unavailable",
+                target_status="failed",
+                event_type="supervised_unavailable",
+                event_summary=summary,
+                mutation_type="failure_detail",
+                worktree=worktree_meta,
+            )
+        except ValueError:
+            run = _reload(store, run_id)
+            outcome_evidence = {}
+        _release_run_locks(store, run)
+        return {"run": run, "process": process_result, "unavailable": True, "evidence": outcome_evidence}
+
+    if not process_result.get("ok"):
+        summary = str(process_result.get("error") or f"provider process failed with exit {process_result.get('exit_code')}")
+        try:
+            run, outcome_evidence = _commit_terminal_outcome(
+                store,
+                run_id=run_id,
+                process_result=process_result,
+                outcome="failed",
+                target_status="failed",
+                event_type="supervised_failed",
+                event_summary=summary,
+                mutation_type="failure_detail",
+                worktree=worktree_meta,
+            )
+        except ValueError:
+            run = _reload(store, run_id)
+            outcome_evidence = {}
+        _release_run_locks(store, run)
+        return {"run": run, "process": process_result, "failed": True, "evidence": outcome_evidence}
+
+    # Post-run resolution — real HEAD/branch after provider work
+    from buildforme.changed_files import collect_changed_file_manifest, collect_patch_evidence
+    from buildforme.worktree import worktree_status
+
+    wt_path = Path(worktree_meta["worktree_path"])
+    post_status = worktree_status(wt_path)
+    final_head = str(post_status.get("head_commit") or "")
+    final_branch = str(post_status.get("branch") or "")
+    worktree_meta = {
+        **worktree_meta,
+        "head_commit": final_head,
+        "branch": final_branch,
+        "post_run": True,
+    }
+    run["final_head_sha"] = final_head
+    run["head_commit"] = final_head
+
+    diff = collect_diff(wt_path, baseline_commit=approved_baseline)
+    patch_ev = collect_patch_evidence(wt_path, baseline_commit=approved_baseline)
+    if isinstance(diff.get("manifest"), dict):
+        diff["manifest"]["patch_fingerprint"] = patch_ev.get("patch_fingerprint")
+        diff["patch_fingerprint"] = patch_ev.get("patch_fingerprint")
+        if not patch_ev.get("complete"):
+            diff["manifest"]["complete"] = False
+            reasons = list(diff["manifest"].get("blocking_reasons") or [])
+            reasons.extend(patch_ev.get("blocking_reasons") or [])
+            diff["manifest"]["blocking_reasons"] = reasons
+
+    try:
+        project = store.get_project(str(run.get("project_id")))
+    except KeyError:
+        project = None
+
+    verification = verify_run_result(
+        run=run,
+        packet=packet,
+        project=project,
+        worktree_path=str(wt_path),
+        baseline_commit=approved_baseline,
+        process_result=process_result,
+        budget=run.get("budget") if isinstance(run.get("budget"), dict) else None,
+    )
+    validation = engine.validate_output(
+        {
+            "summary": redact_text((process_result.get("stdout") or "")[:2000]),
+            "text": redact_text((process_result.get("stdout") or "")[:4000]),
+            "claims_complete": bool(process_result.get("ok")),
+            "evidence": ["process_supervisor", "worktree_diff", "verification"],
+            "tests": ["deterministic_verification"],
+        },
+        context={
+            "verified_capabilities": list(run.get("requested_capabilities") or []),
+            "acceptance_criteria": packet.get("acceptance_criteria") or [],
+        },
+    )
+    if not validation.get("passed", True):
+        engine.record_validation_violations(
+            store,
+            validation,
+            run_id=run_id,
+            packet_id=str(run.get("packet_id") or "") or None,
+            provider_id=provider_id,
+            lease_id=str(run.get("constitution_lease_id") or "") or None,
+        )
+
+    # All material fields must be supplied before fingerprinting — never attach after.
+    man_fp = (diff.get("manifest") or {}).get("manifest_fingerprint")
+    if not man_fp:
+        # Fail-closed incomplete manifest still bound into evidence (distinct from patch).
+        import hashlib as _hl
+        import json as _json
+
+        man_fp = "incomplete:" + _hl.sha256(
+            _json.dumps(
+                (diff.get("manifest") or {}).get("blocking_reasons") or ["manifest_incomplete"],
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+    patch_fp = patch_ev.get("patch_fingerprint")
+    if not patch_fp:
+        import hashlib as _hl
+        import json as _json
+
+        patch_fp = "incomplete:" + _hl.sha256(
+            _json.dumps(
+                patch_ev.get("blocking_reasons") or ["patch_incomplete"],
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+    evidence = build_evidence_bundle(
+        run=run,
+        packet=packet,
+        process_result=process_result,
+        worktree=worktree_meta,
+        diff=diff,
+        provider_health=process_result.get("health") or prep.get("health") or health,
+        verification=verification,
+        events=store.list_run_events(run_id),
+        constitution_result=validation,
+        attempt=int(run.get("attempt") or 0) + 1,
+        approved_baseline_sha=approved_baseline,
+        final_head_sha=final_head,
+        execution_branch=run_branch,
+        patch_fingerprint=patch_fp,
+        manifest_fingerprint=man_fp,
+    )
+    saved_evidence = store.save_run_evidence(evidence)
+
+    review = build_review_package(
+        run=run,
+        evidence=saved_evidence,
+        verification=verification,
+        constitution_validation=validation,
+    )
+    # Attach review into a follow-up evidence record is optional; keep one primary record
+
+    # Reload — cancel/timeout may have won while provider finished
+    run = _reload(store, run_id)
+    _require_canonical_run_lease(store, run)
+    if is_terminal(str(run.get("status"))):
+        # Do not overwrite cancellation / other terminal with needs_review
+        _release_run_locks(store, run)
+        return {
+            "run": run,
+            "process": process_result,
+            "evidence": saved_evidence,
+            "verification": verification,
+            "review": review,
+            "constitution_validation": validation,
+            "stale_completion_suppressed": True,
+        }
+    run["process_result"] = {
+        "exit_code": process_result.get("exit_code"),
+        "timed_out": process_result.get("timed_out"),
+        "cancelled": process_result.get("cancelled"),
+        "duration_seconds": process_result.get("duration_seconds"),
+        "ok": process_result.get("ok"),
+        "truncated_stdout": process_result.get("truncated_stdout"),
+        "truncated_stderr": process_result.get("truncated_stderr"),
+        "cleanup_ok": process_result.get("cleanup_ok"),
+        "env_names": process_result.get("env_names") or [],
+    }
+    run["evidence"] = {
+        "evidence_id": saved_evidence.get("evidence_id"),
+        "evidence_fingerprint": saved_evidence.get("evidence_fingerprint"),
+        "files_changed": saved_evidence.get("files_changed"),
+        "file_count": saved_evidence.get("file_count"),
+        "changed_file_manifest": saved_evidence.get("changed_file_manifest"),
+        "process": saved_evidence.get("process"),
+    }
+    ids = list(run.get("evidence_ids") or [])
+    ids.append(saved_evidence.get("evidence_id"))
+    run["evidence_ids"] = ids
+    run["verification"] = verification
+    run["review"] = review
+    run["result_summary"] = redact_text(
+        f"Supervised run finished exit={process_result.get('exit_code')} "
+        f"verify_passed={verification.get('passed')} review={review.get('status')}"
+    )
+    run["constitution_compliance"] = {
+        "status": "compliant" if validation.get("passed", True) else "violations",
+        "violations": validation.get("violations") or [],
+        "validated_at": utc_now_iso(),
+    }
+    run["constitution_reminder"] = engine.reminder(
+        phase="review",
+        lease=run.get("constitution_lease") if isinstance(run.get("constitution_lease"), dict) else None,
+    )
+    run["final_head_sha"] = final_head
+    run["head_commit"] = final_head
+    run["worktree"] = worktree_meta
+    run["worktree_path"] = worktree_meta.get("worktree_path")
+
+    if str(run.get("status")) == "running" and can_transition("running", "needs_review"):
+        run = transition_run(run, "needs_review", "system", "provider finished — founder review required")
+    try:
+        saved = _persist_transition(
+            store,
+            run,
+            event_type="supervised_finished",
+            event_summary=run.get("result_summary") or "finished",
+            event_metadata={
+                "verification_passed": verification.get("passed"),
+                "review_status": review.get("status"),
+                "files_changed": saved_evidence.get("file_count"),
+                "evidence_id": saved_evidence.get("evidence_id"),
+            },
+            require_db_status_in={"running", "starting", "queued"},
+            mutation_type="supervised_finished",
+        )
+    except ValueError:
+        saved = _reload(store, run_id)
+        _release_run_locks(store, saved)
+        return {
+            "run": saved,
+            "process": process_result,
+            "evidence": saved_evidence,
+            "verification": verification,
+            "review": review,
+            "constitution_validation": validation,
+            "stale_completion_suppressed": True,
+        }
+    return {
+        "run": saved,
+        "process": process_result,
+        "evidence": saved_evidence,
+        "verification": verification,
+        "review": review,
+        "constitution_validation": validation,
+    }
+
+
+def founder_review_decision(
+    store: LocalStore,
+    run_id: str,
+    *,
+    decision: str,
+    note: str = "",
+    actor: str = "shan",
+    cleanup_worktree: bool = False,
+) -> dict[str, Any]:
+    """Founder decision after Stage 6 review. Never merges or deploys.
+
+    Hard blocks reject accept. Run status, event, and decision evidence commit
+    in one transaction — evidence failure cannot leave the run completed.
+    """
+    from buildforme.evidence import build_founder_decision_evidence
+
+    run_id = validate_safe_id(run_id, field="run_id")
+    run = store.get_run(run_id)
+    actor = validate_actor(actor)
+    current = str(run.get("status") or "")
+    if current not in {"needs_review"}:
+        # Only needs_review may receive a new founder decision (no silent re-decide)
+        raise ValueError(
+            f"founder decision only allowed from needs_review (status={current})"
+        )
+
+    expected_version = int(run.get("row_version") or 1)
+
+    # Load parent execution evidence — required for live decisions
+    try:
+        parent_evidence = store.get_latest_execution_evidence(run_id)
+    except KeyError as exc:
+        raise ValueError(
+            "founder decision requires persisted execution evidence for this run"
+        ) from exc
+
+    if str(parent_evidence.get("run_id") or "") != run_id:
+        raise ValueError("parent execution evidence run_id mismatch")
+    if not parent_evidence.get("evidence_id") or not parent_evidence.get(
+        "evidence_fingerprint"
+    ):
+        raise ValueError("parent execution evidence missing id or fingerprint")
+
+    verification = run.get("verification") if isinstance(run.get("verification"), dict) else {}
+
+    # Review gate — pure computation, no persistence
+    result = apply_founder_review_decision(
+        run,
+        decision=decision,
+        note=note,
+        actor=actor,
+        evidence=parent_evidence,
+        verification=verification,
+    )
+    next_status = str(result["next_status"])
+    hard_blocks = list(result.get("hard_blocks") or [])
+    review = dict(result["review"])
+
+    # Fixed immutable decision timestamp before fingerprinting
+    decision_timestamp = utc_now_iso()
+    review["decided_at"] = decision_timestamp
+
+    if next_status != current:
+        if not can_transition(current, next_status):
+            raise ValueError(f"invalid founder transition {current} → {next_status}")
+        run_after = transition_run(run, next_status, actor, note or decision)
+    else:
+        # request_changes may keep needs_review
+        run_after = dict(run)
+        run_after["updated_at"] = utc_now_iso()
+    run_after["review"] = review
+
+    decision_ev = build_founder_decision_evidence(
+        run=run_after,
+        parent_evidence=parent_evidence,
+        decision=decision,
+        actor=actor,
+        note=note,
+        review=review,
+        hard_blocks=hard_blocks,
+        previous_status=current,
+        resulting_status=str(run_after.get("status") or next_status),
+        previous_row_version=expected_version,
+        decision_timestamp=decision_timestamp,
+        cleanup_requested=bool(cleanup_worktree),
+        verification=verification,
+    )
+
+    # Single atomic commit: evidence + run transition + event (fail closed)
+    committed = store.commit_founder_decision(
+        run=run_after,
+        expected_row_version=expected_version,
+        decision_evidence=decision_ev,
+        event_type="founder_review_decision",
+        event_summary=redact_text(f"{decision}: {note}"),
+        event_actor=actor,
+        event_metadata={
+            "decision": decision,
+            "resulting_status": run_after.get("status"),
+            "previous_status": current,
+            "parent_evidence_id": parent_evidence.get("evidence_id"),
+            "hard_blocks": hard_blocks,
+            "decision_timestamp": decision_timestamp,
+        },
+    )
+    saved = committed["run"]
+    decision_saved = committed["decision_evidence"]
+
+    if cleanup_worktree and saved.get("worktree_path") and saved.get("repository_local_path"):
+        try:
+            remove_worktree(
+                repo_root=Path(str(saved["repository_local_path"])),
+                worktree_path=Path(str(saved["worktree_path"])),
+                force=True,
+            )
+        except Exception as exc:
+            # Cleanup is non-authority side-effect; record event but do not undo decision
+            store.append_run_event(
+                run_id,
+                "worktree_cleanup_failed",
+                redact_text(str(exc)[:300]),
+                actor="system",
+            )
+    _release_run_locks(store, saved)
+    return {
+        "run": store.get_run(run_id),
+        "decision": decision,
+        "decision_evidence": decision_saved,
     }
 
 
@@ -599,26 +1434,138 @@ def cancel_run(
     actor: str = "shan",
     reason: str = "",
 ) -> dict[str, Any]:
-    run = store.get_run(validate_safe_id(run_id, field="run_id"))
+    run_id = validate_safe_id(run_id, field="run_id")
+    run = store.get_run(run_id)
     actor = validate_actor(actor)
     status = str(run.get("status"))
     if is_terminal(status):
         raise ValueError("cannot cancel terminal run")
     note = reason or "cancel requested"
-    if status in {"running", "starting", "queued"}:
-        run = transition_run(run, "cancel_requested", actor, note)
-        store.save_run(run)
-        store.append_run_event(run_id, "cancel_requested", note, actor=actor)
-        run = transition_run(run, "cancelled", actor, note)
+
+    prestart_statuses = {
+        "draft",
+        "awaiting_preflight",
+        "awaiting_approval",
+        "approved",
+        "needs_review",
+    }
+    if status in prestart_statuses:
+        process_result = {
+            "cancelled": True,
+            "cleanup_ok": True,
+            "termination_log": [],
+            "termination_confirmation": {
+                "confirmed": True,
+                "root_exited": True,
+                "group_absent": True,
+                "reason": "governed lifecycle proves no provider process is active",
+                "live_pids": [],
+                "method": "lifecycle_prestart_or_postrun",
+            },
+        }
+    else:
+        from buildforme.process_supervisor import get_process_supervisor
+
+        try:
+            process_result = get_process_supervisor().cancel(run_id)
+        except Exception as exc:
+            process_result = {
+                "cancelled": True,
+                "cleanup_ok": False,
+                "error": redact_text(str(exc)[:500]),
+                "termination_log": [],
+                "termination_confirmation": {
+                    "confirmed": False,
+                    "reason": "cancel API raised",
+                    "live_pids": [],
+                },
+            }
+
+    if status in {"running", "starting", "queued", "cancel_requested"}:
+        confirmed = _termination_confirmed(process_result)
+        if confirmed:
+            if status == "cancel_requested":
+                path = ["cancel_requested", "cancelled"]
+            else:
+                path = [status, "cancel_requested", "cancelled"]
+            saved, evidence = _commit_terminal_outcome(
+                store,
+                run_id=run_id,
+                process_result=process_result,
+                outcome="cancelled",
+                target_status="cancelled",
+                event_type="run_cancelled",
+                event_summary=note,
+                mutation_type="cancel",
+                transition_path=path,
+                worktree=run.get("worktree") if isinstance(run.get("worktree"), dict) else None,
+            )
+        else:
+            saved, evidence = _commit_terminal_outcome(
+                store,
+                run_id=run_id,
+                process_result=process_result,
+                outcome="termination_unconfirmed",
+                target_status="failed",
+                event_type="cancel_cleanup_failed",
+                event_summary="cancel requested but process-tree termination was not confirmed",
+                mutation_type="failure_detail",
+                worktree=run.get("worktree") if isinstance(run.get("worktree"), dict) else None,
+            )
     elif can_transition(status, "rejected"):
-        run = transition_run(run, "rejected", actor, note)
+        process_result.setdefault("cleanup_ok", True)
+        process_result.setdefault(
+            "termination_confirmation",
+            {
+                "confirmed": True,
+                "reason": "run had not started; no active process tree",
+                "live_pids": [],
+            },
+        )
+        saved, evidence = _commit_terminal_outcome(
+            store,
+            run_id=run_id,
+            process_result=process_result,
+            outcome="cancelled",
+            target_status="rejected",
+            event_type="run_cancelled_before_start",
+            event_summary=note,
+            mutation_type="cancel",
+        )
     elif can_transition(status, "blocked"):
-        run = transition_run(run, "blocked", actor, note)
+        process_result.setdefault("cleanup_ok", True)
+        process_result.setdefault(
+            "termination_confirmation",
+            {
+                "confirmed": True,
+                "reason": "run had not started; no active process tree",
+                "live_pids": [],
+            },
+        )
+        saved, evidence = _commit_terminal_outcome(
+            store,
+            run_id=run_id,
+            process_result=process_result,
+            outcome="cancelled",
+            target_status="blocked",
+            event_type="run_cancelled_before_start",
+            event_summary=note,
+            mutation_type="cancel",
+        )
     else:
         raise ValueError(f"cannot cancel from status {status}")
-    saved = store.save_run(run)
-    store.append_run_event(run_id, "run_cancelled", note, actor=actor)
+    _release_run_locks(store, saved)
+    saved["outcome_evidence_id"] = evidence.get("evidence_id")
     return saved
+
+def _release_run_locks(store: LocalStore, run: dict[str, Any]) -> None:
+    lock_id = run.get("task_lock_id")
+    if lock_id:
+        try:
+            store.release_task_lock(str(lock_id), reason=f"run {run.get('id')} finished")
+        except Exception:
+            pass
+
 
 
 def retry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
@@ -643,6 +1590,10 @@ def retry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
     max_attempts = int(parent.get("max_attempts") or 1)
     if attempt >= max_attempts:
         raise ValueError("max attempts exceeded")
+    # Retry preserves authority: mode, provider, packet, capabilities.
+    # Live baseline is re-pinned at create (not copied stale SHA from failed run).
+    # Execution branch is re-derived per new run_id (not reused).
+    parent_mode = str(parent.get("execution_mode") or parent.get("mode") or "dry_run")
     child = create_run(
         store,
         {
@@ -652,7 +1603,8 @@ def retry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
             "packet": parent.get("packet"),
             "provider_id": parent.get("provider_id"),
             "repository": parent.get("repository"),
-            "target_branch": parent.get("target_branch"),
+            "target_branch": parent.get("requested_target_branch")
+            or parent.get("target_branch"),
             "operating_mode": parent.get("operating_mode"),
             "risk": parent.get("risk"),
             "requested_capabilities": parent.get("requested_capabilities"),
@@ -661,6 +1613,8 @@ def retry_run(store: LocalStore, run_id: str) -> dict[str, Any]:
             "attempt": attempt,
             "budget": parent.get("budget"),
             "parent_run_id": parent.get("id"),
+            "execution_mode": parent_mode,
+            "baseline_ref": parent.get("baseline_ref") or "HEAD",
         },
     )
     store.append_run_event(

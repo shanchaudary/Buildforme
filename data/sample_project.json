@@ -7,7 +7,18 @@
     "status": "active",
     "objective": "Founder control plane for supervising AI coding agents safely",
     "current_stage_id": "bf-stage-4",
-    "sample": true
+    "sample": true,
+    "primary_language": "python",
+    "verification_profile": {
+      "profile_id": "buildforme-python",
+      "language": "python",
+      "test_command": ["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"],
+      "lint_command": null,
+      "typecheck_command": null,
+      "build_command": null,
+      "forbidden_paths": [".env", "secrets/**", "credentials/**"],
+      "protected_branches": ["main", "master"]
+    }
   },
   "stages": [
     {

@@ -36,6 +36,10 @@ DEFAULT_RUN_APPROVALS_NAME = "run_approvals.json"
 DEFAULT_EXECUTION_POLICIES_NAME = "execution_policies.json"
 DEFAULT_CONSTITUTION_LEASES_NAME = "constitution_leases.json"
 DEFAULT_CONSTITUTION_VIOLATIONS_NAME = "constitution_violations.json"
+DEFAULT_TASK_LOCKS_NAME = "task_locks.json"
+DEFAULT_EVIDENCE_NAME = "run_evidence.json"
+DEFAULT_REPO_BINDINGS_NAME = "repository_bindings.json"
+DEFAULT_FOUNDER_SESSIONS_NAME = "founder_sessions.json"
 
 LOCK_SCOPES = {"all", "write", "merge", "production", "branch"}
 PROJECT_EXEC_STATUSES = {"enabled", "paused", "locked"}
@@ -141,6 +145,29 @@ class LocalStore:
         self.execution_policies_path = self.runtime_dir / DEFAULT_EXECUTION_POLICIES_NAME
         self.constitution_leases_path = self.runtime_dir / DEFAULT_CONSTITUTION_LEASES_NAME
         self.constitution_violations_path = self.runtime_dir / DEFAULT_CONSTITUTION_VIOLATIONS_NAME
+        self.task_locks_path = self.runtime_dir / DEFAULT_TASK_LOCKS_NAME
+        self.evidence_path = self.runtime_dir / DEFAULT_EVIDENCE_NAME
+        self.repo_bindings_path = self.runtime_dir / DEFAULT_REPO_BINDINGS_NAME
+        self.founder_sessions_path = self.runtime_dir / DEFAULT_FOUNDER_SESSIONS_NAME
+        self._io_lock = __import__("threading").RLock()
+        # Stage 6 transactional authority (SQLite WAL)
+        from buildforme.execution_store import Stage6Store
+
+        self.s6 = Stage6Store(self.runtime_dir / "buildforme_execution.db")
+        self.db_path = self.runtime_dir / "buildforme_execution.db"
+
+    def close(self) -> None:
+        """Release SQLite handles (important for Windows temp cleanup)."""
+        try:
+            self.s6.db.close()
+        except Exception:
+            pass
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     # —— Tasks (existing API) ——
 
@@ -413,6 +440,10 @@ class LocalStore:
             "objective": str(payload.get("objective") or "").strip(),
             "current_stage_id": payload.get("current_stage_id"),
             "sample": bool(payload.get("sample", False)),
+            "primary_language": payload.get("primary_language"),
+            "verification_profile": payload.get("verification_profile"),
+            "metadata": payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+            "local_repository_root": payload.get("local_repository_root"),
             "created_at": now,
             "updated_at": now,
         }
@@ -421,6 +452,13 @@ class LocalStore:
             if str(existing.get("id")) == project_id:
                 record["created_at"] = existing.get("created_at") or now
                 record["updated_at"] = now
+                # Preserve verification_profile/metadata if not provided
+                if record.get("verification_profile") is None:
+                    record["verification_profile"] = existing.get("verification_profile")
+                if not record.get("metadata"):
+                    record["metadata"] = existing.get("metadata") or {}
+                if record.get("local_repository_root") is None:
+                    record["local_repository_root"] = existing.get("local_repository_root")
                 projects[index] = record
                 updated = True
                 break
@@ -784,56 +822,37 @@ class LocalStore:
     # —— Stage 5: execution safety ——
 
     def get_execution_control(self) -> dict[str, Any]:
-        if not self.execution_control_path.exists():
-            record = {
-                "id": "global",
-                "kill_switch_active": False,
-                "reason": "",
-                "activated_by": "",
-                "activated_at": None,
-                "updated_at": utc_now_iso(),
-            }
-            self._atomic_write(self.execution_control_path, record)
-            return record
-        try:
-            data = json.loads(self.execution_control_path.read_text(encoding="utf-8") or "{}")
-        except json.JSONDecodeError:
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
-        data.setdefault("id", "global")
-        data.setdefault("kill_switch_active", False)
-        return data
+        record = self.s6.get_execution_control()
+        record.setdefault("id", "global")
+        return record
 
     def set_execution_control(self, *, kill_switch_active: bool, reason: str = "", actor: str = "shan") -> dict[str, Any]:
         from buildforme.governance import parse_bool_strict, validate_actor
 
         kill = parse_bool_strict(kill_switch_active, field="kill_switch_active")
         actor = validate_actor(actor)
-        previous = self.get_execution_control()
-        now = utc_now_iso()
-        record = {
-            "id": "global",
-            "kill_switch_active": kill,
-            "reason": str(reason or ""),
-            "activated_by": actor if kill else previous.get("activated_by") or "",
-            "activated_at": now if kill else None,
-            "updated_at": now,
-            "previous_kill_switch_active": bool(previous.get("kill_switch_active")),
-        }
-        self._atomic_write(self.execution_control_path, record)
+        record = self.s6.set_execution_control(kill_switch_active=kill, reason=str(reason or ""), actor=actor)
+        record["id"] = "global"
+        record["activated_by"] = actor if kill else ""
         self.append_event(
             {
-                "event_type": "kill_switch_activated" if kill_switch_active else "kill_switch_deactivated",
+                "event_type": "kill_switch_activated" if kill else "kill_switch_deactivated",
                 "project_id": None,
                 "target_type": "execution_control",
                 "target_id": "global",
-                "summary": reason or ("activated" if kill_switch_active else "deactivated"),
+                "summary": reason or ("activated" if kill else "deactivated"),
             }
         )
         return record
 
     def get_project_execution_control(self, project_id: str) -> dict[str, Any]:
+        # SQLite is Stage 6 authority for project execution controls.
+        record = self.s6.get_project_execution_control(str(project_id))
+        if record:
+            out = dict(record)
+            out["explicit"] = True
+            return out
+        # One-time JSON compatibility import (legacy Stage 5 files only).
         data = self._load_object(
             self.project_exec_controls_path,
             default={"controls": []},
@@ -841,9 +860,14 @@ class LocalStore:
         )
         for item in data.get("controls") or []:
             if str(item.get("project_id")) == str(project_id):
-                out = dict(item)
-                out["explicit"] = True
-                return out
+                status = str(item.get("execution_status") or "locked")
+                if status in PROJECT_EXEC_STATUSES:
+                    return self.s6.set_project_execution_control(
+                        str(project_id),
+                        execution_status=status,
+                        reason=str(item.get("reason") or "imported from JSON"),
+                        actor=str(item.get("actor") or "system"),
+                    )
         # Fail closed: missing control is not enabled.
         return {
             "project_id": project_id,
@@ -859,32 +883,17 @@ class LocalStore:
         *,
         execution_status: str,
         reason: str = "",
+        actor: str = "shan",
     ) -> dict[str, Any]:
         self.get_project(project_id)
         if execution_status not in PROJECT_EXEC_STATUSES:
             raise ValueError(f"execution_status must be one of {sorted(PROJECT_EXEC_STATUSES)}")
-        record = {
-            "project_id": project_id,
-            "execution_status": execution_status,
-            "reason": str(reason or ""),
-            "updated_at": utc_now_iso(),
-            "explicit": True,
-        }
-        data = self._load_object(
-            self.project_exec_controls_path,
-            default={"controls": []},
-            list_key="controls",
+        record = self.s6.set_project_execution_control(
+            project_id,
+            execution_status=execution_status,
+            reason=str(reason or ""),
+            actor=actor,
         )
-        controls = list(data.get("controls") or [])
-        updated = False
-        for index, item in enumerate(controls):
-            if str(item.get("project_id")) == str(project_id):
-                controls[index] = record
-                updated = True
-                break
-        if not updated:
-            controls.append(record)
-        self._atomic_write(self.project_exec_controls_path, {"controls": controls})
         self.append_event(
             {
                 "event_type": "project_execution_control_changed",
@@ -902,32 +911,35 @@ class LocalStore:
         active_only: bool = False,
         repository: str | None = None,
     ) -> list[dict[str, Any]]:
-        data = self._load_object(self.repo_locks_path, default={"locks": []}, list_key="locks")
-        locks = list(data.get("locks") or [])
-        if repository:
-            locks = [lock for lock in locks if str(lock.get("repository")) == str(repository)]
+        locks = self.s6.list_repository_locks(active_only=active_only, repository=repository)
+        # Normalize status field for preflight (active bool → status string)
+        out = []
+        for lock in locks:
+            item = dict(lock)
+            if item.get("active") is False or item.get("released_at"):
+                item["status"] = "released"
+            else:
+                item["status"] = "active"
+                item["active"] = True
+            out.append(item)
         if active_only:
-            locks = [lock for lock in locks if str(lock.get("status")) == "active"]
-        return locks
+            out = [x for x in out if str(x.get("status")) == "active"]
+        return out
 
     def create_repository_lock(self, payload: dict[str, Any]) -> dict[str, Any]:
         repository = _normalize_repo(str(payload.get("repository") or ""))
         scope = str(payload.get("lock_scope") or "all")
         if scope not in LOCK_SCOPES:
             raise ValueError(f"lock_scope must be one of {sorted(LOCK_SCOPES)}")
-        record = {
-            "id": str(payload.get("id") or f"lock-{uuid.uuid4().hex[:10]}"),
-            "repository": repository,
-            "lock_scope": scope,
-            "status": "active",
-            "reason": str(payload.get("reason") or "").strip(),
-            "project_id": payload.get("project_id"),
-            "created_at": utc_now_iso(),
-            "released_at": None,
-        }
-        locks = self.list_repository_locks()
-        locks.append(record)
-        self._atomic_write(self.repo_locks_path, {"locks": locks})
+        record = self.s6.create_repository_lock(
+            {
+                **payload,
+                "repository": repository,
+                "lock_scope": scope,
+                "status": "active",
+            }
+        )
+        record["status"] = "active"
         self.append_event(
             {
                 "event_type": "repository_lock_created",
@@ -940,21 +952,8 @@ class LocalStore:
         return record
 
     def release_repository_lock(self, lock_id: str, *, reason: str = "") -> dict[str, Any]:
-        locks = self.list_repository_locks()
-        found = None
-        for index, item in enumerate(locks):
-            if str(item.get("id")) == str(lock_id):
-                updated = dict(item)
-                updated["status"] = "released"
-                updated["released_at"] = utc_now_iso()
-                if reason:
-                    updated["release_reason"] = reason
-                locks[index] = updated
-                found = updated
-                break
-        if not found:
-            raise KeyError(f"Lock not found: {lock_id}")
-        self._atomic_write(self.repo_locks_path, {"locks": locks})
+        found = self.s6.release_repository_lock(lock_id, reason=reason)
+        found["status"] = "released"
         self.append_event(
             {
                 "event_type": "repository_lock_released",
@@ -972,13 +971,13 @@ class LocalStore:
         if not self.providers_path.exists():
             providers = default_provider_registry()
             self._atomic_write(self.providers_path, {"providers": providers})
-            return providers
-        data = self._load_object(self.providers_path, default={"providers": []}, list_key="providers")
-        providers = list(data.get("providers") or [])
-        if not providers:
-            providers = default_provider_registry()
-            self._atomic_write(self.providers_path, {"providers": providers})
-        # Force dry-run invariants + constitution field defaults
+        else:
+            data = self._load_object(self.providers_path, default={"providers": []}, list_key="providers")
+            providers = list(data.get("providers") or [])
+            if not providers:
+                providers = default_provider_registry()
+                self._atomic_write(self.providers_path, {"providers": providers})
+        # Force dry-run invariants + merge SQLite constitution acks (authoritative)
         for item in providers:
             item["mode"] = "dry_run"
             item["live_execution_available"] = False
@@ -989,6 +988,19 @@ class LocalStore:
             item.setdefault("constitution_hash", None)
             item.setdefault("constitution_last_refresh", None)
             item.setdefault("constitution_acknowledged_at", None)
+            ack = self.s6.get_provider_ack(str(item.get("provider_id")))
+            if ack:
+                for key in (
+                    "constitution_acknowledged",
+                    "constitution_version",
+                    "constitution_hash",
+                    "constitution_last_refresh",
+                    "constitution_acknowledged_at",
+                    "constitution_ack_actor",
+                    "constitution_supported",
+                ):
+                    if key in ack and ack[key] is not None:
+                        item[key] = ack[key]
         return providers
 
     def get_provider_record(self, provider_id: str) -> dict[str, Any]:
@@ -1017,11 +1029,14 @@ class LocalStore:
         return found
 
     def set_provider_constitution_ack(self, provider_id: str, ack: dict[str, Any]) -> dict[str, Any]:
-        """Persist constitution acknowledgement fields only (Stage 5.6).
-
-        Does not accept credentials or live mode. Single authority for provider
-        constitution binding lives in governance.constitution_engine.
-        """
+        """Persist constitution acknowledgement (SQLite authority + provider registry mirror)."""
+        # Ensure provider exists in registry
+        self.get_provider_record(provider_id)
+        s6_ack = self.s6.set_provider_constitution_ack(provider_id, ack or {})
+        # Mirror into providers.json for UI listing compatibility
+        providers = self.list_providers()
+        updated_list = []
+        found = None
         allowed = {
             "constitution_supported",
             "constitution_acknowledged",
@@ -1031,16 +1046,14 @@ class LocalStore:
             "constitution_acknowledged_at",
             "constitution_ack_actor",
         }
-        providers = self.list_providers()
-        updated_list = []
-        found = None
         for item in providers:
             if str(item.get("provider_id")) == str(provider_id):
                 record = dict(item)
-                for key, value in (ack or {}).items():
-                    if key in allowed:
-                        record[key] = value
-                # Hard invariants
+                for key in allowed:
+                    if key in s6_ack:
+                        record[key] = s6_ack[key]
+                    elif key in (ack or {}):
+                        record[key] = ack[key]
                 record["mode"] = "dry_run"
                 record["live_execution_available"] = False
                 record["credentials_configured"] = False
@@ -1053,43 +1066,18 @@ class LocalStore:
         if not found:
             raise KeyError(f"Provider not found: {provider_id}")
         self._atomic_write(self.providers_path, {"providers": updated_list})
+        # Merge s6 + registry
+        found.update({k: s6_ack.get(k, found.get(k)) for k in allowed})
         return found
 
     def save_constitution_lease(self, lease: dict[str, Any]) -> dict[str, Any]:
-        data = self._load_object(
-            self.constitution_leases_path, default={"leases": []}, list_key="leases"
-        )
-        leases = list(data.get("leases") or [])
-        lid = str(lease.get("lease_id") or "")
-        if not lid:
-            raise ValueError("lease_id required")
-        record = dict(lease)
-        record["updated_at"] = utc_now_iso()
-        replaced = False
-        for idx, existing in enumerate(leases):
-            if str(existing.get("lease_id")) == lid:
-                leases[idx] = record
-                replaced = True
-                break
-        if not replaced:
-            leases.insert(0, record)
-        self._atomic_write(self.constitution_leases_path, {"leases": leases[:500]})
-        return record
+        return self.s6.save_constitution_lease(lease)
 
     def list_constitution_leases(self, *, limit: int = 100, run_id: str | None = None) -> list[dict[str, Any]]:
-        data = self._load_object(
-            self.constitution_leases_path, default={"leases": []}, list_key="leases"
-        )
-        leases = list(data.get("leases") or [])
-        if run_id is not None:
-            leases = [x for x in leases if str(x.get("run_id")) == str(run_id)]
-        return leases[: max(1, min(500, int(limit)))]
+        return self.s6.list_constitution_leases(limit=limit, run_id=run_id)
 
     def get_constitution_lease(self, lease_id: str) -> dict[str, Any]:
-        for item in self.list_constitution_leases(limit=500):
-            if str(item.get("lease_id")) == str(lease_id):
-                return item
-        raise KeyError(f"Constitution lease not found: {lease_id}")
+        return self.s6.get_constitution_lease(lease_id)
 
     def append_constitution_violation(self, payload: dict[str, Any]) -> dict[str, Any]:
         data = self._load_object(
@@ -1138,6 +1126,78 @@ class LocalStore:
             items = [x for x in items if str(x.get("run_id")) == str(run_id)]
         return items[: max(1, min(1000, int(limit)))]
 
+    def list_task_locks(self, *, active_only: bool = False) -> list[dict[str, Any]]:
+        return self.s6.list_task_locks(active_only=active_only)
+
+    def create_task_lock(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.s6.create_task_lock(payload)
+
+    def release_task_lock(self, lock_id: str, *, reason: str = "") -> dict[str, Any]:
+        return self.s6.release_task_lock(lock_id, reason=reason)
+
+    def save_run_evidence(self, evidence: dict[str, Any]) -> dict[str, Any]:
+        return self.s6.save_run_evidence(evidence)
+
+    def get_run_evidence(self, run_id: str) -> dict[str, Any]:
+        return self.s6.get_run_evidence(run_id)
+
+    def get_latest_execution_evidence(self, run_id: str) -> dict[str, Any]:
+        return self.s6.get_latest_execution_evidence(run_id)
+
+    def get_evidence_by_id(self, evidence_id: str) -> dict[str, Any]:
+        return self.s6.get_evidence_by_id(evidence_id)
+
+    def commit_founder_decision(self, **kwargs: Any) -> dict[str, Any]:
+        return self.s6.commit_founder_decision(**kwargs)
+
+    def list_run_evidence(self, *, run_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        return self.s6.list_run_evidence(run_id=run_id, limit=limit)
+
+    def register_repository_binding(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.s6.register_repository_binding(payload)
+
+    def list_repository_bindings(self) -> list[dict[str, Any]]:
+        return self.s6.list_repository_bindings()
+
+    def get_repository_binding(self, repository: str) -> dict[str, Any] | None:
+        return self.s6.get_repository_binding(repository)
+
+    def create_founder_session(
+        self,
+        *,
+        actor: str = "shan",
+        ttl_seconds: int = 3600,
+        admin_secret: str | None = None,
+    ) -> dict[str, Any]:
+        from buildforme.founder_auth import (
+            load_or_create_admin_secret,
+            mint_session_tokens,
+            session_record,
+            verify_admin_secret,
+        )
+
+        if not verify_admin_secret(self.runtime_dir, admin_secret):
+            raise ValueError("invalid admin secret — founder authority cannot be self-minted")
+        token, token_hash, csrf, csrf_hash = mint_session_tokens()
+        record = session_record(
+            actor=actor,
+            token_hash=token_hash,
+            csrf_hash=csrf_hash,
+            ttl_seconds=ttl_seconds,
+        )
+        self.s6.create_founder_session_record(record)
+        # Ensure secret file exists for operators
+        load_or_create_admin_secret(self.runtime_dir)
+        return {
+            "token": token,
+            "csrf_token": csrf,
+            "actor": actor,
+            "expires_in": ttl_seconds,
+        }
+
+    def validate_founder_token(self, token: str | None) -> dict[str, Any]:
+        return self.s6.validate_founder_token(token)
+
     def get_execution_policy(self) -> dict[str, Any]:
         default = {
             "max_concurrent_global_runs": 1,
@@ -1162,19 +1222,37 @@ class LocalStore:
         return merged
 
     def list_runs(self, *, project_id: str | None = None) -> list[dict[str, Any]]:
-        data = self._load_object(self.runs_path, default={"runs": []}, list_key="runs")
-        runs = list(data.get("runs") or [])
-        if project_id is not None:
-            runs = [r for r in runs if str(r.get("project_id")) == str(project_id)]
-        return runs
+        return self.s6.list_runs(project_id=project_id)
 
     def get_run(self, run_id: str) -> dict[str, Any]:
-        for item in self.list_runs():
-            if str(item.get("id")) == str(run_id):
-                return item
-        raise KeyError(f"Run not found: {run_id}")
+        return self.s6.get_run(run_id)
 
-    def save_run(self, run: dict[str, Any]) -> dict[str, Any]:
+    def save_run(
+        self,
+        run: dict[str, Any],
+        *,
+        expected_row_version: int | None = None,
+        allow_unversioned: bool = False,
+    ) -> dict[str, Any]:
+        return self.s6.save_run(
+            run,
+            expected_row_version=expected_row_version,
+            allow_unversioned=allow_unversioned,
+        )
+
+    def save_run_for_setup(self, run: dict[str, Any]) -> dict[str, Any]:
+        return self.s6.save_run_for_setup(run)
+
+    def admit_run_atomic(self, **kwargs: Any) -> dict[str, Any]:
+        return self.s6.admit_run_atomic(**kwargs)
+
+    def transition_run_with_event(self, run: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        return self.s6.transition_run_with_event(run, **kwargs)
+
+    def commit_run_mutation(self, run: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        return self.s6.commit_run_mutation(run, **kwargs)
+
+    def save_run_legacy_json(self, run: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(run, dict) or not run.get("id"):
             raise ValueError("run with id required")
         # Never persist provider secrets
@@ -1219,33 +1297,21 @@ class LocalStore:
         actor: str = "system",
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        event = {
-            "id": f"revt_{uuid.uuid4().hex[:12]}",
-            "run_id": run_id,
-            "event_type": str(event_type),
-            "summary": str(summary or ""),
-            "actor": str(actor or "system"),
-            "metadata": metadata if isinstance(metadata, dict) else {},
-            "created_at": utc_now_iso(),
-        }
-        data = self._load_object(self.run_events_path, default={"events": []}, list_key="events")
-        events = list(data.get("events") or [])
-        events.append(event)
-        if len(events) > 5000:
-            events = events[-5000:]
-        self._atomic_write(self.run_events_path, {"events": events})
-        return event
+        return self.s6.append_run_event(
+            run_id, event_type, summary, actor=actor, metadata=metadata
+        )
 
     def list_run_events(self, run_id: str) -> list[dict[str, Any]]:
-        data = self._load_object(self.run_events_path, default={"events": []}, list_key="events")
-        return [e for e in (data.get("events") or []) if str(e.get("run_id")) == str(run_id)]
+        return self.s6.list_run_events(run_id)
 
     def list_run_approvals(self, run_id: str | None = None) -> list[dict[str, Any]]:
-        data = self._load_object(self.run_approvals_path, default={"approvals": []}, list_key="approvals")
-        items = list(data.get("approvals") or [])
-        if run_id is None:
-            return items
-        return [a for a in items if str(a.get("run_id")) == str(run_id)]
+        return self.s6.list_run_approvals(run_id=run_id)
+
+    def list_run_approval_history(self, run_id: str | None = None) -> list[dict[str, Any]]:
+        return self.s6.list_run_approval_history(run_id=run_id)
+
+    def commit_run_approval(self, **kwargs: Any) -> dict[str, Any]:
+        return self.s6.commit_run_approval(**kwargs)
 
     def save_run_approval(self, payload: dict[str, Any]) -> dict[str, Any]:
         from buildforme.governance import validate_actor, validate_safe_id
@@ -1258,9 +1324,8 @@ class LocalStore:
             raise ValueError(f"decision must be one of {sorted(RUN_APPROVAL_DECISIONS)}")
         if requirement in {"merge_approval", "deployment_approval"} and decision == "approved":
             raise ValueError("merge/deployment approvals cannot be granted in Stage 5")
-        now = utc_now_iso()
         record = {
-            "id": str(payload.get("id") or f"rap_{uuid.uuid4().hex[:10]}"),
+            **payload,
             "run_id": validate_safe_id(payload.get("run_id"), field="run_id"),
             "requirement_type": requirement,
             "decision": decision,
@@ -1270,32 +1335,11 @@ class LocalStore:
             "actor": validate_actor(payload.get("actor") or "shan"),
             "packet_id": payload.get("packet_id"),
             "task_id": payload.get("task_id"),
-            # Stage 5.6 — approvals bind to constitution hash / lease
             "constitution_version": payload.get("constitution_version"),
             "constitution_hash": payload.get("constitution_hash"),
             "constitution_lease_id": payload.get("constitution_lease_id"),
-            "created_at": now,
-            "updated_at": now,
         }
-        if not record["run_id"]:
-            raise ValueError("run_id required")
-        approvals = self.list_run_approvals()
-        # upsert same requirement for run
-        updated = False
-        for index, existing in enumerate(approvals):
-            if (
-                str(existing.get("run_id")) == record["run_id"]
-                and str(existing.get("requirement_type")) == requirement
-            ):
-                record["id"] = existing.get("id") or record["id"]
-                record["created_at"] = existing.get("created_at") or now
-                approvals[index] = record
-                updated = True
-                break
-        if not updated:
-            approvals.append(record)
-        self._atomic_write(self.run_approvals_path, {"approvals": approvals})
-        return record
+        return self.s6.save_run_approval(record)
 
     # —— Internals ——
 

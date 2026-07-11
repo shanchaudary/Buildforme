@@ -99,7 +99,7 @@ class PreflightTests(unittest.TestCase):
         # Also preflight-level if a BLACK run record is forced
         run = self._base_run()
         run["risk"] = "BLACK"
-        self.store.save_run(run)
+        self.store.save_run_for_setup(run)
         result = evaluate_run_preflight(run, self.store)
         self.assertFalse(result["passed"])
 
@@ -108,7 +108,7 @@ class PreflightTests(unittest.TestCase):
             self._base_run(requested_capabilities=["read_repository", "merge"])
         run = self._base_run()
         run["requested_capabilities"] = ["read_repository", "merge"]
-        self.store.save_run(run)
+        self.store.save_run_for_setup(run)
         result = evaluate_run_preflight(run, self.store)
         self.assertFalse(result["passed"])
 

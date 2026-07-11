@@ -108,9 +108,17 @@ def compute_run_scope_fingerprint(run: dict[str, Any], packet: dict[str, Any] | 
         "packet_id": str(run.get("packet_id") or packet.get("id") or ""),
         "provider_id": str(run.get("provider_id") or ""),
         "repository": normalize_repo_for_compare(str(run.get("repository") or "")),
+        "repository_local_path": str(run.get("repository_local_path") or ""),
+        "baseline_commit": str(run.get("baseline_commit") or ""),
+        "baseline_ref": str(run.get("baseline_ref") or ""),
+        "requested_target_branch": str(
+            run.get("requested_target_branch") or run.get("target_branch") or ""
+        ),
+        "execution_branch": str(run.get("execution_branch") or ""),
         "target_branch": str(run.get("target_branch") or ""),
         "operating_mode": str(run.get("operating_mode") or "").upper(),
         "risk": str(run.get("risk") or "").upper(),
+        "execution_mode": str(run.get("execution_mode") or run.get("mode") or ""),
         "requested_capabilities": sorted(str(c) for c in (run.get("requested_capabilities") or [])),
         "timeout_minutes": int(run.get("timeout_minutes") or 0),
         "max_attempts": int(run.get("max_attempts") or 0),

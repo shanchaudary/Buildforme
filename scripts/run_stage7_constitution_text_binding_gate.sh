@@ -62,15 +62,23 @@ jobs:
 YAML
 }
 if [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status" -eq 0 ] && [ "$full_status" -eq 0 ] && [ "$policy_status" -eq 0 ] && [ "$constitution_status" -eq 0 ]; then
-  rm -f "$report"; restore_ci; git add -A; git diff --cached --check
-  git commit -m "Bind reviewer prompts to canonical Constitution text"
-  git push origin HEAD:stage-7-independent-multi-agent-review-loop
+  rm -f "$report"
+  restore_ci
+  git add -A
+  git diff --cached --check || exit 91
+  git status --short
+  git commit -m "Bind reviewer prompts to canonical Constitution text" || exit 92
+  published_sha=$(git rev-parse HEAD)
+  git push origin HEAD:stage-7-independent-multi-agent-review-loop || exit 93
+  remote_sha=$(git ls-remote origin refs/heads/stage-7-independent-multi-agent-review-loop | awk '{print $1}')
+  echo "published_sha=$published_sha remote_sha=$remote_sha"
+  [ "$published_sha" = "$remote_sha" ] || exit 94
   exit 0
 fi
 cp "$report" /tmp/stage7_constitution_text_binding_validation.txt
 git restore .; git clean -fd buildforme tests docs scripts; restore_ci
 cp /tmp/stage7_constitution_text_binding_validation.txt "$report"
 git add .github/workflows/ci.yml; git add -f "$report"
-git commit -m "Record Constitution text binding validation failure"
-git push origin HEAD:stage-7-independent-multi-agent-review-loop
+git commit -m "Record Constitution text binding validation failure" || exit 95
+git push origin HEAD:stage-7-independent-multi-agent-review-loop || exit 96
 exit 1

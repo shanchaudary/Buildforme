@@ -46,5 +46,41 @@ if text.count(old_auth) != 1:
     raise RuntimeError(f"expected one auth newline template, found {text.count(old_auth)}")
 text = text.replace(old_auth, new_auth, 1)
 
+# Generated test corrections: define the repository root used by the child
+# process fixture and assert the exact validation problem rather than treating a
+# list of problem strings as a single string.
+old_import = '''from buildforme.storage import LocalStore
+
+
+class CancellationRegistryLossTests'''
+new_import = '''from buildforme.storage import LocalStore
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class CancellationRegistryLossTests'''
+if text.count(old_import) != 1:
+    raise RuntimeError(f"expected one generated-test ROOT anchor, found {text.count(old_import)}")
+text = text.replace(old_import, new_import, 1)
+
+old_assert = '''            self.assertIn("fingerprint mismatch", validate_run_outcome_evidence(evidence))'''
+new_assert = '''            self.assertIn(
+                "run outcome fingerprint mismatch (refusing silent repair)",
+                validate_run_outcome_evidence(evidence),
+            )'''
+count = text.count(old_assert)
+if count != 3:
+    raise RuntimeError(f"expected three top-level fingerprint assertions, found {count}")
+text = text.replace(old_assert, new_assert)
+old_nested_assert = '''        self.assertIn("fingerprint mismatch", validate_run_outcome_evidence(evidence))'''
+new_nested_assert = '''        self.assertIn(
+            "run outcome fingerprint mismatch (refusing silent repair)",
+            validate_run_outcome_evidence(evidence),
+        )'''
+count = text.count(old_nested_assert)
+if count != 2:
+    raise RuntimeError(f"expected two nested fingerprint assertions, found {count}")
+text = text.replace(old_nested_assert, new_nested_assert)
+
 path.write_text(text, encoding="utf-8")
-print("Stage 6 red-team patcher corrections applied")
+print("Stage 6 red-team patcher and regression-test corrections applied")

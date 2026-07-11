@@ -5,7 +5,7 @@ from pathlib import Path
 path = Path(__file__).resolve().parent / "apply_stage7_packet7b.py"
 text = path.read_text(encoding="utf-8")
 
-old = '''    '''        findings: list[dict[str, Any]],
+old = """    '''        findings: list[dict[str, Any]],
         actor: str,
     ) -> dict[str, Any]:
         from buildforme.review_contracts import validate_finding_for_storage, validate_report_for_storage
@@ -20,11 +20,11 @@ old = '''    '''        findings: list[dict[str, Any]],
         from buildforme.review_execution import validate_review_execution_record
 
         if not isinstance(execution, dict):
-            raise ValueError("direct review report submission disabled; authenticated reviewer execution required")
+            raise ValueError(\"direct review report submission disabled; authenticated reviewer execution required\")
         execution_record = dict(execution)
         now = utc_now_iso()
-''','''
-new = '''    '''        findings: list[dict[str, Any]],
+''',"""
+new = """    '''        findings: list[dict[str, Any]],
         actor: str,
     ) -> dict[str, Any]:
         from buildforme.review_contracts import (
@@ -45,24 +45,24 @@ new = '''    '''        findings: list[dict[str, Any]],
         from buildforme.review_execution import validate_review_execution_record
 
         if not isinstance(execution, dict):
-            raise ValueError("direct review report submission disabled; authenticated reviewer execution required")
+            raise ValueError(\"direct review report submission disabled; authenticated reviewer execution required\")
         execution_record = dict(execution)
         now = utc_now_iso()
-''','''
+''',"""
 if text.count(old) != 1:
     raise RuntimeError(f"report signature patch block count={text.count(old)}")
 text = text.replace(old, new, 1)
 
-old = '''    '''            problems = validate_report_for_storage(report, cycle, assignment)
+old = """    '''            problems = validate_report_for_storage(report, cycle, assignment)
             if problems:
-                raise ValueError("review report rejected: " + "; ".join(problems))
-            canonical_findings = list(report.get("findings") or [])
-''','''
-new = '''    '''            problems = validate_report_for_storage(report, cycle, assignment)
+                raise ValueError(\"review report rejected: \" + \"; \".join(problems))
+            canonical_findings = list(report.get(\"findings\") or [])
+''',"""
+new = """    '''            problems = validate_report_for_storage(report, cycle, assignment)
             if problems:
-                raise ValueError("review report rejected: " + "; ".join(problems))
-            report_findings = report.get("findings") if isinstance(report.get("findings"), list) else []
-''','''
+                raise ValueError(\"review report rejected: \" + \"; \".join(problems))
+            report_findings = report.get(\"findings\") if isinstance(report.get(\"findings\"), list) else []
+''',"""
 if text.count(old) != 1:
     raise RuntimeError(f"report validation old block count={text.count(old)}")
 text = text.replace(old, new, 1)
@@ -71,7 +71,6 @@ old = '''            canonical_findings = list(report.get("findings") or [])
 '''
 new = '''            report_findings = report.get("findings") if isinstance(report.get("findings"), list) else []
 '''
-# The replacement payload inside the patcher must use the actual target variable.
 if text.count(old) != 1:
     raise RuntimeError(f"report validation replacement variable count={text.count(old)}")
 text = text.replace(old, new, 1)

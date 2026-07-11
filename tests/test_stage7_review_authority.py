@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from buildforme.db import SCHEMA_VERSION
+from buildforme.db import SCHEMA_VERSION, dumps
 from buildforme.evidence import build_evidence_bundle
 from buildforme.governance import compute_run_scope_fingerprint
 from buildforme.review_gate import collect_hard_blocks
@@ -22,11 +22,7 @@ from buildforme.review_service import (
     get_independent_review_cycle_view,
     require_clear_independent_review,
 )
-from buildforme.review_execution import (
-    build_review_execution_record,
-    build_review_packet_record,
-)
-from buildforme.storage import LocalStore
+from buildforme.storage import LocalStore, utc_now_iso
 
 
 def submit_independent_review_report(
@@ -37,62 +33,86 @@ def submit_independent_review_report(
     payload,
     actor="reviewer",
 ):
+    """Test-fixture persistence below Packet 7B process authority."""
     cycle = store.get_review_cycle(cycle_id)
     assignment = store.get_review_assignment(assignment_id)
-    run = store.get_run(str(cycle["run_id"]))
-    evidence = store.get_evidence_by_id(str(cycle["evidence_id"]))
-    snapshot = {
-        "manifest_fingerprint": evidence.get("manifest_fingerprint"),
-        "patch_fingerprint": evidence.get("patch_fingerprint"),
-        "head_commit": evidence.get("final_head_sha"),
-        "file_count": evidence.get("file_count"),
-        "files_changed": list(evidence.get("files_changed") or []),
-        "files": list((evidence.get("changed_file_manifest") or {}).get("files") or []),
-        "diff_stat": evidence.get("diff_stat") or "",
-        "patch_size": 1,
-    }
-    packet = build_review_packet_record(
-        cycle=cycle,
-        assignment=assignment,
-        run=run,
-        evidence=evidence,
-        snapshot=snapshot,
-    )
-    packet = store.save_review_packet_atomic(packet=packet, actor="test")
     report, findings = build_review_report_record(
         cycle=cycle,
         assignment=assignment,
         payload=payload,
     )
-    process = {
-        "ok": True,
-        "exit_code": 0,
-        "pid": 123,
-        "stdout": "{}",
-        "stderr": "",
-        "cleanup_ok": True,
-        "process_group_isolated": True,
-        "argv": ["test-reviewer", "--read-only"],
+    now = utc_now_iso()
+    with store.s6.db.transaction() as conn:
+        row = conn.execute(
+            "SELECT status, payload_json FROM review_assignments WHERE id=?",
+            (assignment_id,),
+        ).fetchone()
+        if not row or str(row[0]) != "pending":
+            raise ValueError("fixture review assignment is not pending")
+        conn.execute(
+            "INSERT INTO review_reports(report_id, cycle_id, assignment_id, verdict, report_fingerprint, payload_json, created_at, immutable) VALUES (?,?,?,?,?,?,?,1)",
+            (
+                report["report_id"],
+                cycle_id,
+                assignment_id,
+                report["verdict"],
+                report["report_fingerprint"],
+                dumps(report),
+                now,
+            ),
+        )
+        for finding in findings:
+            conn.execute(
+                "INSERT INTO review_findings(finding_id, report_id, cycle_id, assignment_id, severity, category, blocking, finding_fingerprint, payload_json, created_at, immutable) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+                (
+                    finding["finding_id"],
+                    report["report_id"],
+                    cycle_id,
+                    assignment_id,
+                    finding["severity"],
+                    finding["category"],
+                    1 if finding.get("blocking") else 0,
+                    finding["finding_fingerprint"],
+                    dumps(finding),
+                    now,
+                ),
+            )
+        assignment_record = loads = __import__("buildforme.db", fromlist=["loads"]).loads
+        saved_assignment = loads(row[1], {})
+        saved_assignment["status"] = "submitted"
+        saved_assignment["submitted_at"] = now
+        saved_assignment["report_id"] = report["report_id"]
+        saved_assignment["report_fingerprint"] = report["report_fingerprint"]
+        conn.execute(
+            "UPDATE review_assignments SET status='submitted', payload_json=?, submitted_at=? WHERE id=?",
+            (dumps(saved_assignment), now, assignment_id),
+        )
+        submitted = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM review_assignments WHERE cycle_id=? AND status='submitted'",
+                (cycle_id,),
+            ).fetchone()[0]
+        )
+        cycle_row = conn.execute(
+            "SELECT payload_json, required_reviewer_count, row_version FROM review_cycles WHERE id=?",
+            (cycle_id,),
+        ).fetchone()
+        saved_cycle = loads(cycle_row[0], {})
+        status = "ready_to_aggregate" if submitted >= int(cycle_row[1]) else "collecting"
+        saved_cycle["status"] = status
+        saved_cycle["submitted_reviewer_count"] = submitted
+        saved_cycle["updated_at"] = now
+        saved_cycle["row_version"] = int(cycle_row[2]) + 1
+        conn.execute(
+            "UPDATE review_cycles SET status=?, payload_json=?, updated_at=?, row_version=? WHERE id=?",
+            (status, dumps(saved_cycle), now, saved_cycle["row_version"], cycle_id),
+        )
+    return {
+        "cycle": saved_cycle,
+        "assignment": saved_assignment,
+        "report": report,
+        "findings": findings,
     }
-    execution = build_review_execution_record(
-        packet=packet,
-        assignment=assignment,
-        command={"contract_id": "test.read-only.v1", "read_only": True, "argv": process["argv"]},
-        health={"version": "test", "executable": "test-reviewer"},
-        process_result=process,
-        pre_snapshot=snapshot,
-        post_snapshot=snapshot,
-        status="succeeded",
-        report_fingerprint=report["report_fingerprint"],
-    )
-    return store.submit_review_report_atomic(
-        cycle_id=cycle_id,
-        assignment_id=assignment_id,
-        report=report,
-        findings=findings,
-        actor=actor,
-        execution=execution,
-    )
 
 
 class Stage7ReviewAuthorityTests(unittest.TestCase):

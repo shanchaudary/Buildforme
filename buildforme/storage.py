@@ -1369,6 +1369,9 @@ class LocalStore:
         return self.s6.save_run_approval(record)
 
     # —— Stage 7 Packet 7B review packets/executions ——
+    def claim_review_assignment_execution_atomic(self, **kwargs: Any) -> dict[str, Any]:
+        return self.s6.claim_review_assignment_execution_atomic(**kwargs)
+
     def save_review_packet_atomic(self, **kwargs: Any) -> dict[str, Any]:
         return self.s6.save_review_packet_atomic(**kwargs)
 

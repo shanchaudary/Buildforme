@@ -75,3 +75,18 @@ and re-verification are implemented and independently accepted.
   ambiguous output, unknown fields, and authority claims are rejected.
 - Successful reviewer process evidence and the report/findings commit atomically.
 - Direct/manual report submission is disabled; the API exposes assignment execution.
+
+
+## Packet 7B red-team hardening
+
+- Reviewer assignments are claimed atomically before process launch; concurrent launches
+  for one assignment are rejected.
+- The exact registered repository, remote identity, Git common directory, worktree branch,
+  and canonical Constitution lease are revalidated before review.
+- Snapshot equality includes full changed-file metadata, including symlink target/escape facts.
+- Post-review proof failure never substitutes the pre-review snapshot or claims unchanged state.
+- Retry-safe failures require confirmed cleanup and a proven unchanged post-review snapshot.
+  Integrity failures block the assignment and cycle atomically.
+- Successful process evidence must match the code-owned provider command contract, exact argv,
+  live-ready health, and verified authentication probe.
+- Provider lookup and health-probe exceptions produce immutable failure evidence after claim.

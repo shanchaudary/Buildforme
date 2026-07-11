@@ -399,8 +399,8 @@ def build_review_report_record(
     assignment: dict[str, Any],
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    if str(assignment.get("status") or "") != "pending":
-        raise ValueError("review assignment is not pending")
+    if str(assignment.get("status") or "") not in {"pending", "executing"}:
+        raise ValueError("review assignment is not pending or executing")
     if any(key in payload for key in ("other_reviews", "consensus", "merge_allowed", "founder_decision")):
         raise ValueError("review report contains forbidden authority or non-blind context")
     verdict = str(payload.get("verdict") or "").strip().lower()

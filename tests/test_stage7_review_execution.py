@@ -14,6 +14,7 @@ from unittest.mock import patch
 from buildforme.db import SCHEMA_VERSION
 from buildforme.evidence import build_evidence_bundle
 from buildforme.governance import compute_run_scope_fingerprint
+from governance.constitution_engine import get_engine
 from buildforme.review_contracts import build_review_report_record
 from buildforme.review_execution import (
     REVIEW_COMMAND_CONTRACTS,
@@ -37,13 +38,50 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
         self._git("init")
         self._git("config", "user.email", "review@test.local")
         self._git("config", "user.name", "review-test")
+        self._git("remote", "add", "origin", "https://github.com/shanchaudary/Buildforme.git")
         (self.root / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
         self._git("add", ".")
         self._git("commit", "-m", "baseline")
         self.baseline = self._git_out("rev-parse", "HEAD").strip()
+        self._git("checkout", "-b", "feature/stage7b-run")
         (self.root / "app.py").write_text("def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - b\n", encoding="utf-8")
 
         self.store = LocalStore(Path(self.temp.name) / "state.json")
+        self.store.upsert_project(
+            {
+                "id": "buildforme",
+                "name": "Buildforme",
+                "repository": "shanchaudary/Buildforme",
+                "status": "active",
+                "local_repository_root": str(self.root),
+            }
+        )
+        self.store.register_repository_binding(
+            {
+                "repository": "shanchaudary/Buildforme",
+                "local_path": str(self.root),
+                "project_id": "buildforme",
+            }
+        )
+        engine = get_engine(force_reload=True)
+        packet = engine.attach_to_packet(
+            {
+                "id": "pkt-stage7b",
+                "objective": "Add subtraction function",
+                "acceptance_criteria": ["sub returns a-b"],
+                "target_repository": "shanchaudary/Buildforme",
+                "target_branch": "feature/stage7b",
+                "allowed_files": ["app.py"],
+                "forbidden_files": [".env"],
+            }
+        )
+        lease = engine.issue_run_lease(
+            run_id="run-stage7b",
+            provider_id="claude",
+            packet_id=packet["id"],
+            actor="test",
+        )
+        self.store.save_constitution_lease(lease)
         run = {
             "id": "run-stage7b",
             "project_id": "buildforme",
@@ -62,23 +100,13 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
             "mode": "live_supervised",
             "transport": "cli",
             "requested_capabilities": ["read_repository", "edit_repository", "run_tests", "produce_patch"],
-            "constitution_version": "1.0.0",
-            "constitution_hash": "c" * 64,
-            "constitution_lease_id": "lease-stage7b",
-            "constitution_lease_fingerprint": "l" * 64,
-            "packet": {
-                "id": "pkt-stage7b",
-                "objective": "Add subtraction function",
-                "acceptance_criteria": ["sub returns a-b"],
-                "target_repository": "shanchaudary/Buildforme",
-                "target_branch": "feature/stage7b",
-                "allowed_files": ["app.py"],
-                "forbidden_files": [".env"],
-            },
+            "packet_id": packet["id"],
+            "packet": packet,
             "review": {"hard_blocks": [], "accept_for_pr_prep_allowed": True},
             "worktree_path": str(self.root),
             "row_version": 1,
         }
+        run = engine.attach_to_run(run, lease=lease, actor="test")
         run["scope_fingerprint"] = compute_run_scope_fingerprint(run, run["packet"])
         self.run = self.store.save_run_for_setup(run)
         manifest = collect_changed_file_manifest(self.root, baseline_commit=self.baseline)
@@ -117,8 +145,8 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
             {
                 "constitution_supported": True,
                 "constitution_acknowledged": True,
-                "constitution_version": "1.0.0",
-                "constitution_hash": "c" * 64,
+                "constitution_version": engine.version(),
+                "constitution_hash": engine.content_hash(),
                 "constitution_last_refresh": "now",
                 "constitution_acknowledged_at": "now",
                 "constitution_ack_actor": "test",
@@ -228,6 +256,8 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
         self.assertEqual(len(attempts), 1)
         self.assertEqual(attempts[0]["status"], "succeeded")
         self.assertTrue(attempts[0]["worktree_unchanged"])
+        self.assertTrue(attempts[0]["post_snapshot_proven"])
+        self.assertTrue(attempts[0]["auth_probe_verified"])
         self.assertEqual(len(self.store.list_review_reports(self.cycle["cycle_id"])), 1)
 
     @unittest.skipIf(os.name == "nt", "POSIX executable fixture")
@@ -242,6 +272,8 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
         attempts = self.store.list_review_execution_attempts(self.assignment["assignment_id"])
         self.assertEqual(attempts[-1]["status"], "failed")
         self.assertFalse(attempts[-1]["worktree_unchanged"])
+        self.assertFalse(attempts[-1]["retry_safe"])
+        self.assertEqual(self.store.get_review_cycle(self.cycle["cycle_id"])["status"], "blocked")
 
     @unittest.skipIf(os.name == "nt", "POSIX executable fixture")
     def test_malformed_reviewer_output_fails_closed_without_report(self):
@@ -252,7 +284,10 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
                     self.store, self.cycle["cycle_id"], self.assignment["assignment_id"]
                 )
         self.assertEqual(self.store.list_review_reports(self.cycle["cycle_id"]), [])
-        self.assertEqual(self.store.list_review_execution_attempts(self.assignment["assignment_id"])[-1]["status"], "failed")
+        attempt = self.store.list_review_execution_attempts(self.assignment["assignment_id"])[-1]
+        self.assertEqual(attempt["status"], "failed")
+        self.assertTrue(attempt["retry_safe"])
+        self.assertEqual(self.store.get_review_assignment(self.assignment["assignment_id"])["status"], "pending")
 
     def test_unavailable_provider_records_failure_and_no_report(self):
         health = {
@@ -269,15 +304,26 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
                     self.store, self.cycle["cycle_id"], self.assignment["assignment_id"]
                 )
         self.assertEqual(self.store.list_review_reports(self.cycle["cycle_id"]), [])
-        self.assertEqual(self.store.list_review_execution_attempts(self.assignment["assignment_id"])[-1]["status"], "failed")
+        attempt = self.store.list_review_execution_attempts(self.assignment["assignment_id"])[-1]
+        self.assertEqual(attempt["status"], "failed")
+        self.assertTrue(attempt["retry_safe"])
+        self.assertEqual(self.store.get_review_assignment(self.assignment["assignment_id"])["status"], "pending")
 
     def test_authenticated_storage_rejects_divergent_findings(self):
         packet, snapshot, _root = build_verified_blind_review_packet(
             self.store, self.cycle["cycle_id"], self.assignment["assignment_id"]
         )
         packet = self.store.save_review_packet_atomic(packet=packet, actor="test")
-        cycle = self.store.get_review_cycle(self.cycle["cycle_id"])
-        assignment = self.store.get_review_assignment(self.assignment["assignment_id"])
+        claim_id = "claim-divergence"
+        claimed = self.store.claim_review_assignment_execution_atomic(
+            cycle_id=self.cycle["cycle_id"],
+            assignment_id=self.assignment["assignment_id"],
+            packet_id=packet["packet_id"],
+            claim_id=claim_id,
+            actor="test",
+        )
+        cycle = claimed["cycle"]
+        assignment = claimed["assignment"]
         report, findings = build_review_report_record(
             cycle=cycle,
             assignment=assignment,
@@ -303,22 +349,27 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
             "stderr": "",
             "cleanup_ok": True,
             "process_group_isolated": True,
-            "argv": ["test-reviewer", "--read-only"],
+            "argv": build_review_command("codex", "test-reviewer")["argv"],
         }
+        command = build_review_command("codex", "test-reviewer")
         execution = build_review_execution_record(
             packet=packet,
             assignment=assignment,
-            command={
-                "contract_id": "test.read-only.v1",
-                "read_only": True,
-                "argv": process["argv"],
+            command=command,
+            health={
+                "version": "test",
+                "executable": "test-reviewer",
+                "live_ready": True,
+                "auth": {"probe_verified": True},
             },
-            health={"version": "test", "executable": "test-reviewer"},
             process_result=process,
             pre_snapshot=snapshot,
             post_snapshot=snapshot,
             status="succeeded",
+            claim_id=claim_id,
             report_fingerprint=report["report_fingerprint"],
+            post_snapshot_proven=True,
+            process_started=True,
         )
         divergent = [dict(findings[0])]
         divergent[0]["summary"] = "different row"
@@ -335,6 +386,133 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
         self.assertEqual(
             self.store.list_review_execution_attempts(assignment["assignment_id"]), []
         )
+
+    def test_second_execution_claim_is_rejected_atomically(self):
+        packet, _snapshot, _root = build_verified_blind_review_packet(
+            self.store, self.cycle["cycle_id"], self.assignment["assignment_id"]
+        )
+        packet = self.store.save_review_packet_atomic(packet=packet, actor="test")
+        self.store.claim_review_assignment_execution_atomic(
+            cycle_id=self.cycle["cycle_id"],
+            assignment_id=self.assignment["assignment_id"],
+            packet_id=packet["packet_id"],
+            claim_id="claim-one",
+            actor="test",
+        )
+        with self.assertRaisesRegex(ValueError, "already claimed|unavailable"):
+            self.store.claim_review_assignment_execution_atomic(
+                cycle_id=self.cycle["cycle_id"],
+                assignment_id=self.assignment["assignment_id"],
+                packet_id=packet["packet_id"],
+                claim_id="claim-two",
+                actor="test",
+            )
+
+    def test_repository_remote_mismatch_blocks_packet(self):
+        self._git("remote", "set-url", "origin", "https://github.com/other/wrong.git")
+        with self.assertRaisesRegex(ValueError, "repository mismatch|remote identity"):
+            build_verified_blind_review_packet(
+                self.store, self.cycle["cycle_id"], self.assignment["assignment_id"]
+            )
+
+    @unittest.skipIf(os.name == "nt", "POSIX executable fixture")
+    def test_post_snapshot_failure_records_unproven_integrity_block(self):
+        executable = self._fake_codex()
+        from buildforme import review_execution as module
+
+        original = module._collect_snapshot
+        calls = {"count": 0}
+
+        def fail_second(root, evidence):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return original(root, evidence)
+            raise ValueError("post proof unavailable")
+
+        with patch("buildforme.review_execution.health_check_provider", return_value=self._health(executable)), patch(
+            "buildforme.review_execution._collect_snapshot", side_effect=fail_second
+        ):
+            with self.assertRaisesRegex(ValueError, "post-review worktree proof failed"):
+                execute_independent_review_assignment(
+                    self.store, self.cycle["cycle_id"], self.assignment["assignment_id"]
+                )
+        attempt = self.store.list_review_execution_attempts(self.assignment["assignment_id"])[-1]
+        self.assertFalse(attempt["post_snapshot_proven"])
+        self.assertFalse(attempt["worktree_unchanged"])
+        self.assertFalse(attempt["retry_safe"])
+        self.assertEqual(self.store.get_review_cycle(self.cycle["cycle_id"])["status"], "blocked")
+
+    def test_health_probe_exception_records_retry_safe_failure(self):
+        with patch(
+            "buildforme.review_execution.health_check_provider",
+            side_effect=RuntimeError("probe crashed"),
+        ):
+            with self.assertRaisesRegex(ValueError, "health probe failed"):
+                execute_independent_review_assignment(
+                    self.store, self.cycle["cycle_id"], self.assignment["assignment_id"]
+                )
+        attempt = self.store.list_review_execution_attempts(self.assignment["assignment_id"])[-1]
+        self.assertEqual(attempt["failure_code"], "health_probe_failed")
+        self.assertTrue(attempt["retry_safe"])
+        self.assertEqual(self.store.get_review_assignment(self.assignment["assignment_id"])["status"], "pending")
+
+    def test_storage_rejects_forged_success_command_contract(self):
+        packet, snapshot, _root = build_verified_blind_review_packet(
+            self.store, self.cycle["cycle_id"], self.assignment["assignment_id"]
+        )
+        packet = self.store.save_review_packet_atomic(packet=packet, actor="test")
+        claim_id = "claim-forged"
+        claimed = self.store.claim_review_assignment_execution_atomic(
+            cycle_id=self.cycle["cycle_id"],
+            assignment_id=self.assignment["assignment_id"],
+            packet_id=packet["packet_id"],
+            claim_id=claim_id,
+            actor="test",
+        )
+        assignment = claimed["assignment"]
+        cycle = claimed["cycle"]
+        report, findings = build_review_report_record(
+            cycle=cycle,
+            assignment=assignment,
+            payload={"verdict": "pass", "summary": "fake", "findings": []},
+        )
+        forged = build_review_execution_record(
+            packet=packet,
+            assignment=assignment,
+            command={
+                "contract_id": "forged.write.v1",
+                "read_only": True,
+                "argv": ["codex", "exec", "-s", "workspace-write"],
+            },
+            health={
+                "version": "test",
+                "executable": "codex",
+                "live_ready": True,
+                "auth": {"probe_verified": True},
+            },
+            process_result={
+                "exit_code": 0,
+                "cleanup_ok": True,
+                "argv": ["codex", "exec", "-s", "workspace-write"],
+            },
+            pre_snapshot=snapshot,
+            post_snapshot=snapshot,
+            status="succeeded",
+            claim_id=claim_id,
+            report_fingerprint=report["report_fingerprint"],
+            post_snapshot_proven=True,
+            process_started=True,
+        )
+        with self.assertRaisesRegex(ValueError, "command contract|argv"):
+            self.store.submit_review_report_atomic(
+                cycle_id=cycle["cycle_id"],
+                assignment_id=assignment["assignment_id"],
+                report=report,
+                findings=findings,
+                actor="reviewer",
+                execution=forged,
+            )
+        self.assertEqual(self.store.list_review_reports(cycle["cycle_id"]), [])
 
     def test_direct_report_submission_is_disabled(self):
         with self.assertRaisesRegex(ValueError, "direct review report submission disabled"):

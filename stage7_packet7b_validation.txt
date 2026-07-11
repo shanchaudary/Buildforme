@@ -1,8 +1,0 @@
-== correct Packet 7B patcher ==
-Packet 7B patch anchors corrected
-== correct Packet 7B regression templates ==
-Traceback (most recent call last):
-  File "/home/runner/work/Buildforme/Buildforme/scripts/fix_stage7_packet7b_regressions.py", line 27, in <module>
-    raise RuntimeError(f"append-only regression expectation count={text.count(old)}")
-RuntimeError: append-only regression expectation count=0
-statuses fix=0 regression_fix=1 apply=99 syntax=99 focused=99 full=99 policy=99 constitution=99

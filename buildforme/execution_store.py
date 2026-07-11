@@ -1713,6 +1713,72 @@ class Stage6Store:
         }
 
     # —— Stage 7 Packet 7B review packets/executions ——
+    def claim_review_assignment_execution_atomic(
+        self,
+        *,
+        cycle_id: str,
+        assignment_id: str,
+        packet_id: str,
+        claim_id: str,
+        actor: str,
+    ) -> dict[str, Any]:
+        """Atomically reserve one pending assignment for exactly one reviewer process."""
+        now = utc_now_iso()
+        with self.db.transaction() as conn:
+            cycle_row = conn.execute(
+                "SELECT payload_json, status FROM review_cycles WHERE id=?",
+                (str(cycle_id),),
+            ).fetchone()
+            assignment_row = conn.execute(
+                "SELECT payload_json, status, cycle_id FROM review_assignments WHERE id=?",
+                (str(assignment_id),),
+            ).fetchone()
+            packet_row = conn.execute(
+                "SELECT packet_id FROM review_packets WHERE packet_id=? AND assignment_id=?",
+                (str(packet_id), str(assignment_id)),
+            ).fetchone()
+            if not cycle_row or not assignment_row or not packet_row:
+                raise ValueError("review execution claim cycle, assignment, or packet not found")
+            if str(cycle_row[1]) not in {"open", "collecting"}:
+                raise ValueError("review cycle is not accepting reviewer execution")
+            if str(assignment_row[2]) != str(cycle_id):
+                raise ValueError("review execution claim assignment cycle mismatch")
+            if str(assignment_row[1]) != "pending":
+                raise ValueError("review assignment already claimed or unavailable")
+            assignment = loads(assignment_row[0], {})
+            assignment["status"] = "executing"
+            assignment["execution_claim_id"] = str(claim_id)
+            assignment["execution_packet_id"] = str(packet_id)
+            assignment["execution_started_at"] = now
+            assignment["execution_claim_actor"] = str(actor)
+            cur = conn.execute(
+                "UPDATE review_assignments SET status='executing', payload_json=? WHERE id=? AND status='pending'",
+                (dumps(assignment), str(assignment_id)),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("review assignment claim race rejected")
+            cycle = loads(cycle_row[0], {})
+            cycle["status"] = cycle_row[1]
+            conn.execute(
+                "INSERT INTO review_events(id, cycle_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (
+                    new_id("rve"),
+                    str(cycle_id),
+                    "review_execution_claimed",
+                    "Reviewer assignment claimed for one process",
+                    str(actor),
+                    dumps(
+                        {
+                            "assignment_id": assignment_id,
+                            "packet_id": packet_id,
+                            "claim_id": claim_id,
+                        }
+                    ),
+                    now,
+                ),
+            )
+        return {"cycle": cycle, "assignment": assignment}
+
     def save_review_packet_atomic(self, *, packet: dict[str, Any], actor: str) -> dict[str, Any]:
         from buildforme.review_execution import validate_review_packet_for_storage
 
@@ -1750,6 +1816,34 @@ class Stage6Store:
                 raise ValueError("review packet run or evidence not found")
             run = loads(run_row[0], {})
             evidence = loads(evidence_row[0], {})
+            from buildforme.evidence import EVIDENCE_KIND_EXECUTION
+            from buildforme.governance import compute_run_scope_fingerprint
+
+            if str(cycle.get("status") or "") not in {"open", "collecting"}:
+                raise ValueError("review packet requires active cycle")
+            live_scope = compute_run_scope_fingerprint(
+                run, run.get("packet") if isinstance(run.get("packet"), dict) else None
+            )
+            if live_scope != str(run.get("scope_fingerprint") or "") or live_scope != str(
+                cycle.get("scope_fingerprint") or ""
+            ):
+                raise ValueError("review packet run/cycle scope is stale")
+            latest_execution = None
+            for row in conn.execute(
+                "SELECT payload_json FROM evidence WHERE run_id=? ORDER BY sequence DESC",
+                (str(run.get("id") or ""),),
+            ).fetchall():
+                candidate = loads(row[0], {})
+                kind = str(candidate.get("evidence_kind") or "")
+                if kind == EVIDENCE_KIND_EXECUTION or (
+                    not kind and isinstance(candidate.get("process"), dict)
+                ):
+                    latest_execution = candidate
+                    break
+            if not latest_execution or str(latest_execution.get("evidence_id") or "") != str(
+                evidence.get("evidence_id") or ""
+            ):
+                raise ValueError("review packet is not bound to latest execution evidence")
             problems = validate_review_packet_for_storage(
                 record,
                 cycle=cycle,
@@ -1815,12 +1909,13 @@ class Stage6Store:
         from buildforme.review_execution import validate_review_execution_record
 
         record = dict(execution)
-        if str(record.get("status") or "") == "succeeded":
-            raise ValueError("successful reviewer execution must commit atomically with its report")
+        if str(record.get("status") or "") != "failed":
+            raise ValueError("only failed reviewer execution may commit without a report")
         assignment_id = str(record.get("assignment_id") or "")
+        now = utc_now_iso()
         with self.db.transaction() as conn:
             assignment_row = conn.execute(
-                "SELECT payload_json FROM review_assignments WHERE id=?",
+                "SELECT payload_json, status, cycle_id FROM review_assignments WHERE id=?",
                 (assignment_id,),
             ).fetchone()
             packet_row = conn.execute(
@@ -1829,7 +1924,10 @@ class Stage6Store:
             ).fetchone()
             if not assignment_row or not packet_row:
                 raise ValueError("review execution assignment or packet not found")
+            if str(assignment_row[1]) != "executing":
+                raise ValueError("failed review execution requires executing assignment")
             assignment = loads(assignment_row[0], {})
+            assignment["status"] = assignment_row[1]
             packet = loads(packet_row[0], {})
             problems = validate_review_execution_record(
                 record, packet=packet, assignment=assignment, report=None
@@ -1852,19 +1950,95 @@ class Stage6Store:
                     record["status"],
                     record["execution_fingerprint"],
                     dumps(record),
-                    record.get("created_at") or utc_now_iso(),
+                    record.get("created_at") or now,
                 ),
             )
+
+            retry_safe = bool(record.get("retry_safe"))
+            cycle_id = str(assignment_row[2])
+            if retry_safe:
+                assignment["status"] = "pending"
+                assignment["last_execution_failure_id"] = record["execution_id"]
+                assignment["last_execution_failure_code"] = record.get("failure_code")
+                for key in (
+                    "execution_claim_id",
+                    "execution_packet_id",
+                    "execution_started_at",
+                    "execution_claim_actor",
+                ):
+                    assignment.pop(key, None)
+                conn.execute(
+                    "UPDATE review_assignments SET status='pending', payload_json=? WHERE id=? AND status='executing'",
+                    (dumps(assignment), assignment_id),
+                )
+                event_type = "review_execution_retry_safe_failure"
+                summary = "Reviewer execution failed with proven retry-safe state"
+            else:
+                assignment["status"] = "blocked"
+                assignment["blocked_execution_id"] = record["execution_id"]
+                assignment["blocked_failure_code"] = record.get("failure_code")
+                conn.execute(
+                    "UPDATE review_assignments SET status='blocked', payload_json=? WHERE id=? AND status='executing'",
+                    (dumps(assignment), assignment_id),
+                )
+                cycle_row = conn.execute(
+                    "SELECT run_id, payload_json, row_version FROM review_cycles WHERE id=?",
+                    (cycle_id,),
+                ).fetchone()
+                if not cycle_row:
+                    raise ValueError("review cycle missing while recording integrity failure")
+                cycle = loads(cycle_row[1], {})
+                cycle["status"] = "blocked"
+                cycle["integrity_failure_execution_id"] = record["execution_id"]
+                cycle["integrity_failure_code"] = record.get("failure_code")
+                cycle["updated_at"] = now
+                cycle_version = int(cycle_row[2] or 1) + 1
+                cycle["row_version"] = cycle_version
+                conn.execute(
+                    "UPDATE review_cycles SET status='blocked', payload_json=?, updated_at=?, row_version=? WHERE id=? AND row_version=?",
+                    (dumps(cycle), now, cycle_version, cycle_id, int(cycle_row[2] or 1)),
+                )
+                run_row = conn.execute(
+                    "SELECT payload_json, row_version FROM runs WHERE id=?",
+                    (str(cycle_row[0]),),
+                ).fetchone()
+                if not run_row:
+                    raise ValueError("review run missing while recording integrity failure")
+                run = loads(run_row[0], {})
+                run["independent_review"] = {
+                    **(run.get("independent_review") or {}),
+                    "cycle_id": cycle_id,
+                    "status": "blocked",
+                    "integrity_failure_execution_id": record["execution_id"],
+                    "integrity_failure_code": record.get("failure_code"),
+                }
+                run["updated_at"] = now
+                run_version = int(run_row[1] or 1) + 1
+                run["row_version"] = run_version
+                conn.execute(
+                    "UPDATE runs SET payload_json=?, updated_at=?, row_version=? WHERE id=? AND row_version=?",
+                    (dumps(run), now, run_version, str(cycle_row[0]), int(run_row[1] or 1)),
+                )
+                event_type = "review_execution_integrity_blocked"
+                summary = "Reviewer execution integrity failure blocked the cycle"
+
             conn.execute(
                 "INSERT INTO review_events(id, cycle_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
                 (
                     new_id("rve"),
-                    record["cycle_id"],
-                    "review_execution_failed",
-                    "Automated reviewer execution failed closed",
+                    cycle_id,
+                    event_type,
+                    summary,
                     actor,
-                    dumps({"assignment_id": assignment_id, "execution_id": record["execution_id"]}),
-                    utc_now_iso(),
+                    dumps(
+                        {
+                            "assignment_id": assignment_id,
+                            "execution_id": record["execution_id"],
+                            "failure_code": record.get("failure_code"),
+                            "retry_safe": retry_safe,
+                        }
+                    ),
+                    now,
                 ),
             )
         return record
@@ -2147,8 +2321,8 @@ class Stage6Store:
                 raise KeyError(f"Review assignment not found: {assignment_id}")
             if str(assignment_row[0]) != str(cycle_id):
                 raise ValueError("review assignment cycle mismatch")
-            if str(assignment_row[1]) != "pending":
-                raise ValueError("review assignment already submitted or unavailable")
+            if str(assignment_row[1]) != "executing":
+                raise ValueError("review report requires an executing assignment claim")
             assignment = loads(assignment_row[2], {})
             assignment["status"] = assignment_row[1]
             problems = validate_report_for_storage(report, cycle, assignment)
@@ -2231,6 +2405,13 @@ class Stage6Store:
             assignment["submitted_at"] = now
             assignment["report_id"] = report_id
             assignment["report_fingerprint"] = report["report_fingerprint"]
+            for key in (
+                "execution_claim_id",
+                "execution_packet_id",
+                "execution_started_at",
+                "execution_claim_actor",
+            ):
+                assignment.pop(key, None)
             conn.execute(
                 "UPDATE review_assignments SET status='submitted', payload_json=?, submitted_at=? WHERE id=? AND status='pending'",
                 (dumps(assignment), now, assignment_id),

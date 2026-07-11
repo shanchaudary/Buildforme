@@ -37,15 +37,12 @@ if text.count(old) != 1:
     raise RuntimeError(f"expected one generic cancel patch block, found {text.count(old)}")
 text = text.replace(old, new, 1)
 
-# Preserve a backslash-n in the generated provider_discovery.py instead of
-# embedding a real newline inside the target string literal.
 old_auth = '        combined = stdout + "\\n" + stderr\n'
 new_auth = '        combined = stdout + "\\\\n" + stderr\n'
 if text.count(old_auth) != 1:
     raise RuntimeError(f"expected one auth newline template, found {text.count(old_auth)}")
 text = text.replace(old_auth, new_auth, 1)
 
-# Generated-test repository root for the child-process coordination fixture.
 old_import = '''from buildforme.storage import LocalStore
 
 
@@ -60,14 +57,52 @@ if text.count(old_import) != 1:
     raise RuntimeError(f"expected one generated-test ROOT anchor, found {text.count(old_import)}")
 text = text.replace(old_import, new_import, 1)
 
-# Validation returns a list of detailed problem strings. Check semantic content
-# rather than requiring the entire message to equal a short fragment.
 old_assert = 'self.assertIn("fingerprint mismatch", validate_run_outcome_evidence(evidence))'
 new_assert = 'self.assertTrue(any("fingerprint mismatch" in problem for problem in validate_run_outcome_evidence(evidence)))'
 count = text.count(old_assert)
 if count != 3:
     raise RuntimeError(f"expected three fingerprint assertions, found {count}")
 text = text.replace(old_assert, new_assert)
+
+old_process = '''        with store.db.maintenance_lock(timeout_seconds=5):
+            proc = subprocess.Popen(
+                [sys.executable, str(script), str(db_path)],
+                cwd=str(ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            time.sleep(0.5)
+            self.assertIsNone(proc.poll(), "writer bypassed exclusive migration lock")
+        stdout, stderr = proc.communicate(timeout=10)
+'''
+new_process = '''        child_env = dict(os.environ)
+        child_env["PYTHONPATH"] = str(ROOT) + (
+            os.pathsep + child_env["PYTHONPATH"]
+            if child_env.get("PYTHONPATH")
+            else ""
+        )
+        with store.db.maintenance_lock(timeout_seconds=5):
+            proc = subprocess.Popen(
+                [sys.executable, str(script), str(db_path)],
+                cwd=str(ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=child_env,
+            )
+            time.sleep(0.5)
+            if proc.poll() is not None:
+                early_stdout, early_stderr = proc.communicate(timeout=5)
+                self.fail(
+                    "writer exited before lock release; "
+                    f"stdout={early_stdout!r} stderr={early_stderr!r}"
+                )
+        stdout, stderr = proc.communicate(timeout=10)
+'''
+if text.count(old_process) != 1:
+    raise RuntimeError(f"expected one migration subprocess fixture, found {text.count(old_process)}")
+text = text.replace(old_process, new_process, 1)
 
 path.write_text(text, encoding="utf-8")
 print("Stage 6 red-team patcher and regression-test corrections applied")

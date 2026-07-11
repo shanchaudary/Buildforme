@@ -7,20 +7,83 @@ on:
       - main
       - founder-control-plane-mvp
 
+permissions:
+  contents: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Run unit tests
         run: python -m unittest discover -s tests -p 'test_*.py'
-
       - name: Run policy smoke check
         run: python -m buildforme.cli classify data/sample_task.json
+
+  remediate-stage7-packet7e-surfaces:
+    if: github.event_name == 'pull_request' && github.head_ref == 'stage-7-independent-multi-agent-review-loop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout Stage 7 branch
+        uses: actions/checkout@v4
+        with:
+          ref: stage-7-independent-multi-agent-review-loop
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Apply Packet 7E operator surfaces
+        run: |
+          python scripts/apply_stage7_packet7e_operator_surfaces.py
+          rm -f scripts/apply_stage7_packet7e_operator_surfaces.py
+          python -m py_compile buildforme/server.py buildforme/cli.py buildforme/stage7_smoke.py scripts/stage7_real_two_provider_smoke.py tests/test_stage7_packet7e_operator_surfaces.py
+          node --check public/app.js
+          git diff --check
+      - name: Run Packet 7E focused tests
+        run: python -m unittest discover -s tests -p 'test_stage7_packet7e_operator_surfaces.py' -v
+      - name: Run Packet 7D and review regressions
+        run: |
+          python -m unittest discover -s tests -p 'test_stage7_packet7d*.py' -v
+          python -m unittest discover -s tests -p 'test_stage7_review_authority.py' -v
+          python -m unittest discover -s tests -p 'test_stage7_review_execution.py' -v
+      - name: Run server and UI regressions
+        run: |
+          python -m unittest discover -s tests -p 'test_*server*.py' -v
+          python -m unittest discover -s tests -p 'test_*ui*.py' -v
+      - name: Run full validation
+        run: |
+          python -m unittest discover -s tests -p 'test_*.py'
+          python -m buildforme.cli classify data/sample_task.json
+          python - <<'PY'
+          from governance.constitution_engine import get_engine
+          result = get_engine().full_validation_suite()
+          print(result)
+          if not result.get('passed'):
+              raise SystemExit(1)
+          PY
+      - name: Stage permanent source changes
+        run: |
+          git config user.name "Buildforme Governance Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add buildforme/server.py buildforme/cli.py buildforme/stage7_smoke.py public/index.html public/app.js scripts/stage7_real_two_provider_smoke.py tests/test_stage7_packet7e_operator_surfaces.py docs/STAGE_7_INDEPENDENT_MULTI_AGENT_REVIEW.md
+          git add -A -- scripts/apply_stage7_packet7e_operator_surfaces.py
+          git diff --cached --check
+          git status --short
+      - name: Create permanent commit
+        run: git commit -m "Add Stage 7 operator surfaces and strict real reviewer smoke"
+      - name: Push permanent source commit
+        run: git push origin HEAD:stage-7-independent-multi-agent-review-loop
+      - name: Verify remote head
+        run: |
+          published_sha=$(git rev-parse HEAD)
+          remote_sha=$(git ls-remote origin refs/heads/stage-7-independent-multi-agent-review-loop | awk '{print $1}')
+          echo "published_sha=$published_sha"
+          echo "remote_sha=$remote_sha"
+          test "$published_sha" = "$remote_sha"

@@ -3,9 +3,17 @@ set +e
 report=stage7_packet7a_review_shopping_validation.txt
 : > "$report"
 
+echo '== correct review-shopping patcher ==' | tee -a "$report"
+python scripts/fix_stage7_review_shopping_patcher.py 2>&1 | tee -a "$report"
+correction_status=${PIPESTATUS[0]}
+
 echo '== apply review-shopping remediation ==' | tee -a "$report"
-python scripts/apply_stage7_packet7a_review_shopping.py 2>&1 | tee -a "$report"
-apply_status=${PIPESTATUS[0]}
+if [ "$correction_status" -eq 0 ]; then
+  python scripts/apply_stage7_packet7a_review_shopping.py 2>&1 | tee -a "$report"
+  apply_status=${PIPESTATUS[0]}
+else
+  apply_status=1
+fi
 syntax_status=99
 focused_status=99
 full_status=99
@@ -51,7 +59,7 @@ PY
   constitution_status=${PIPESTATUS[0]}
 fi
 
-echo "statuses apply=$apply_status syntax=$syntax_status focused=$focused_status full=$full_status policy=$policy_status constitution=$constitution_status" | tee -a "$report"
+echo "statuses correction=$correction_status apply=$apply_status syntax=$syntax_status focused=$focused_status full=$full_status policy=$policy_status constitution=$constitution_status" | tee -a "$report"
 
 git config user.name "Buildforme Governance Bot"
 git config user.email "actions@users.noreply.github.com"
@@ -87,8 +95,9 @@ jobs:
 YAML
 }
 
-if [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status" -eq 0 ] && [ "$full_status" -eq 0 ] && [ "$policy_status" -eq 0 ] && [ "$constitution_status" -eq 0 ]; then
-  rm -f "$report" scripts/apply_stage7_packet7a_review_shopping.py scripts/run_stage7_packet7a_review_shopping_gate.sh
+if [ "$correction_status" -eq 0 ] && [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status" -eq 0 ] && [ "$full_status" -eq 0 ] && [ "$policy_status" -eq 0 ] && [ "$constitution_status" -eq 0 ]; then
+  rm -f "$report" stage7_packet7a_review_shopping_validation.txt
+  rm -f scripts/apply_stage7_packet7a_review_shopping.py scripts/fix_stage7_review_shopping_patcher.py scripts/run_stage7_packet7a_review_shopping_gate.sh
   restore_original_ci
   git diff --check
   git add -A -- \
@@ -97,7 +106,9 @@ if [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status
     buildforme/execution_service.py \
     tests/test_stage7_review_authority.py \
     docs/STAGE_7_INDEPENDENT_MULTI_AGENT_REVIEW.md \
+    stage7_packet7a_review_shopping_validation.txt \
     scripts/apply_stage7_packet7a_review_shopping.py \
+    scripts/fix_stage7_review_shopping_patcher.py \
     scripts/run_stage7_packet7a_review_shopping_gate.sh
   git diff --cached --check
   unexpected=$(git status --porcelain | grep '^??' || true)

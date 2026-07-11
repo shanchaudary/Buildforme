@@ -261,7 +261,9 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
         result = self._cycle()
         assignment = result["assignments"][0]
         self._pass_report(assignment)
-        with self.assertRaisesRegex(ValueError, "fixture review assignment is not pending"):
+        with self.assertRaisesRegex(
+            ValueError, "not pending or executing|fixture review assignment is not pending"
+        ):
             self._pass_report(assignment)
 
     def test_blind_report_cannot_claim_consensus_or_founder_authority(self):
@@ -344,7 +346,8 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
             verification={"passed": True, "blocking_reasons": [], "checks": []},
             constitution_validation={"passed": True, "valid": True},
         )
-        self.assertIn("Stage 7 independent review requires repair", blocks)
+        self.assertIn("Stage 7 independent review is not clear", blocks)
+        self.assertIn("Stage 7 independent review contains blocking findings", blocks)
         with self.assertRaisesRegex(ValueError, "independent review"):
             require_clear_independent_review(self.store, run)
 
@@ -371,11 +374,21 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
     def test_blind_cycle_view_withholds_reports_until_finalized(self):
         result = self._cycle()
         self._pass_report(result["assignments"][0])
-        view = get_independent_review_cycle_view(self.store, result["cycle"]["cycle_id"])
-        self.assertTrue(view["blind_withheld"])
-        self.assertNotIn("reports", view)
-        self.assertNotIn("findings", view)
-        self.assertEqual(view["submitted_reviewer_count"], 1)
+        active = get_independent_review_cycle_view(
+            self.store, result["cycle"]["cycle_id"]
+        )
+        self.assertTrue(active["blind_material_withheld"])
+        self.assertEqual(active["reports"], [])
+        self.assertEqual(active["findings"], [])
+        self._pass_report(result["assignments"][1])
+        aggregate_independent_review_cycle(
+            self.store, result["cycle"]["cycle_id"]
+        )
+        final = get_independent_review_cycle_view(
+            self.store, result["cycle"]["cycle_id"]
+        )
+        self.assertFalse(final["blind_material_withheld"])
+        self.assertEqual(len(final["reports"]), 2)
 
     def test_storage_rejects_self_consistent_forged_cycle_authority(self):
         from buildforme.review_contracts import build_review_cycle_record
@@ -403,7 +416,7 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
             reviewers=self.reviewers,
             actor="shan",
         )
-        with self.assertRaisesRegex(ValueError, "assignment set"):
+        with self.assertRaisesRegex(ValueError, "exactly match"):
             self.store.s6.create_review_cycle_atomic(
                 cycle=cycle, assignments=assignments[:1], actor="shan"
             )
@@ -546,23 +559,21 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
             )
 
     def test_policy_cannot_disable_blind_or_blocking_laws(self):
-        result = create_independent_review_cycle(
-            self.store,
-            self.run["id"],
-            reviewers=self.reviewers,
-            actor="shan",
-            policy={
-                "blind_review": False,
-                "implementer_provider_forbidden": False,
-                "critical_high_always_blocking": False,
-                "founder_override_blocking_findings": True,
-            },
-        )
-        policy = result["cycle"]["policy"]
-        self.assertTrue(policy["blind_review"])
-        self.assertTrue(policy["implementer_provider_forbidden"])
-        self.assertTrue(policy["critical_high_always_blocking"])
-        self.assertFalse(policy["founder_override_blocking_findings"])
+        for policy in (
+            {"blind_review": False},
+            {"implementer_provider_forbidden": False},
+            {"critical_high_always_blocking": False},
+            {"founder_override_blocking_findings": True},
+        ):
+            with self.subTest(policy=policy):
+                with self.assertRaisesRegex(ValueError, "cannot weaken"):
+                    create_independent_review_cycle(
+                        self.store,
+                        self.run["id"],
+                        reviewers=self.reviewers,
+                        actor="shan",
+                        policy=policy,
+                    )
 
     def test_blocking_cycle_cannot_be_re_reviewed_without_fresh_evidence(self):
         result = self._cycle()

@@ -515,6 +515,84 @@ def register_repo_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def repair_list_command(args: argparse.Namespace) -> int:
+    from buildforme.storage import LocalStore
+
+    packets = LocalStore(args.state).list_repair_packets()
+    print(json.dumps({"repair_packets": packets}, indent=2, sort_keys=True, default=str))
+    return 0
+
+
+def repair_show_command(args: argparse.Namespace) -> int:
+    from buildforme.storage import LocalStore
+
+    store = LocalStore(args.state)
+    packet = store.get_repair_packet(args.repair_packet_id)
+    try:
+        admission = store.get_repair_admission(args.repair_packet_id)
+    except KeyError:
+        admission = None
+    try:
+        link = store.get_repair_review_link(args.repair_packet_id)
+    except KeyError:
+        link = None
+    payload = {
+        "repair_packet": packet,
+        "repair_admission": admission,
+        "repair_review_link": link,
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+    return 0
+
+
+def repair_create_command(args: argparse.Namespace) -> int:
+    from buildforme.repair_service import create_governed_repair_packet
+    from buildforme.storage import LocalStore
+
+    packet = create_governed_repair_packet(
+        LocalStore(args.state),
+        args.cycle_id,
+        repair_provider_id=args.provider,
+        actor=args.actor,
+    )
+    print(json.dumps({"repair_packet": packet}, indent=2, sort_keys=True, default=str))
+    return 0
+
+
+def repair_admit_command(args: argparse.Namespace) -> int:
+    from buildforme.repair_service import admit_governed_repair_run
+    from buildforme.storage import LocalStore
+
+    result = admit_governed_repair_run(
+        LocalStore(args.state), args.repair_packet_id, actor=args.actor
+    )
+    print(json.dumps(result, indent=2, sort_keys=True, default=str))
+    return 0
+
+
+def repair_review_cycle_command(args: argparse.Namespace) -> int:
+    from buildforme.repair_service import create_repair_review_cycle
+    from buildforme.storage import LocalStore
+
+    result = create_repair_review_cycle(
+        LocalStore(args.state), args.repair_packet_id, actor=args.actor
+    )
+    print(json.dumps(result, indent=2, sort_keys=True, default=str))
+    return 0
+
+
+def repair_execute_command(args: argparse.Namespace) -> int:
+    from buildforme.repair_service import execute_governed_repair_and_open_review
+    from buildforme.storage import LocalStore
+
+    result = execute_governed_repair_and_open_review(
+        LocalStore(args.state), args.repair_packet_id, actor=args.actor
+    )
+    print(json.dumps(result, indent=2, sort_keys=True, default=str))
+    status = str((result.get("run") or {}).get("status") or "")
+    return 0 if status == "needs_review" else 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Buildforme supervisor CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -674,6 +752,40 @@ def build_parser() -> argparse.ArgumentParser:
     rev.add_argument("run_id")
     rev.add_argument("--state", default="runtime/buildforme_state.json")
     rev.set_defaults(func=run_evidence_command)
+
+    repair_list = subparsers.add_parser("repair-list", help="List governed Stage 7 repair packets")
+    repair_list.add_argument("--state", default="runtime/buildforme_state.json")
+    repair_list.set_defaults(func=repair_list_command)
+
+    repair_show = subparsers.add_parser("repair-show", help="Show repair packet, admission, and re-review link")
+    repair_show.add_argument("repair_packet_id")
+    repair_show.add_argument("--state", default="runtime/buildforme_state.json")
+    repair_show.set_defaults(func=repair_show_command)
+
+    repair_create = subparsers.add_parser("repair-create", help="Create one governed repair packet from a finalized review cycle")
+    repair_create.add_argument("cycle_id")
+    repair_create.add_argument("--provider", required=True, help="Repair implementation provider id")
+    repair_create.add_argument("--actor", default="shan")
+    repair_create.add_argument("--state", default="runtime/buildforme_state.json")
+    repair_create.set_defaults(func=repair_create_command)
+
+    repair_admit = subparsers.add_parser("repair-admit", help="Create exact seed and atomically admit repair child")
+    repair_admit.add_argument("repair_packet_id")
+    repair_admit.add_argument("--actor", default="shan")
+    repair_admit.add_argument("--state", default="runtime/buildforme_state.json")
+    repair_admit.set_defaults(func=repair_admit_command)
+
+    repair_cycle = subparsers.add_parser("repair-review-cycle", help="Open mandatory fresh review cycle after verified repair")
+    repair_cycle.add_argument("repair_packet_id")
+    repair_cycle.add_argument("--actor", default="shan")
+    repair_cycle.add_argument("--state", default="runtime/buildforme_state.json")
+    repair_cycle.set_defaults(func=repair_review_cycle_command)
+
+    repair_execute = subparsers.add_parser("repair-execute", help="Execute approved repair child and open fresh review")
+    repair_execute.add_argument("repair_packet_id")
+    repair_execute.add_argument("--actor", default="shan")
+    repair_execute.add_argument("--state", default="runtime/buildforme_state.json")
+    repair_execute.set_defaults(func=repair_execute_command)
     return parser
 
 

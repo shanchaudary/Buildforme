@@ -32,6 +32,12 @@ from buildforme.packet_generator import generate_agent_packet
 from buildforme.planner import plan_project, recommendation_to_packet_input
 from buildforme.policy import classify_task, validate_task_packet
 from buildforme.review_execution import execute_independent_review_assignment
+from buildforme.repair_service import (
+    admit_governed_repair_run,
+    create_governed_repair_packet,
+    create_repair_review_cycle,
+    execute_governed_repair_and_open_review,
+)
 from buildforme.review_service import (
     aggregate_independent_review_cycle,
     create_independent_review_cycle,
@@ -211,6 +217,16 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
                 {"leases": self._store().list_constitution_leases(limit=limit)},
             )
             return
+        if path == "/api/repair-packets":
+            self._json(
+                HTTPStatus.OK,
+                {"repair_packets": self._store().list_repair_packets()},
+            )
+            return
+        if path.startswith("/api/repair-packets/") and path.count("/") == 3:
+            repair_packet_id = path.removeprefix("/api/repair-packets/").strip("/")
+            self._stage7_repair_view(repair_packet_id)
+            return
         if path == "/api/runs":
             project_id = _first_query_value(parsed, "project_id")
             self._json(HTTPStatus.OK, {"runs": self._store().list_runs(project_id=project_id)})
@@ -356,6 +372,18 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/founder/session":
             self._create_founder_session()
+            return
+        if path.startswith("/api/review-cycles/") and path.endswith("/repair-packet"):
+            self._stage7_repair_action(path, "create")
+            return
+        if path.startswith("/api/repair-packets/") and path.endswith("/admit"):
+            self._stage7_repair_action(path, "admit")
+            return
+        if path.startswith("/api/repair-packets/") and path.endswith("/review-cycle"):
+            self._stage7_repair_action(path, "review-cycle")
+            return
+        if path.startswith("/api/repair-packets/") and path.endswith("/execute"):
+            self._stage7_repair_action(path, "execute")
             return
         if path.startswith("/api/runs/") and path.endswith("/reviews"):
             self._stage7_review_action(path, "create")
@@ -1056,6 +1084,117 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
         except (KeyError, ValueError, json.JSONDecodeError) as exc:
             code = HTTPStatus.NOT_FOUND if isinstance(exc, KeyError) else HTTPStatus.BAD_REQUEST
             self._json(code, {"error": str(exc)})
+
+    def _stage7_repair_view(self, repair_packet_id: str) -> None:
+        try:
+            store = self._store()
+            packet = store.get_repair_packet(repair_packet_id)
+            admission = None
+            link = None
+            child_run = None
+            source_run = None
+            try:
+                admission = store.get_repair_admission(repair_packet_id)
+                child_run = store.get_run(str(admission.get("child_run_id") or ""))
+            except KeyError:
+                admission = None
+            try:
+                link = store.get_repair_review_link(repair_packet_id)
+            except KeyError:
+                link = None
+            try:
+                source_run = store.get_run(str(packet.get("source_run_id") or ""))
+            except KeyError:
+                source_run = None
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "repair_packet": packet,
+                    "repair_admission": admission,
+                    "repair_review_link": link,
+                    "source_run": source_run,
+                    "child_run": child_run,
+                },
+            )
+        except KeyError as exc:
+            self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+        except ValueError as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def _stage7_repair_action(self, path: str, action: str) -> None:
+        try:
+            payload = self._read_json() if int(self.headers.get("Content-Length") or "0") else {}
+            if not isinstance(payload, dict):
+                payload = {}
+            auth = self._require_founder_mutation(payload)
+            actor = str(payload.get("actor") or auth.get("actor") or "shan")
+            forbidden = {
+                "argv",
+                "command",
+                "executable",
+                "repo_root",
+                "repository_local_path",
+                "local_path",
+                "allowed_files",
+                "forbidden_files",
+                "reviewers",
+                "policy",
+                "scope_fingerprint",
+                "repair_fingerprint",
+                "seed_commit",
+                "seed_ref",
+                "child_run",
+                "lease",
+            }
+            supplied = sorted(key for key in forbidden if key in payload)
+            if supplied:
+                raise ValueError(
+                    "repair authority is storage-owned; forbidden fields supplied: "
+                    + ", ".join(supplied)
+                )
+            if action == "create":
+                cycle_id = path.removeprefix("/api/review-cycles/").removesuffix(
+                    "/repair-packet"
+                ).strip("/")
+                provider_id = str(payload.get("repair_provider_id") or "").strip()
+                if not provider_id:
+                    raise ValueError("repair_provider_id required")
+                result = {
+                    "repair_packet": create_governed_repair_packet(
+                        self._store(),
+                        cycle_id,
+                        repair_provider_id=provider_id,
+                        actor=actor,
+                    )
+                }
+            else:
+                suffix = {
+                    "admit": "/admit",
+                    "review-cycle": "/review-cycle",
+                    "execute": "/execute",
+                }[action]
+                repair_packet_id = path.removeprefix("/api/repair-packets/").removesuffix(
+                    suffix
+                ).strip("/")
+                if action == "admit":
+                    result = admit_governed_repair_run(
+                        self._store(), repair_packet_id, actor=actor
+                    )
+                elif action == "review-cycle":
+                    result = create_repair_review_cycle(
+                        self._store(), repair_packet_id, actor=actor
+                    )
+                elif action == "execute":
+                    result = execute_governed_repair_and_open_review(
+                        self._store(), repair_packet_id, actor=actor
+                    )
+                else:
+                    raise ValueError("unknown Stage 7 repair action")
+            self._json(HTTPStatus.OK, result)
+        except KeyError as exc:
+            self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+        except (ValueError, json.JSONDecodeError) as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
     def _stage7_review_action(self, path: str, action: str) -> None:
         try:

@@ -148,3 +148,11 @@ canonical Constitution reminder bound to the run lease.
 - After approved supervised repair execution reaches `needs_review` with deterministic verification passed, Buildforme opens a new cycle through the existing review-cycle authority.
 - SQLite requires fresh child execution evidence, the exact source reviewer-provider set, and exclusion of the repair implementer.
 - The repair packet, admission, child, fresh evidence, and new cycle are linked append-only; duplicate orchestration replays the same cycle.
+
+
+## Packet 7E — operator surfaces and real reviewer smoke
+
+- Founder-authenticated HTTP actions create repair packets, admit exact-seed children, execute approved repairs, and open mandatory fresh review cycles. The API rejects command, path, scope, reviewer, seed, and policy overrides.
+- Local CLI commands expose the same governed repair workflow without adding a second authority.
+- The dashboard adds a Stage 7 review/repair status panel with in-memory founder token and CSRF inputs; the page does not persist credentials.
+- `scripts/stage7_real_two_provider_smoke.py` runs real Codex and Claude blind reviewer processes against a disposable, deterministically verified implementation fixture. The output explicitly discloses that the implementation is controlled rather than claiming a third-provider execution. Acceptance requires two real authenticated process records, a clear two-provider aggregate, unchanged source identity/patch, no direct report submission, and no merge.

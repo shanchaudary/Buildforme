@@ -42,25 +42,13 @@ jobs:
       - name: Apply Packet 7E red-team hardening
         run: |
           python scripts/apply_stage7_packet7e_redteam.py
-          rm -f scripts/apply_stage7_packet7e_redteam.py
+          python scripts/fix_stage7_packet7e_redteam_tests.py
+          rm -f scripts/apply_stage7_packet7e_redteam.py scripts/fix_stage7_packet7e_redteam_tests.py stage7_packet7e_redteam_diagnostic.txt
           python -m py_compile buildforme/server.py buildforme/stage7_smoke.py scripts/stage7_real_two_provider_smoke.py tests/test_stage7_packet7e_operator_surfaces.py tests/test_stage7_packet7e_redteam_contract.py
           node --check public/app.js
           git diff --check
       - name: Run Packet 7E focused and red-team tests
         run: python -m unittest discover -s tests -p 'test_stage7_packet7e*.py' -v
-      - name: Preserve Packet 7E red-team diagnostic
-        if: failure()
-        run: |
-          if [ ! -f stage7_packet7e_redteam_diagnostic.txt ]; then
-            python -m unittest discover -s tests -p 'test_stage7_packet7e*.py' -v > stage7_packet7e_redteam_diagnostic.txt 2>&1 || true
-            git restore .
-            git clean -fd buildforme tests docs public scripts
-            git config user.name "Buildforme Governance Bot"
-            git config user.email "actions@users.noreply.github.com"
-            git add -f stage7_packet7e_redteam_diagnostic.txt
-            git commit -m "Record Packet 7E red-team validation failure"
-            git push origin HEAD:stage-7-independent-multi-agent-review-loop
-          fi
       - name: Run Packet 7D and review regressions
         run: |
           python -m unittest discover -s tests -p 'test_stage7_packet7d*.py' -v
@@ -86,7 +74,7 @@ jobs:
           git config user.name "Buildforme Governance Bot"
           git config user.email "actions@users.noreply.github.com"
           git add buildforme/server.py buildforme/stage7_smoke.py public/app.js scripts/stage7_real_two_provider_smoke.py tests/test_stage7_packet7e_operator_surfaces.py tests/test_stage7_packet7e_redteam_contract.py docs/STAGE_7_INDEPENDENT_MULTI_AGENT_REVIEW.md
-          git add -A -- scripts/apply_stage7_packet7e_redteam.py
+          git add -A -- scripts/apply_stage7_packet7e_redteam.py scripts/fix_stage7_packet7e_redteam_tests.py stage7_packet7e_redteam_diagnostic.txt
           git diff --cached --check
           git status --short
       - name: Create permanent commit

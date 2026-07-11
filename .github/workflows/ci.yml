@@ -42,24 +42,12 @@ jobs:
       - name: Apply Packet 7D repair re-review
         run: |
           python scripts/apply_stage7_packet7d_repair_rereview.py
-          rm -f scripts/apply_stage7_packet7d_repair_rereview.py
+          python scripts/fix_stage7_packet7d_rereview_fixture.py
+          rm -f scripts/apply_stage7_packet7d_repair_rereview.py scripts/fix_stage7_packet7d_rereview_fixture.py stage7_packet7d_rereview_diagnostic.txt
           python -m py_compile buildforme/db.py buildforme/execution_store.py buildforme/storage.py buildforme/repair_service.py tests/test_stage7_packet7d_repair_rereview.py tests/test_stage7_packet7d_rereview_contract.py
           git diff --check
       - name: Run Packet 7D re-review tests
         run: python -m unittest discover -s tests -p 'test_stage7_packet7d_repair_rereview.py' -v
-      - name: Preserve Packet 7D re-review diagnostic
-        if: failure()
-        run: |
-          if [ ! -f stage7_packet7d_rereview_diagnostic.txt ]; then
-            python -m unittest discover -s tests -p 'test_stage7_packet7d_repair_rereview.py' -v > stage7_packet7d_rereview_diagnostic.txt 2>&1 || true
-            git restore .
-            git clean -fd buildforme tests docs scripts
-            git config user.name "Buildforme Governance Bot"
-            git config user.email "actions@users.noreply.github.com"
-            git add -f stage7_packet7d_rereview_diagnostic.txt
-            git commit -m "Record Packet 7D re-review validation failure"
-            git push origin HEAD:stage-7-independent-multi-agent-review-loop
-          fi
       - name: Run all Packet 7D authority tests
         run: |
           python -m unittest discover -s tests -p 'test_stage7_packet7d_repair_authority.py' -v
@@ -86,7 +74,7 @@ jobs:
           git config user.name "Buildforme Governance Bot"
           git config user.email "actions@users.noreply.github.com"
           git add buildforme/db.py buildforme/execution_store.py buildforme/storage.py buildforme/repair_service.py docs/STAGE_7_INDEPENDENT_MULTI_AGENT_REVIEW.md tests/test_stage6_execution.py tests/test_stage6_redteam_round2.py tests/test_stage7_packet7a_contract.py tests/test_stage7_review_authority.py tests/test_stage7_review_execution.py tests/test_stage7_packet7d_repair_authority.py tests/test_stage7_packet7d_repair_admission.py tests/test_stage7_packet7d_repair_rereview.py tests/test_stage7_packet7d_rereview_contract.py
-          git add -A -- scripts/apply_stage7_packet7d_repair_rereview.py
+          git add -A -- scripts/apply_stage7_packet7d_repair_rereview.py scripts/fix_stage7_packet7d_rereview_fixture.py stage7_packet7d_rereview_diagnostic.txt
           git diff --cached --check
           git status --short
       - name: Create permanent commit

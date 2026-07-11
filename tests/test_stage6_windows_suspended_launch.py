@@ -45,6 +45,20 @@ class WindowsSuspendedLaunchContractTests(unittest.TestCase):
                 msg=f"terminate_process_tree call at line {call.lineno} lacks Windows Job proof",
             )
 
+    def test_containment_failure_never_continues_to_provider_input(self):
+        source = Path("buildforme/process_supervisor.py").read_text(encoding="utf-8")
+        assignment_start = source.index('if os.name == "nt":', source.index("proc = subprocess.Popen"))
+        resume_index = source.index("WindowsJob.resume_process", assignment_start)
+        containment_error_index = source.index(
+            '"error": "Windows suspended-launch containment failed"',
+            resume_index,
+        )
+        failure_return_index = source.index("return result", containment_error_index)
+        stdin_index = source.index("if stdin_bytes is not None", failure_return_index)
+        self.assertLess(resume_index, containment_error_index)
+        self.assertLess(containment_error_index, failure_return_index)
+        self.assertLess(failure_return_index, stdin_index)
+
     def test_no_legacy_unsuspended_windows_launch_remains(self):
         source = Path("buildforme/process_supervisor.py").read_text(encoding="utf-8")
         self.assertNotIn(

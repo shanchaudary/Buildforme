@@ -7,75 +7,20 @@ on:
       - main
       - founder-control-plane-mvp
 
-permissions:
-  contents: write
-
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Run unit tests
         run: python -m unittest discover -s tests -p 'test_*.py'
+
       - name: Run policy smoke check
         run: python -m buildforme.cli classify data/sample_task.json
-
-  remediate-stage7-constitution-text-binding:
-    if: github.event_name == 'pull_request' && github.head_ref == 'stage-7-independent-multi-agent-review-loop'
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    steps:
-      - name: Checkout Stage 7 branch
-        uses: actions/checkout@v4
-        with:
-          ref: stage-7-independent-multi-agent-review-loop
-          fetch-depth: 0
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Apply validated Constitution binding
-        run: |
-          python scripts/apply_stage7_constitution_text_binding.py
-          rm -f scripts/apply_stage7_constitution_text_binding.py scripts/run_stage7_constitution_text_binding_gate.sh
-          python -m py_compile buildforme/review_execution.py tests/test_stage7_packet7b_isolation_contract.py
-          git diff --check
-      - name: Run focused reviewer contracts
-        run: |
-          python -m unittest discover -s tests -p 'test_stage7_packet7b_isolation_contract.py' -v
-          python -m unittest discover -s tests -p 'test_stage7_review_execution.py' -v
-      - name: Run full validation
-        run: |
-          python -m unittest discover -s tests -p 'test_*.py'
-          python -m buildforme.cli classify data/sample_task.json
-          python - <<'PY'
-          from governance.constitution_engine import get_engine
-          result = get_engine().full_validation_suite()
-          print(result)
-          if not result.get('passed'):
-              raise SystemExit(1)
-          PY
-      - name: Stage permanent source changes
-        run: |
-          git config user.name "Buildforme Governance Bot"
-          git config user.email "actions@users.noreply.github.com"
-          git add buildforme/review_execution.py tests/test_stage7_packet7b_isolation_contract.py
-          git add -A -- scripts/apply_stage7_constitution_text_binding.py scripts/run_stage7_constitution_text_binding_gate.sh
-          git diff --cached --check
-          git status --short
-      - name: Create permanent commit
-        run: git commit -m "Bind reviewer prompts to canonical Constitution text"
-      - name: Push permanent source commit
-        run: git push origin HEAD:stage-7-independent-multi-agent-review-loop
-      - name: Verify remote head
-        run: |
-          published_sha=$(git rev-parse HEAD)
-          remote_sha=$(git ls-remote origin refs/heads/stage-7-independent-multi-agent-review-loop | awk '{print $1}')
-          echo "published_sha=$published_sha"
-          echo "remote_sha=$remote_sha"
-          test "$published_sha" = "$remote_sha"

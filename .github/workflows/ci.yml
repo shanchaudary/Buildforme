@@ -1,5 +1,6 @@
 name: Buildforme CI
 
+# Windows containment gate revision 2: force-add failure diagnostics.
 on:
   pull_request:
   push:

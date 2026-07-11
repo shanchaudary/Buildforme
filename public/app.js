@@ -2056,7 +2056,6 @@ function repairMutationBody(extra = {}) {
   return {
     founder_token: document.querySelector("#rp-founder-token")?.value || "",
     csrf_token: document.querySelector("#rp-csrf-token")?.value || "",
-    actor: "shan",
     ...extra,
   };
 }

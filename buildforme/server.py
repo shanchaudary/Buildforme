@@ -1126,31 +1126,20 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             payload = self._read_json() if int(self.headers.get("Content-Length") or "0") else {}
             if not isinstance(payload, dict):
                 payload = {}
-            auth = self._require_founder_mutation(payload)
-            actor = str(payload.get("actor") or auth.get("actor") or "shan")
-            forbidden = {
-                "argv",
-                "command",
-                "executable",
-                "repo_root",
-                "repository_local_path",
-                "local_path",
-                "allowed_files",
-                "forbidden_files",
-                "reviewers",
-                "policy",
-                "scope_fingerprint",
-                "repair_fingerprint",
-                "seed_commit",
-                "seed_ref",
-                "child_run",
-                "lease",
-            }
-            supplied = sorted(key for key in forbidden if key in payload)
-            if supplied:
+            try:
+                auth = self._require_founder_mutation(payload)
+            except ValueError as exc:
+                self._json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
+                return
+            actor = str(auth.get("actor") or "shan")
+            allowed = {"founder_token", "csrf_token"}
+            if action == "create":
+                allowed.add("repair_provider_id")
+            unknown = sorted(set(payload) - allowed)
+            if unknown:
                 raise ValueError(
-                    "repair authority is storage-owned; forbidden fields supplied: "
-                    + ", ".join(supplied)
+                    "repair action accepts only storage-bounded identifiers; unknown fields: "
+                    + ", ".join(unknown)
                 )
             if action == "create":
                 cycle_id = path.removeprefix("/api/review-cycles/").removesuffix(

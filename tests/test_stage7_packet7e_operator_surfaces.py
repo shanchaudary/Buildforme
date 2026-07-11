@@ -13,6 +13,9 @@ class Stage7OperatorSurfaceTests(unittest.TestCase):
         source = Path("buildforme/server.py").read_text(encoding="utf-8")
         self.assertIn("_stage7_repair_action", source)
         self.assertIn("_require_founder_mutation(payload)", source)
+        self.assertIn("HTTPStatus.FORBIDDEN", source)
+        self.assertIn('actor = str(auth.get("actor") or "shan")', source)
+        self.assertIn("unknown fields", source)
         for route in (
             "/repair-packet",
             "/admit",
@@ -20,8 +23,9 @@ class Stage7OperatorSurfaceTests(unittest.TestCase):
             "/execute",
         ):
             self.assertIn(route, source)
-        for forbidden in ("argv", "repo_root", "reviewers", "seed_commit", "scope_fingerprint"):
-            self.assertIn(f'"{forbidden}"', source)
+        self.assertIn("unknown = sorted(set(payload) - allowed)", source)
+        self.assertIn("repair action accepts only storage-bounded identifiers", source)
+        self.assertIn('allowed = {"founder_token", "csrf_token"}', source)
 
     def test_cli_exposes_repair_workflow_without_authority_overrides(self):
         parser = build_parser()
@@ -58,6 +62,7 @@ class Stage7OperatorSurfaceTests(unittest.TestCase):
     def test_smoke_acceptance_requires_real_two_provider_proof(self):
         attempt = lambda provider: {
             "provider_id": provider,
+            "report_fingerprint": "r1" if provider == "codex" else "r2",
             "status": "succeeded",
             "process_started": True,
             "auth_probe_verified": True,
@@ -67,7 +72,17 @@ class Stage7OperatorSurfaceTests(unittest.TestCase):
         }
         observed = {
             "controlled_implementation_fixture": True,
+            "implementer_provider_id": "glm",
             "review_execution_attempts": [attempt("codex"), attempt("claude")],
+            "persisted_report_count": 2,
+            "persisted_report_fingerprints": ["r1", "r2"],
+            "aggregate_report_fingerprints": ["r1", "r2"],
+            "cycle_id": "rc-1",
+            "cycle_evidence_id": "ev-1",
+            "cycle_evidence_fingerprint": "efp-1",
+            "expected_evidence_id": "ev-1",
+            "expected_evidence_fingerprint": "efp-1",
+            "run_review_cycle_id": "rc-1",
             "distinct_provider_count": 2,
             "provider_ids": ["codex", "claude"],
             "aggregate_status": "clear",
@@ -78,8 +93,7 @@ class Stage7OperatorSurfaceTests(unittest.TestCase):
             "source_branch_after": "feature/x",
             "source_patch_before": "p",
             "source_patch_after": "p",
-            "merge_performed": False,
-            "direct_report_submission_used": False,
+            "merge_commit_count": 0,
         }
         result = evaluate_stage7_smoke(observed)
         self.assertTrue(result["passed"], result)

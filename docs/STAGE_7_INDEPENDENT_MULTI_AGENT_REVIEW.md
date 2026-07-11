@@ -156,3 +156,9 @@ canonical Constitution reminder bound to the run lease.
 - Local CLI commands expose the same governed repair workflow without adding a second authority.
 - The dashboard adds a Stage 7 review/repair status panel with in-memory founder token and CSRF inputs; the page does not persist credentials.
 - `scripts/stage7_real_two_provider_smoke.py` runs real Codex and Claude blind reviewer processes against a disposable, deterministically verified implementation fixture. The output explicitly discloses that the implementation is controlled rather than claiming a third-provider execution. Acceptance requires two real authenticated process records, a clear two-provider aggregate, unchanged source identity/patch, no direct report submission, and no merge.
+
+
+### Packet 7E red-team hardening
+
+- Repair HTTP mutations return forbidden on failed founder authentication, derive the audit actor only from the validated session, and reject every non-allowlisted request field.
+- Smoke acceptance binds the two successful execution attempts to the two persisted report fingerprints and aggregate report fingerprints, the exact cycle/evidence/run binding, distinct implementer identity, and the actual Git merge-commit count. It no longer accepts caller-provided `no synthetic report` or `no merge` booleans.

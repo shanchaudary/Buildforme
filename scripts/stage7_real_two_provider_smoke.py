@@ -204,9 +204,23 @@ def main() -> int:
         store, created["cycle"]["cycle_id"], actor="stage7-smoke"
     )
     aggregate = finalized.get("aggregate") or {}
+    finalized_cycle = store.get_review_cycle(created["cycle"]["cycle_id"])
+    saved_run = store.get_run(run["id"])
+    reports = store.list_review_reports(created["cycle"]["cycle_id"])
+    merge_count_text = git(repo, "rev-list", "--count", "--merges", f"{baseline}..HEAD")
     observed = {
         "controlled_implementation_fixture": True,
+        "implementer_provider_id": run["provider_id"],
         "review_execution_attempts": attempts,
+        "persisted_report_count": len(reports),
+        "persisted_report_fingerprints": [item.get("report_fingerprint") for item in reports],
+        "aggregate_report_fingerprints": aggregate.get("report_fingerprints") or [],
+        "cycle_id": finalized_cycle.get("cycle_id"),
+        "cycle_evidence_id": finalized_cycle.get("evidence_id"),
+        "cycle_evidence_fingerprint": finalized_cycle.get("evidence_fingerprint"),
+        "expected_evidence_id": evidence.get("evidence_id"),
+        "expected_evidence_fingerprint": evidence.get("evidence_fingerprint"),
+        "run_review_cycle_id": saved_run.get("stage7_review_cycle_id"),
         "distinct_provider_count": aggregate.get("distinct_provider_count"),
         "provider_ids": aggregate.get("provider_ids"),
         "aggregate_status": aggregate.get("status"),
@@ -217,8 +231,7 @@ def main() -> int:
         "source_branch_after": git(repo, "rev-parse", "--abbrev-ref", "HEAD"),
         "source_patch_before": source_patch_before,
         "source_patch_after": collect_patch_evidence(repo, baseline_commit=baseline)["patch_fingerprint"],
-        "merge_performed": False,
-        "direct_report_submission_used": False,
+        "merge_commit_count": int(merge_count_text or "0"),
     }
     acceptance = evaluate_stage7_smoke(observed)
     print("STAGE7_SMOKE_DIR", smoke_root)

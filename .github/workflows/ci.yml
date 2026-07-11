@@ -47,6 +47,19 @@ jobs:
           git diff --check
       - name: Run Packet 7D re-review tests
         run: python -m unittest discover -s tests -p 'test_stage7_packet7d_repair_rereview.py' -v
+      - name: Preserve Packet 7D re-review diagnostic
+        if: failure()
+        run: |
+          if [ ! -f stage7_packet7d_rereview_diagnostic.txt ]; then
+            python -m unittest discover -s tests -p 'test_stage7_packet7d_repair_rereview.py' -v > stage7_packet7d_rereview_diagnostic.txt 2>&1 || true
+            git restore .
+            git clean -fd buildforme tests docs scripts
+            git config user.name "Buildforme Governance Bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add -f stage7_packet7d_rereview_diagnostic.txt
+            git commit -m "Record Packet 7D re-review validation failure"
+            git push origin HEAD:stage-7-independent-multi-agent-review-loop
+          fi
       - name: Run all Packet 7D authority tests
         run: |
           python -m unittest discover -s tests -p 'test_stage7_packet7d_repair_authority.py' -v

@@ -67,3 +67,116 @@ def evaluate_stage7_smoke(observed: dict[str, Any]) -> dict[str, Any]:
         "controlled_implementation_fixture": bool(observed.get("controlled_implementation_fixture")),
         "note": "Reviewer processes are real. The implementation evidence is a disclosed controlled fixture, not a claimed third-provider execution.",
     }
+
+
+STAGE7_REPAIR_SMOKE_SCHEMA = "buildforme.stage7_real_repair_loop_smoke.v1"
+
+
+def _successful_attempt_proof(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    succeeded = [item for item in attempts if item.get("status") == "succeeded"]
+    providers = sorted({str(item.get("provider_id") or "") for item in succeeded})
+    fingerprints = sorted(
+        str(item.get("report_fingerprint") or "")
+        for item in succeeded
+        if item.get("report_fingerprint")
+    )
+    return {
+        "succeeded": succeeded,
+        "providers": providers,
+        "report_fingerprints": fingerprints,
+        "real_processes": bool(attempts)
+        and all(
+            item.get("process_started") is True
+            and int((item.get("process") or {}).get("pid") or 0) > 0
+            for item in attempts
+        ),
+        "auth_verified": bool(attempts)
+        and all(item.get("auth_probe_verified") is True for item in attempts),
+        "exit_zero": bool(attempts)
+        and all((item.get("process") or {}).get("exit_code") == 0 for item in attempts),
+        "cleanup_confirmed": bool(attempts)
+        and all((item.get("process") or {}).get("cleanup_ok") is True for item in attempts),
+        "unchanged": bool(attempts)
+        and all(
+            item.get("worktree_unchanged") is True
+            and item.get("post_snapshot_proven") is True
+            for item in attempts
+        ),
+    }
+
+
+def evaluate_stage7_repair_smoke(observed: dict[str, Any]) -> dict[str, Any]:
+    initial = _successful_attempt_proof(observed.get("initial_review_attempts") or [])
+    final = _successful_attempt_proof(observed.get("final_review_attempts") or [])
+    initial_reports = sorted(str(item) for item in (observed.get("initial_report_fingerprints") or []))
+    initial_aggregate_reports = sorted(
+        str(item) for item in (observed.get("initial_aggregate_report_fingerprints") or [])
+    )
+    final_reports = sorted(str(item) for item in (observed.get("final_report_fingerprints") or []))
+    final_aggregate_reports = sorted(
+        str(item) for item in (observed.get("final_aggregate_report_fingerprints") or [])
+    )
+    checks = {
+        "controlled_source_fixture_disclosed": observed.get("controlled_source_fixture") is True,
+        "controlled_repair_execution_disclosed": observed.get("controlled_repair_execution_fixture") is True,
+        "initial_real_codex_claude_review": initial["providers"] == ["claude", "codex"]
+        and len(initial["succeeded"]) == 2
+        and initial["real_processes"]
+        and initial["auth_verified"]
+        and initial["exit_zero"]
+        and initial["cleanup_confirmed"]
+        and initial["unchanged"],
+        "initial_reports_bound_to_execution_and_aggregate": len(initial_reports) == 2
+        and initial["report_fingerprints"] == initial_reports == initial_aggregate_reports,
+        "initial_cycle_repair_required": observed.get("initial_aggregate_status") == "repair_required",
+        "blocking_findings_persisted": int(observed.get("blocking_finding_count") or 0) >= 1,
+        "repair_packet_bound": bool(observed.get("repair_packet_id"))
+        and observed.get("repair_packet_source_cycle_id") == observed.get("initial_cycle_id")
+        and observed.get("repair_packet_source_evidence_id") == observed.get("source_evidence_id"),
+        "repair_admission_bound": bool(observed.get("repair_admission_id"))
+        and observed.get("repair_admission_packet_id") == observed.get("repair_packet_id")
+        and observed.get("repair_child_run_id") == observed.get("repair_admission_child_run_id"),
+        "repair_seed_verified": bool(observed.get("seed_commit"))
+        and bool(observed.get("seed_fingerprint"))
+        and observed.get("child_execution_seed_commit") == observed.get("seed_commit")
+        and observed.get("child_original_baseline") == observed.get("source_original_baseline"),
+        "fresh_repair_evidence": bool(observed.get("fresh_evidence_id"))
+        and observed.get("fresh_evidence_id") != observed.get("source_evidence_id")
+        and observed.get("repair_verification_passed") is True,
+        "repair_review_link_bound": observed.get("repair_review_link_packet_id")
+        == observed.get("repair_packet_id")
+        and observed.get("repair_review_link_evidence_id") == observed.get("fresh_evidence_id")
+        and observed.get("repair_review_link_cycle_id") == observed.get("final_cycle_id"),
+        "final_real_codex_claude_review": final["providers"] == ["claude", "codex"]
+        and len(final["succeeded"]) == 2
+        and final["real_processes"]
+        and final["auth_verified"]
+        and final["exit_zero"]
+        and final["cleanup_confirmed"]
+        and final["unchanged"],
+        "final_reports_bound_to_execution_and_aggregate": len(final_reports) == 2
+        and final["report_fingerprints"] == final_reports == final_aggregate_reports,
+        "final_cycle_clear": observed.get("final_aggregate_status") == "clear",
+        "repair_implementer_excluded": str(observed.get("repair_provider_id") or "")
+        not in final["providers"],
+        "source_repository_unchanged": observed.get("source_head_before")
+        == observed.get("source_head_after")
+        and observed.get("source_branch_before") == observed.get("source_branch_after")
+        and observed.get("source_patch_before") == observed.get("source_patch_after"),
+        "repair_worktree_unchanged_by_reviewers": observed.get("repair_patch_before_review")
+        == observed.get("repair_patch_after_review"),
+        "no_merge_commits": int(observed.get("merge_commit_count") or 0) == 0,
+    }
+    failed = sorted(name for name, passed in checks.items() if not passed)
+    return {
+        "schema": STAGE7_REPAIR_SMOKE_SCHEMA,
+        "passed": not failed,
+        "checks": checks,
+        "failed_checks": failed,
+        "initial_aggregate_status": observed.get("initial_aggregate_status"),
+        "final_aggregate_status": observed.get("final_aggregate_status"),
+        "note": (
+            "Both review cycles use real Codex and Claude processes. The source implementation and "
+            "repair execution are disclosed controlled fixtures; no third-provider execution is claimed."
+        ),
+    }

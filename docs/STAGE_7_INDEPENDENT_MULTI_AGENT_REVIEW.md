@@ -162,3 +162,10 @@ canonical Constitution reminder bound to the run lease.
 
 - Repair HTTP mutations return forbidden on failed founder authentication, derive the audit actor only from the validated session, and reject every non-allowlisted request field.
 - Smoke acceptance binds the two successful execution attempts to the two persisted report fingerprints and aggregate report fingerprints, the exact cycle/evidence/run binding, distinct implementer identity, and the actual Git merge-commit count. It no longer accepts caller-provided `no synthetic report` or `no merge` booleans.
+
+
+## Packet 7F — strict real repair-loop smoke
+
+- `scripts/stage7_real_repair_loop_smoke.py` creates a disposable authorization-bypass fixture with a failing required test, then runs real authenticated Codex and Claude blind reviews. Acceptance requires a persisted blocking finding and a storage-derived `repair_required` aggregate.
+- The harness creates the governed repair packet and exact-seed child through production authority. The repair execution itself is explicitly disclosed as a controlled fixture, receives fresh deterministic evidence, and opens the mandatory repair re-review link.
+- Codex and Claude then perform a second real blind review. Final acceptance requires two execution-bound persisted reports, a clear aggregate, repair-implementer exclusion, unchanged source and repair worktrees during review, and zero merge commits. No synthetic reviewer report is inserted.

@@ -7,6 +7,9 @@ on:
       - main
       - founder-control-plane-mvp
 
+permissions:
+  contents: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -24,3 +27,23 @@ jobs:
 
       - name: Run policy smoke check
         run: python -m buildforme.cli classify data/sample_task.json
+
+  remediate-stage7-packet7b-isolation:
+    if: github.event_name == 'pull_request' && github.head_ref == 'stage-7-independent-multi-agent-review-loop'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout Stage 7 branch
+        uses: actions/checkout@v4
+        with:
+          ref: stage-7-independent-multi-agent-review-loop
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run fail-closed Packet 7B isolation gate
+        run: bash scripts/run_stage7_packet7b_isolation_gate.sh

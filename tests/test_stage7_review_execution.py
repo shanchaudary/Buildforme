@@ -236,8 +236,8 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
         }
 
     def test_schema_v5(self):
-        self.assertEqual(SCHEMA_VERSION, 6)
-        self.assertEqual(self.store.s6.db.pragmas()["schema_version"], 6)
+        self.assertEqual(SCHEMA_VERSION, 7)
+        self.assertEqual(self.store.s6.db.pragmas()["schema_version"], 7)
 
     def test_packet_reproves_exact_worktree_and_is_blind(self):
         packet, snapshot, root = build_verified_blind_review_packet(

@@ -867,6 +867,7 @@ def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
 
     root = Path(str(run["repository_local_path"])).resolve()
     approved_baseline = str(run["baseline_commit"])
+    execution_seed = str(run.get("execution_seed_commit") or approved_baseline)
     run_branch = str(run.get("execution_branch") or "")
     if not run_branch:
         raise ValueError("run missing execution_branch established at create time")
@@ -874,14 +875,14 @@ def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
     worktree_meta = create_isolated_worktree(
         repo_root=root,
         branch=run_branch,
-        baseline_commit=approved_baseline,
+        baseline_commit=execution_seed,
         run_id=run_id,
         allow_dirty_main=False,
         allow_existing_branch=False,
         require_clean_parent=True,
     )
-    if str(worktree_meta.get("baseline_commit")) != approved_baseline:
-        raise ValueError("worktree baseline does not match approved baseline")
+    if str(worktree_meta.get("baseline_commit")) != execution_seed:
+        raise ValueError("worktree seed does not match governed execution seed")
     run["worktree"] = worktree_meta
     run["worktree_path"] = worktree_meta.get("worktree_path")
     run["workspace_root"] = worktree_meta.get("workspace_root")
@@ -896,7 +897,8 @@ def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
         event_summary=redact_text(f"Live supervised execution via {provider_id}"),
         event_metadata={
             "worktree": worktree_meta.get("worktree_path"),
-            "baseline": approved_baseline,
+            "approved_baseline": approved_baseline,
+            "execution_seed_commit": execution_seed,
             "execution_branch": run_branch,
             "requested_target_branch": run.get("requested_target_branch"),
             "constitution_lease_id": run.get("constitution_lease_id"),

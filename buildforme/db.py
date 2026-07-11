@@ -17,7 +17,7 @@ from typing import Any, Iterator
 from buildforme.coordination_lock import CoordinationFileLock
 from buildforme.storage import utc_now_iso
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -347,6 +347,22 @@ CREATE TABLE IF NOT EXISTS repair_packets (
 );
 CREATE INDEX IF NOT EXISTS idx_repair_packets_run
   ON repair_packets(source_run_id, created_at);
+
+CREATE TABLE IF NOT EXISTS repair_admissions (
+  repair_admission_id TEXT PRIMARY KEY,
+  repair_packet_id TEXT NOT NULL UNIQUE REFERENCES repair_packets(repair_packet_id),
+  source_run_id TEXT NOT NULL REFERENCES runs(id),
+  child_run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+  seed_commit TEXT NOT NULL,
+  seed_ref TEXT NOT NULL,
+  seed_fingerprint TEXT NOT NULL,
+  child_scope_fingerprint TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  immutable INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_repair_admissions_source
+  ON repair_admissions(source_run_id, created_at);
 """
 
 
@@ -400,6 +416,8 @@ class ExecutionDB:
                         self._migrate_to_v5(conn)
                     if current < 6:
                         self._migrate_to_v6(conn)
+                    if current < 7:
+                        self._migrate_to_v7(conn)
                     if current < SCHEMA_VERSION:
                         conn.execute(
                             "UPDATE schema_meta SET value=? WHERE key='version'",
@@ -640,6 +658,28 @@ class ExecutionDB:
             );
             CREATE INDEX IF NOT EXISTS idx_repair_packets_run
               ON repair_packets(source_run_id, created_at);
+            """
+        )
+
+    def _migrate_to_v7(self, conn: sqlite3.Connection) -> None:
+        """Add immutable governed repair-run admissions."""
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS repair_admissions (
+              repair_admission_id TEXT PRIMARY KEY,
+              repair_packet_id TEXT NOT NULL UNIQUE REFERENCES repair_packets(repair_packet_id),
+              source_run_id TEXT NOT NULL REFERENCES runs(id),
+              child_run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+              seed_commit TEXT NOT NULL,
+              seed_ref TEXT NOT NULL,
+              seed_fingerprint TEXT NOT NULL,
+              child_scope_fingerprint TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              immutable INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_repair_admissions_source
+              ON repair_admissions(source_run_id, created_at);
             """
         )
 

@@ -204,8 +204,8 @@ class Stage7RepairAuthorityTests(unittest.TestCase):
         self.cycle = self.store.get_review_cycle(self.cycle["cycle_id"])
 
     def test_schema_v6(self):
-        self.assertEqual(SCHEMA_VERSION, 6)
-        self.assertEqual(self.store.s6.db.pragmas()["schema_version"], 6)
+        self.assertEqual(SCHEMA_VERSION, 7)
+        self.assertEqual(self.store.s6.db.pragmas()["schema_version"], 7)
 
     def test_create_packet_binds_every_blocking_authority(self):
         packet = create_governed_repair_packet(

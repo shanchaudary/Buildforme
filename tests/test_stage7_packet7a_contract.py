@@ -10,7 +10,7 @@ from buildforme.db import SCHEMA_VERSION
 
 class Stage7Packet7AContractTests(unittest.TestCase):
     def test_schema_and_review_shopping_authority_are_permanent(self):
-        self.assertEqual(SCHEMA_VERSION, 6)
+        self.assertEqual(SCHEMA_VERSION, 7)
         source = Path("buildforme/execution_store.py").read_text(encoding="utf-8")
         self.assertIn(
             'SELECT id, status FROM review_cycles WHERE run_id=? AND evidence_id=?',

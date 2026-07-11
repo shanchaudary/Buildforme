@@ -1397,6 +1397,12 @@ class LocalStore:
     def list_repair_packets(self, source_run_id: str | None = None) -> list[dict[str, Any]]:
         return self.s6.list_repair_packets(source_run_id=source_run_id)
 
+    def admit_repair_run_atomic(self, **kwargs: Any) -> dict[str, Any]:
+        return self.s6.admit_repair_run_atomic(**kwargs)
+
+    def get_repair_admission(self, repair_packet_id: str) -> dict[str, Any]:
+        return self.s6.get_repair_admission(repair_packet_id)
+
     # —— Internals ——
 
     def _load_object(self, path: Path, *, default: dict[str, Any], list_key: str) -> dict[str, Any]:

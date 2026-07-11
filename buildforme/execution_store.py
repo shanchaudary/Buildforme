@@ -42,6 +42,13 @@ PROTECTED_AUTHORITY_FIELDS: frozenset[str] = frozenset(
         "attempt",
         "max_attempts",
         "idempotency_key",
+        "repair_packet_id",
+        "repair_fingerprint",
+        "repair_source_cycle_id",
+        "repair_source_evidence_id",
+        "execution_seed_commit",
+        "execution_seed_ref",
+        "requires_independent_review_after_execution",
         "created_at",
     }
 )
@@ -3145,6 +3152,234 @@ class Stage6Store:
                     "SELECT payload_json FROM repair_packets ORDER BY created_at DESC"
                 ).fetchall()
         return [loads(row[0], {}) for row in rows]
+
+    def admit_repair_run_atomic(
+        self,
+        *,
+        repair_packet_id: str,
+        child_run: dict[str, Any],
+        lease: dict[str, Any],
+        seed_proof: dict[str, Any],
+        actor: str,
+    ) -> dict[str, Any]:
+        from buildforme.governance import compute_run_scope_fingerprint
+        from buildforme.repair_seed import validate_repair_seed_for_storage
+        from governance.constitution_lease import validate_lease_integrity
+
+        packet_id = str(repair_packet_id or "")
+        child = dict(child_run)
+        child_id = str(child.get("id") or "")
+        if not packet_id or not child_id:
+            raise ValueError("repair packet and child run id required")
+        packet = self.get_repair_packet(packet_id)
+        seed_problems = validate_repair_seed_for_storage(seed_proof, repair_packet=packet)
+        if seed_problems:
+            raise ValueError("repair seed rejected: " + "; ".join(seed_problems))
+        scope = compute_run_scope_fingerprint(
+            child, child.get("packet") if isinstance(child.get("packet"), dict) else None
+        )
+        if not scope or scope != str(child.get("scope_fingerprint") or ""):
+            raise ValueError("repair child scope fingerprint mismatch")
+        lease_problems = validate_lease_integrity(
+            lease,
+            expected_run_id=child_id,
+            expected_provider_id=str(child.get("provider_id") or ""),
+            expected_packet_id=str(child.get("packet_id") or ""),
+        )
+        if lease_problems:
+            raise ValueError("repair child lease invalid: " + "; ".join(lease_problems))
+        now = utc_now_iso()
+        admission_id = f"radm-{uuid.uuid5(uuid.NAMESPACE_URL, packet_id).hex[:18]}"
+        with self.db.transaction() as conn:
+            existing = conn.execute(
+                "SELECT payload_json FROM repair_admissions WHERE repair_packet_id=?",
+                (packet_id,),
+            ).fetchone()
+            if existing:
+                admission = loads(existing[0], {})
+                saved_child = conn.execute(
+                    "SELECT payload_json FROM runs WHERE id=?", (str(admission.get("child_run_id") or ""),)
+                ).fetchone()
+                if not saved_child:
+                    raise ValueError("repair admission child run is missing")
+                return {"admission": admission, "run": loads(saved_child[0], {}), "replayed": True}
+
+            packet_row = conn.execute(
+                "SELECT source_cycle_id, source_run_id, source_evidence_id, repair_provider_id, repair_fingerprint, payload_json FROM repair_packets WHERE repair_packet_id=?",
+                (packet_id,),
+            ).fetchone()
+            if not packet_row:
+                raise KeyError(f"Repair packet not found: {packet_id}")
+            canonical_packet = loads(packet_row[5], {})
+            if canonical_packet != packet:
+                raise ValueError("repair packet storage payload mismatch")
+            source_run_id = str(packet_row[1])
+            source_row = conn.execute(
+                "SELECT row_version, status, payload_json FROM runs WHERE id=?", (source_run_id,)
+            ).fetchone()
+            if not source_row:
+                raise KeyError(f"Source run not found: {source_run_id}")
+            source = loads(source_row[2], {})
+            source["status"] = source_row[1]
+            source["row_version"] = int(source_row[0] or 1)
+            if str(source_row[1]) != "needs_review":
+                raise ValueError("repair admission requires source run status needs_review")
+            if str(source.get("stage7_repair_packet_id") or "") != packet_id:
+                raise ValueError("source run is not bound to repair packet")
+            if str(child.get("parent_run_id") or "") != source_run_id:
+                raise ValueError("repair child parent_run_id mismatch")
+            if str(child.get("repair_packet_id") or "") != packet_id:
+                raise ValueError("repair child packet authority mismatch")
+            if str(child.get("repair_fingerprint") or "") != str(packet_row[4] or ""):
+                raise ValueError("repair child fingerprint mismatch")
+            if str(child.get("provider_id") or "") != str(packet_row[3] or ""):
+                raise ValueError("repair child provider mismatch")
+            if str(child.get("baseline_commit") or "") != str(packet.get("approved_baseline_commit") or ""):
+                raise ValueError("repair child approved baseline mismatch")
+            if str(child.get("execution_seed_commit") or "") != str(seed_proof.get("seed_commit") or ""):
+                raise ValueError("repair child execution seed mismatch")
+            if str(child.get("execution_seed_ref") or "") != str(seed_proof.get("seed_ref") or ""):
+                raise ValueError("repair child execution seed ref mismatch")
+            child_packet = child.get("packet") if isinstance(child.get("packet"), dict) else {}
+            if sorted(str(x) for x in (child_packet.get("allowed_files") or [])) != list(packet.get("allowed_files") or []):
+                raise ValueError("repair child allowed files differ from repair packet")
+            if sorted(str(x) for x in (child_packet.get("forbidden_files") or [])) != list(packet.get("forbidden_files") or []):
+                raise ValueError("repair child forbidden files differ from repair packet")
+            if str(child.get("constitution_hash") or "") != str(packet.get("source_constitution_hash") or ""):
+                raise ValueError("repair child Constitution hash mismatch")
+            ack = conn.execute(
+                "SELECT constitution_acknowledged, constitution_hash FROM provider_acks WHERE provider_id=?",
+                (str(child.get("provider_id") or ""),),
+            ).fetchone()
+            if not ack or not bool(ack[0]) or str(ack[1] or "") != str(child.get("constitution_hash") or ""):
+                raise ValueError("repair child provider acknowledgement invalid")
+            if conn.execute("SELECT id FROM runs WHERE id=?", (child_id,)).fetchone():
+                raise ValueError(f"repair child run already exists without admission: {child_id}")
+
+            lock_id = str(source.get("task_lock_id") or "")
+            if lock_id:
+                lock_row = conn.execute(
+                    "SELECT run_id, active FROM task_locks WHERE id=?", (lock_id,)
+                ).fetchone()
+                if not lock_row or not bool(lock_row[1]) or str(lock_row[0] or "") != source_run_id:
+                    raise ValueError("source task lock cannot be transferred to repair child")
+                conn.execute(
+                    "UPDATE task_locks SET run_id=?, reason=? WHERE id=? AND run_id=? AND active=1",
+                    (child_id, f"Stage 7 repair child for {source_run_id}", lock_id, source_run_id),
+                )
+            else:
+                lock_id = new_id("tlock")
+                task_key = str(source.get("task_id") or source.get("packet_id") or source_run_id)
+                conn.execute(
+                    "INSERT INTO task_locks(id, task_key, project_id, run_id, reason, active, created_at, released_at) VALUES (?,?,?,?,?,1,?,NULL)",
+                    (lock_id, task_key, source.get("project_id"), child_id, "Stage 7 governed repair run", now),
+                )
+            child["task_lock_id"] = lock_id
+            child["created_at"] = child.get("created_at") or now
+            child["updated_at"] = now
+            child["row_version"] = 1
+
+            lease_record = dict(lease)
+            lease_record["stored_at"] = now
+            if conn.execute(
+                "SELECT lease_id FROM constitution_leases WHERE lease_id=?", (str(lease["lease_id"]),)
+            ).fetchone():
+                raise ValueError("repair child lease id already exists")
+            conn.execute(
+                "INSERT INTO constitution_leases(lease_id, run_id, provider_id, packet_id, constitution_version, constitution_hash, lease_fingerprint, payload_json, stored_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    lease["lease_id"], child_id, child.get("provider_id"), child.get("packet_id"),
+                    lease.get("constitution_version"), lease.get("constitution_hash"),
+                    lease.get("lease_fingerprint"), dumps(lease_record), now,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO runs(
+                id, project_id, task_id, packet_id, provider_id, repository, repository_local_path,
+                baseline_ref, baseline_commit, requested_target_branch, execution_branch, operating_mode,
+                risk, status, execution_mode, scope_fingerprint, constitution_version, constitution_hash,
+                constitution_lease_id, constitution_lease_fingerprint, task_lock_id, payload_json,
+                created_at, updated_at, started_at, finished_at, idempotency_key, row_version
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    child_id, child.get("project_id"), child.get("task_id"), child.get("packet_id"),
+                    child.get("provider_id"), child.get("repository"), child.get("repository_local_path"),
+                    child.get("baseline_ref"), child.get("baseline_commit"), child.get("requested_target_branch"),
+                    child.get("execution_branch"), child.get("operating_mode"), child.get("risk"),
+                    child.get("status") or "draft", child.get("execution_mode") or "live_supervised",
+                    child.get("scope_fingerprint"), child.get("constitution_version"), child.get("constitution_hash"),
+                    child.get("constitution_lease_id"), child.get("constitution_lease_fingerprint"), lock_id,
+                    dumps(child), child["created_at"], now, child.get("started_at"), child.get("finished_at"),
+                    child.get("idempotency_key"), 1,
+                ),
+            )
+            admission = {
+                "schema": "buildforme.repair_admission.v1",
+                "repair_admission_id": admission_id,
+                "repair_packet_id": packet_id,
+                "repair_fingerprint": packet.get("repair_fingerprint"),
+                "source_run_id": source_run_id,
+                "source_cycle_id": packet.get("source_cycle_id"),
+                "source_evidence_id": packet.get("source_evidence_id"),
+                "child_run_id": child_id,
+                "repair_provider_id": child.get("provider_id"),
+                "seed_commit": seed_proof.get("seed_commit"),
+                "seed_ref": seed_proof.get("seed_ref"),
+                "seed_tree": seed_proof.get("seed_tree"),
+                "seed_fingerprint": seed_proof.get("seed_fingerprint"),
+                "child_scope_fingerprint": child.get("scope_fingerprint"),
+                "original_approved_baseline": child.get("baseline_commit"),
+                "execution_seed_commit": child.get("execution_seed_commit"),
+                "task_lock_id": lock_id,
+                "created_at": now,
+                "immutable": True,
+            }
+            conn.execute(
+                "INSERT INTO repair_admissions(repair_admission_id, repair_packet_id, source_run_id, child_run_id, seed_commit, seed_ref, seed_fingerprint, child_scope_fingerprint, payload_json, created_at, immutable) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+                (
+                    admission_id, packet_id, source_run_id, child_id, admission["seed_commit"],
+                    admission["seed_ref"], admission["seed_fingerprint"], admission["child_scope_fingerprint"],
+                    dumps(admission), now,
+                ),
+            )
+            source["task_lock_id"] = None
+            source["stage7_repair_status"] = "child_admitted"
+            source["stage7_repair_child_run_id"] = child_id
+            source["stage7_repair_admission_id"] = admission_id
+            source["updated_at"] = now
+            source["row_version"] = int(source_row[0] or 1) + 1
+            cur = conn.execute(
+                "UPDATE runs SET task_lock_id=NULL, payload_json=?, updated_at=?, row_version=? WHERE id=? AND row_version=?",
+                (dumps(source), now, source["row_version"], source_run_id, int(source_row[0] or 1)),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("stale source run race during repair admission")
+            metadata = {
+                "repair_packet_id": packet_id,
+                "repair_admission_id": admission_id,
+                "child_run_id": child_id,
+                "seed_commit": admission["seed_commit"],
+                "seed_fingerprint": admission["seed_fingerprint"],
+            }
+            conn.execute(
+                "INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (new_id("re"), source_run_id, "stage7_repair_child_admitted", "Governed repair child admitted", actor, dumps(metadata), now),
+            )
+            conn.execute(
+                "INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (new_id("re"), child_id, "repair_run_created", "Repair run admitted from exact reviewed seed", actor, dumps(metadata), now),
+            )
+        return {"admission": admission, "run": child, "source_run": source, "replayed": False}
+
+    def get_repair_admission(self, repair_packet_id: str) -> dict[str, Any]:
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM repair_admissions WHERE repair_packet_id=?",
+                (str(repair_packet_id),),
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Repair admission not found: {repair_packet_id}")
+        return loads(row[0], {})
 
     # —— Execution control ——
     def get_execution_control(self) -> dict[str, Any]:

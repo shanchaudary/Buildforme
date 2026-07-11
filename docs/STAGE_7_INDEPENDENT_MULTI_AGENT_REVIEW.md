@@ -131,3 +131,12 @@ canonical Constitution reminder bound to the run lease.
 - Allowed and forbidden files are copied exactly from the source execution packet; callers cannot expand repair scope.
 - A provider that participated in the source review cannot author the repair. The selected repair provider becomes the implementer identity and is excluded from the next independent review.
 - Packet creation only establishes immutable repair authority. The seed-commit and child-run admission seam remains the next Packet 7D implementation slice.
+
+
+## Packet 7D-B — exact repair seed and child admission
+
+- Buildforme creates a deterministic local seed commit from only the exact changed paths in the immutable source evidence. It does not move the source branch, modify the reviewed worktree, push a ref, or use the seed as the approved baseline.
+- The seed is retained under a local `refs/buildforme/repair-seeds/` ref and independently revalidated against the source manifest before storage admission.
+- The child run keeps the original approved baseline for complete diff/evidence verification while `execution_seed_commit` controls only the initial repair worktree state.
+- Repair packet, seed proof, child run, fresh Constitution lease, scope fingerprint, task-lock transfer, admission record, source-run binding, and audit events commit through one dedicated SQLite transaction.
+- A failed admission deletes a newly created seed ref; duplicate admission replays the one canonical child.

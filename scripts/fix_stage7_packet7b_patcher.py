@@ -169,5 +169,19 @@ if text.count(old) != 1:
     raise RuntimeError(f"Packet 7B policy patch block count={text.count(old)}")
 text = text.replace(old, new, 1)
 
+bad_import = "from buildforme.verification_manifest import collect_changed_file_manifest, collect_patch_evidence"
+if text.count(bad_import) != 2:
+    raise RuntimeError(f"manifest import count={text.count(bad_import)}")
+text = text.replace(
+    bad_import,
+    "from buildforme.changed_files import collect_changed_file_manifest, collect_patch_evidence",
+)
+
+marker = '(ROOT / "tests" / "test_stage7_review_execution.py").write_text(\n    \'\'\'"""Adversarial tests for Packet 7B automated blind reviewer execution."""'
+raw_marker = '(ROOT / "tests" / "test_stage7_review_execution.py").write_text(\n    r\'\'\'"""Adversarial tests for Packet 7B automated blind reviewer execution."""'
+if text.count(marker) != 1:
+    raise RuntimeError(f"generated test template marker count={text.count(marker)}")
+text = text.replace(marker, raw_marker, 1)
+
 path.write_text(text, encoding="utf-8")
 print("Packet 7B patch anchors corrected")

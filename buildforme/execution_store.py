@@ -427,6 +427,7 @@ class Stage6Store:
         event_metadata: dict[str, Any] | None = None,
         require_db_status_in: set[str] | frozenset[str] | None = None,
         transition_path: list[str] | None = None,
+        evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Atomically apply a storage-authorized mutation and audit event(s).
 
@@ -618,6 +619,49 @@ class Stage6Store:
 
             new_ver = current_ver + 1
             record["row_version"] = new_ver
+
+            outcome_record: dict[str, Any] | None = None
+            if evidence is not None:
+                from buildforme.outcome_evidence import validate_run_outcome_evidence
+
+                outcome_record = dict(evidence)
+                problems = validate_run_outcome_evidence(outcome_record)
+                if problems:
+                    raise ValueError("run outcome evidence rejected: " + "; ".join(problems))
+                if str(outcome_record.get("run_id") or "") != rid:
+                    raise ValueError("run outcome evidence run_id mismatch")
+                if str(outcome_record.get("previous_status") or "") != db_status:
+                    raise ValueError("run outcome evidence previous_status mismatch")
+                if str(outcome_record.get("resulting_status") or "") != new_status:
+                    raise ValueError("run outcome evidence resulting_status mismatch")
+                if int(outcome_record.get("previous_row_version") or -1) != current_ver:
+                    raise ValueError("run outcome evidence previous_row_version mismatch")
+                evidence_id = str(outcome_record.get("evidence_id") or outcome_record.get("id") or "")
+                if not evidence_id:
+                    raise ValueError("run outcome evidence_id required")
+                if conn.execute(
+                    "SELECT evidence_id FROM evidence WHERE evidence_id=?", (evidence_id,)
+                ).fetchone():
+                    raise ValueError(f"evidence mutation forbidden: {evidence_id} is append-only")
+                prior = int(
+                    conn.execute("SELECT COUNT(*) FROM evidence WHERE run_id=?", (rid,)).fetchone()[0]
+                )
+                outcome_record["sequence"] = prior + 1
+                outcome_record.setdefault("attempt", outcome_record["sequence"])
+                outcome_record.setdefault("saved_at", now)
+                parent = conn.execute(
+                    "SELECT evidence_id FROM evidence WHERE run_id=? ORDER BY sequence DESC LIMIT 1",
+                    (rid,),
+                ).fetchone()
+                if parent:
+                    outcome_record.setdefault("parent_evidence_id", parent[0])
+                ids = list(record.get("evidence_ids") or [])
+                if evidence_id not in ids:
+                    ids.append(evidence_id)
+                record["evidence_ids"] = ids
+                record["outcome_evidence_id"] = evidence_id
+                record["outcome_evidence_fingerprint"] = outcome_record.get("evidence_fingerprint")
+
             cur = conn.execute(
                 """UPDATE runs SET project_id=?, task_id=?, packet_id=?, provider_id=?, repository=?,
                 repository_local_path=?, baseline_ref=?, baseline_commit=?, requested_target_branch=?,
@@ -660,7 +704,27 @@ class Stage6Store:
             if cur.rowcount == 0:
                 raise ValueError(f"stale run mutation race: run_id={rid}")
 
+            if outcome_record is not None:
+                conn.execute(
+                    """INSERT INTO evidence(evidence_id, run_id, sequence, attempt, parent_evidence_id,
+                       payload_json, evidence_fingerprint, saved_at, immutable)
+                       VALUES (?,?,?,?,?,?,?,?,1)""",
+                    (
+                        outcome_record["evidence_id"],
+                        rid,
+                        outcome_record["sequence"],
+                        outcome_record.get("attempt"),
+                        outcome_record.get("parent_evidence_id"),
+                        dumps(outcome_record),
+                        outcome_record.get("evidence_fingerprint"),
+                        outcome_record["saved_at"],
+                    ),
+                )
+
             base_meta = dict(event_metadata or {})
+            if outcome_record is not None:
+                base_meta["evidence_id"] = outcome_record.get("evidence_id")
+                base_meta["evidence_fingerprint"] = outcome_record.get("evidence_fingerprint")
             base_meta["mutation_type"] = mutation_type
             base_meta["fields_changed"] = changed
             base_meta["previous_row_version"] = current_ver
@@ -2183,6 +2247,112 @@ class Stage6Store:
         return str(row[0])
 
     def migrate_from_json(
+        self,
+        runtime_dir: Path,
+        *,
+        dry_run: bool = False,
+        cutover: bool = True,
+    ) -> dict[str, Any]:
+        """Import through a temporary SQLite authority and atomically replace on success.
+
+        Any malformed record, orphan, integrity failure, or cutover failure leaves the
+        original database logically unchanged.  Active runs block migration.
+        """
+        import os
+        import sqlite3
+        import uuid
+
+        if dry_run:
+            return self._migrate_from_json_in_place(
+                runtime_dir, dry_run=True, cutover=False
+            )
+
+        with self.db.transaction() as conn:
+            active = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM runs WHERE status IN ('queued','starting','running','cancel_requested')"
+                ).fetchone()[0]
+            )
+        if active:
+            return {
+                "errors": [f"migration refused while {active} active run(s) exist"],
+                "orphans": [],
+                "malformed": [],
+                "dry_run": False,
+                "cutover": False,
+                "rolled_back": True,
+                "atomic_commit": False,
+            }
+
+        original = Path(self.db.path)
+        temp_path = original.with_name(
+            f".{original.name}.migration-{uuid.uuid4().hex}.tmp"
+        )
+        report: dict[str, Any] = {
+            "errors": [],
+            "orphans": [],
+            "malformed": [],
+            "dry_run": False,
+            "cutover": False,
+            "rolled_back": True,
+            "atomic_commit": False,
+        }
+        temp_store: Stage6Store | None = None
+        try:
+            source = self.db._raw_connect()
+            target = sqlite3.connect(str(temp_path))
+            try:
+                source.execute("PRAGMA wal_checkpoint(FULL)")
+                source.backup(target)
+                target.commit()
+            finally:
+                target.close()
+                source.close()
+
+            temp_store = Stage6Store(temp_path)
+            report = temp_store._migrate_from_json_in_place(
+                runtime_dir, dry_run=False, cutover=cutover
+            )
+            integrity_ok = str(report.get("integrity") or "").lower() == "ok"
+            valid = (
+                not report.get("errors")
+                and not report.get("orphans")
+                and integrity_ok
+                and (not cutover or bool(report.get("cutover")))
+            )
+            if not valid:
+                report["rolled_back"] = True
+                report["atomic_commit"] = False
+                return report
+
+            check = temp_store.db._raw_connect()
+            try:
+                check.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                integrity = check.execute("PRAGMA integrity_check").fetchone()[0]
+                if str(integrity).lower() != "ok":
+                    raise ValueError(f"temporary migration database integrity failure: {integrity}")
+            finally:
+                check.close()
+
+            for suffix in ("-wal", "-shm"):
+                Path(str(original) + suffix).unlink(missing_ok=True)
+                Path(str(temp_path) + suffix).unlink(missing_ok=True)
+            os.replace(temp_path, original)
+            report["rolled_back"] = False
+            report["atomic_commit"] = True
+            report["database_replaced_atomically"] = True
+            return report
+        except Exception as exc:
+            report.setdefault("errors", []).append(f"atomic migration failed: {exc}")
+            report["rolled_back"] = True
+            report["atomic_commit"] = False
+            return report
+        finally:
+            temp_path.unlink(missing_ok=True)
+            for suffix in ("-wal", "-shm"):
+                Path(str(temp_path) + suffix).unlink(missing_ok=True)
+
+    def _migrate_from_json_in_place(
         self,
         runtime_dir: Path,
         *,

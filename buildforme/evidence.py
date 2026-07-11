@@ -456,6 +456,12 @@ def validate_evidence_for_storage(evidence: dict[str, Any]) -> list[str]:
     kind = str(evidence.get("evidence_kind") or "")
     if kind == EVIDENCE_KIND_FOUNDER_DECISION:
         return validate_founder_decision_for_storage(evidence)
+    from buildforme.outcome_evidence import (
+        EVIDENCE_KIND_RUN_OUTCOME,
+        validate_run_outcome_evidence,
+    )
+    if kind == EVIDENCE_KIND_RUN_OUTCOME:
+        return validate_run_outcome_evidence(evidence)
 
     # Execution evidence (default for live supervised path)
     is_execution = kind == EVIDENCE_KIND_EXECUTION or (

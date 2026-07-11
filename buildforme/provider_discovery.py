@@ -26,10 +26,13 @@ VERSION_ARGS: dict[str, list[str]] = {
     "glm": ["--version"],
 }
 
-# Auth-readiness probes that must never print tokens; we only keep exit codes / coarse status.
-AUTH_PROBES: dict[str, list[str] | None] = {
-    "codex": None,  # environment / login state opaque
-    "claude": None,
+# Read-only authentication probes.  A provider without a verified probe
+# contract is never live-ready.  Provider records may supply an explicit
+# auth_probe {args, success_exit_codes, read_only:true} for CLI families whose
+# command contract is deployment-specific.
+AUTH_PROBES: dict[str, dict[str, Any] | None] = {
+    "codex": {"args": ["login", "status"], "success_exit_codes": [0], "read_only": True},
+    "claude": {"args": ["auth", "status"], "success_exit_codes": [0], "read_only": True},
     "grok": None,
     "glm": None,
 }
@@ -126,27 +129,19 @@ def health_check_provider(
     record = provider_record or {}
     enabled = bool(record.get("enabled", True))
     constitution_ack = bool(record.get("constitution_acknowledged"))
-    auth_ready = _auth_readiness(pid, disc.get("executable"))
+    auth_ready = probe_authentication(
+        pid,
+        disc.get("executable"),
+        provider_record=record,
+    )
 
     compat = verify_provider_compatibility(
         pid,
         disc.get("executable"),
         version_text=version.get("version"),
         force=force_compat,
+        auth_result=auth_ready,
     )
-    # Align auth component with discovery auth_ready (single source for marker names)
-    if auth_ready.get("status") == "ready":
-        compat["auth_verified"] = True
-        comps = dict(compat.get("live_ready_components") or {})
-        comps["auth_verified"] = True
-        compat["live_ready_components"] = comps
-        compat["auth"] = auth_ready
-    else:
-        compat["auth_verified"] = False
-        comps = dict(compat.get("live_ready_components") or {})
-        comps["auth_verified"] = False
-        compat["live_ready_components"] = comps
-        compat["auth"] = auth_ready
 
     live_ready = bool(
         disc["available"]
@@ -227,34 +222,112 @@ def discover_all_providers(
     return results
 
 
-def _auth_readiness(provider_id: str, executable: str | None) -> dict[str, Any]:
-    """Auth readiness without secret material.
+def probe_authentication(
+    provider_id: str,
+    executable: str | None,
+    *,
+    provider_record: dict[str, Any] | None = None,
+    timeout_sec: float = 12.0,
+) -> dict[str, Any]:
+    """Execute a bounded read-only CLI authentication-status command.
 
-    ready   = approved env marker present (value never stored)
-    missing = no executable
-    unknown = executable present but auth not verified — NOT live-ready
+    Output is never persisted.  Only exit status, byte counts, and hashes are
+    returned.  Environment-variable presence alone is explicitly insufficient.
     """
-    if not executable:
-        return {"status": "missing", "detail": "no executable to authenticate"}
-    env_hints = {
-        "codex": ["OPENAI_API_KEY", "CODEX_API_KEY"],
-        "claude": ["ANTHROPIC_API_KEY"],
-        "grok": ["XAI_API_KEY", "GROK_API_KEY"],
-        "glm": ["ZHIPUAI_API_KEY", "GLM_API_KEY"],
-    }
-    present = any(bool(os.environ.get(k)) for k in env_hints.get(provider_id, []))
-    if present:
-        return {
-            "status": "ready",
-            "detail": "auth environment marker present (value not read into storage)",
-            "marker_names": [k for k in env_hints.get(provider_id, []) if os.environ.get(k)],
-        }
-    return {
-        "status": "unknown",
-        "detail": "no verified auth marker; CLI login cache not accepted as live-ready",
-        "marker_names": [],
-    }
+    from buildforme.process_env import build_provider_env
+    from buildforme.redaction import redact_hash
 
+    pid = str(provider_id or "").strip().lower()
+    if not executable:
+        return {
+            "status": "missing",
+            "probe_verified": False,
+            "detail": "no executable to authenticate",
+        }
+    record = provider_record or {}
+    configured = record.get("auth_probe") if isinstance(record.get("auth_probe"), dict) else None
+    probe = dict(configured or AUTH_PROBES.get(pid) or {})
+    if not probe:
+        return {
+            "status": "unknown",
+            "probe_verified": False,
+            "detail": "no approved read-only authentication probe contract configured",
+        }
+    if probe.get("read_only") is not True:
+        return {
+            "status": "unknown",
+            "probe_verified": False,
+            "detail": "authentication probe contract is not marked read_only",
+        }
+    args = probe.get("args")
+    if not isinstance(args, list) or not args or any(not isinstance(arg, str) for arg in args):
+        return {
+            "status": "unknown",
+            "probe_verified": False,
+            "detail": "authentication probe args must be a non-empty list[str]",
+        }
+    if any(any(marker in arg.lower() for marker in ("token", "secret", "password", "api_key")) for arg in args):
+        return {
+            "status": "unknown",
+            "probe_verified": False,
+            "detail": "authentication probe args contain a secret-like marker",
+        }
+    success_codes = probe.get("success_exit_codes") or [0]
+    try:
+        success_codes = {int(code) for code in success_codes}
+    except Exception:
+        return {
+            "status": "unknown",
+            "probe_verified": False,
+            "detail": "authentication probe success_exit_codes invalid",
+        }
+    safe_env, env_names = build_provider_env(pid)
+    argv = [str(executable), *args]
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=max(1.0, float(probe.get("timeout_sec") or timeout_sec)),
+            shell=False,
+            check=False,
+            env=safe_env,
+        )
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+        ready = completed.returncode in success_codes
+        return {
+            "status": "ready" if ready else "failed",
+            "probe_verified": bool(ready),
+            "detail": "authentication status probe succeeded" if ready else f"authentication status probe exit {completed.returncode}",
+            "exit_code": completed.returncode,
+            "command_shape": [Path(str(executable)).name, *args],
+            "stdout_bytes": len(stdout.encode("utf-8", errors="replace")),
+            "stderr_bytes": len(stderr.encode("utf-8", errors="replace")),
+            "stdout_sha256": redact_hash(stdout),
+            "stderr_sha256": redact_hash(stderr),
+            "env_names": env_names,
+            "output_persisted": False,
+            "checked_at": utc_now_iso(),
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "failed",
+            "probe_verified": False,
+            "detail": "authentication status probe timed out",
+            "command_shape": [Path(str(executable)).name, *args],
+            "output_persisted": False,
+            "checked_at": utc_now_iso(),
+        }
+    except OSError as exc:
+        return {
+            "status": "failed",
+            "probe_verified": False,
+            "detail": f"authentication status probe OS error: {exc}",
+            "command_shape": [Path(str(executable)).name, *args],
+            "output_persisted": False,
+            "checked_at": utc_now_iso(),
+        }
 
 def _looks_secret(line: str) -> bool:
     low = line.lower()

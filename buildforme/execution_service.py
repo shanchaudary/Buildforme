@@ -14,6 +14,7 @@ from typing import Any  # noqa: I001
 from buildforme.adapters.dry_run import DryRunAdapter
 from buildforme.adapters.registry import get_adapter
 from buildforme.evidence import build_evidence_bundle
+from buildforme.outcome_evidence import build_run_outcome_evidence
 from buildforme.execution_preflight import evaluate_run_preflight
 from buildforme.governance import (
     canonicalize_repository,
@@ -312,6 +313,7 @@ def _persist_transition(
     require_db_status_in: set[str] | frozenset[str] | None = None,
     mutation_type: str = "status_transition",
     transition_path: list[str] | None = None,
+    evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Atomic run mutation + event with mandatory optimistic concurrency."""
     expected = run.get("row_version")
@@ -327,6 +329,7 @@ def _persist_transition(
         event_metadata=event_metadata,
         require_db_status_in=require_db_status_in,
         transition_path=transition_path,
+        evidence=evidence,
     )
 
 
@@ -347,6 +350,65 @@ def _require_bound_scope(run: dict[str, Any]) -> str:
             "run scope fingerprint mismatch; bound authority changed and requires a new run"
         )
     return computed
+
+
+def _termination_confirmed(process_result: dict[str, Any]) -> bool:
+    confirmation = process_result.get("termination_confirmation")
+    return bool(
+        process_result.get("cleanup_ok")
+        and isinstance(confirmation, dict)
+        and confirmation.get("confirmed")
+    )
+
+
+def _commit_terminal_outcome(
+    store: LocalStore,
+    *,
+    run_id: str,
+    process_result: dict[str, Any],
+    outcome: str,
+    target_status: str,
+    event_type: str,
+    event_summary: str,
+    mutation_type: str,
+    transition_path: list[str] | None = None,
+    worktree: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    current = store.get_run(run_id)
+    previous_status = str(current.get("status") or "")
+    previous_version = int(current.get("row_version") or 1)
+    proposed = dict(current)
+    path = list(transition_path) if transition_path else None
+    if path:
+        if path[0] != previous_status or path[-1] != target_status:
+            raise ValueError("terminal outcome transition path does not match stored state")
+        for nxt in path[1:]:
+            proposed = transition_run(proposed, nxt, "system", event_summary)
+    elif previous_status != target_status:
+        proposed = transition_run(proposed, target_status, "system", event_summary)
+    proposed["process_result"] = process_result
+    proposed["result_summary"] = event_summary
+    evidence = build_run_outcome_evidence(
+        run=current,
+        outcome=outcome,
+        previous_status=previous_status,
+        resulting_status=target_status,
+        previous_row_version=previous_version,
+        process_result=process_result,
+        reason=event_summary,
+        worktree=worktree,
+    )
+    saved = _persist_transition(
+        store,
+        proposed,
+        event_type=event_type,
+        event_summary=event_summary,
+        require_db_status_in={previous_status},
+        mutation_type=mutation_type,
+        transition_path=path,
+        evidence=evidence,
+    )
+    return saved, evidence
 
 
 def _startup_transition_path(from_status: str) -> list[str]:
@@ -876,90 +938,151 @@ def execute_supervised(store: LocalStore, run_id: str) -> dict[str, Any]:
             on_event=on_event,
         )
     except Exception as exc:
-        run = _reload(store, run_id)
-        if can_transition(str(run.get("status")), "failed"):
-            run = transition_run(run, "failed", "system", redact_text(str(exc)[:300]))
-            run["process_result"] = {"error": redact_text(str(exc)[:300]), "ok": False}
-            try:
-                run = _persist_transition(
-                    store,
-                    run,
-                    event_type="supervised_failed",
-                    event_summary=redact_text(str(exc)[:500]),
-                    require_db_status_in={"running", "starting", "queued", "cancel_requested"},
-                    mutation_type="failure_detail",
-                )
-            except ValueError:
-                # Terminal/stale (e.g. cancelled wins) — do not overwrite
-                run = _reload(store, run_id)
+        message = redact_text(str(exc)[:500])
+        process_result = {
+            "ok": False,
+            "exit_code": None,
+            "stdout": "",
+            "stderr": message,
+            "error": message,
+            "timed_out": False,
+            "cancelled": False,
+            "unavailable": False,
+            "cleanup_ok": False,
+            "termination_log": [],
+            "termination_confirmation": {
+                "confirmed": False,
+                "reason": "adapter raised without a confirmed supervisor result",
+                "live_pids": [],
+            },
+        }
+        try:
+            run, _outcome_evidence = _commit_terminal_outcome(
+                store,
+                run_id=run_id,
+                process_result=process_result,
+                outcome="failed",
+                target_status="failed",
+                event_type="supervised_failed",
+                event_summary=message,
+                mutation_type="failure_detail",
+                worktree=worktree_meta,
+            )
+        except ValueError:
+            run = _reload(store, run_id)
         _release_run_locks(store, run)
         raise
 
     run = _reload(store, run_id)
     if process_result.get("cancelled") or str(run.get("status")) == "cancel_requested":
         status = str(run.get("status") or "")
-        if status == "running":
-            path = ["running", "cancel_requested", "cancelled"]
-            for nxt in path[1:]:
-                run = transition_run(run, nxt, "system", "provider process cancelled")
-        elif status == "cancel_requested":
-            path = ["cancel_requested", "cancelled"]
-            run = transition_run(run, "cancelled", "system", "provider process cancelled")
-        else:
-            path = None
-        run["process_result"] = process_result
+        confirmed = _termination_confirmed(process_result)
         try:
-            run = _persist_transition(
-                store,
-                run,
-                event_type="supervised_cancelled",
-                event_summary="provider process cancelled",
-                require_db_status_in={"running", "starting", "queued", "cancel_requested"},
-                mutation_type="cancel",
-                transition_path=path,
-            )
+            if confirmed:
+                path = (
+                    ["running", "cancel_requested", "cancelled"]
+                    if status == "running"
+                    else ["cancel_requested", "cancelled"]
+                )
+                run, outcome_evidence = _commit_terminal_outcome(
+                    store,
+                    run_id=run_id,
+                    process_result=process_result,
+                    outcome="cancelled",
+                    target_status="cancelled",
+                    event_type="supervised_cancelled",
+                    event_summary="provider process cancelled with confirmed tree termination",
+                    mutation_type="cancel",
+                    transition_path=path,
+                    worktree=worktree_meta,
+                )
+                result = {"run": run, "process": process_result, "cancelled": True, "evidence": outcome_evidence}
+            else:
+                run, outcome_evidence = _commit_terminal_outcome(
+                    store,
+                    run_id=run_id,
+                    process_result=process_result,
+                    outcome="termination_unconfirmed",
+                    target_status="failed",
+                    event_type="supervised_cancel_cleanup_failed",
+                    event_summary="cancellation requested but process-tree termination was not confirmed",
+                    mutation_type="failure_detail",
+                    worktree=worktree_meta,
+                )
+                result = {"run": run, "process": process_result, "cancelled": False, "termination_unconfirmed": True, "evidence": outcome_evidence}
         except ValueError:
             run = _reload(store, run_id)
+            result = {"run": run, "process": process_result, "stale_outcome_suppressed": True}
         _release_run_locks(store, run)
-        return {"run": run, "process": process_result, "cancelled": True}
+        return result
 
     if process_result.get("timed_out"):
-        if can_transition(str(run.get("status")), "timed_out"):
-            run = transition_run(run, "timed_out", "system", "provider timeout")
-        run["process_result"] = process_result
+        confirmed = _termination_confirmed(process_result)
+        target = "timed_out" if confirmed else "failed"
+        outcome = "timed_out" if confirmed else "termination_unconfirmed"
+        event_type = "supervised_timed_out" if confirmed else "supervised_timeout_cleanup_failed"
+        summary = (
+            "provider timeout with confirmed process-tree termination"
+            if confirmed
+            else "provider timeout but process-tree termination was not confirmed"
+        )
         try:
-            run = _persist_transition(
+            run, outcome_evidence = _commit_terminal_outcome(
                 store,
-                run,
-                event_type="supervised_timed_out",
-                event_summary="provider timeout",
-                require_db_status_in={"running", "starting", "queued"},
+                run_id=run_id,
+                process_result=process_result,
+                outcome=outcome,
+                target_status=target,
+                event_type=event_type,
+                event_summary=summary,
                 mutation_type="failure_detail",
+                worktree=worktree_meta,
             )
         except ValueError:
             run = _reload(store, run_id)
+            outcome_evidence = {}
         _release_run_locks(store, run)
-        return {"run": run, "process": process_result, "timed_out": True}
+        return {"run": run, "process": process_result, "timed_out": confirmed, "termination_unconfirmed": not confirmed, "evidence": outcome_evidence}
 
     if process_result.get("unavailable"):
-        if can_transition(str(run.get("status")), "failed"):
-            run = transition_run(
-                run, "failed", "system", process_result.get("error") or "provider unavailable"
-            )
-        run["process_result"] = process_result
+        summary = str(process_result.get("error") or "provider unavailable")
         try:
-            run = _persist_transition(
+            run, outcome_evidence = _commit_terminal_outcome(
                 store,
-                run,
+                run_id=run_id,
+                process_result=process_result,
+                outcome="unavailable",
+                target_status="failed",
                 event_type="supervised_unavailable",
-                event_summary=str(process_result.get("error") or "provider unavailable"),
-                require_db_status_in={"running", "starting", "queued"},
+                event_summary=summary,
                 mutation_type="failure_detail",
+                worktree=worktree_meta,
             )
         except ValueError:
             run = _reload(store, run_id)
+            outcome_evidence = {}
         _release_run_locks(store, run)
-        return {"run": run, "process": process_result, "unavailable": True}
+        return {"run": run, "process": process_result, "unavailable": True, "evidence": outcome_evidence}
+
+    if not process_result.get("ok"):
+        summary = str(process_result.get("error") or f"provider process failed with exit {process_result.get('exit_code')}")
+        try:
+            run, outcome_evidence = _commit_terminal_outcome(
+                store,
+                run_id=run_id,
+                process_result=process_result,
+                outcome="failed",
+                target_status="failed",
+                event_type="supervised_failed",
+                event_summary=summary,
+                mutation_type="failure_detail",
+                worktree=worktree_meta,
+            )
+        except ValueError:
+            run = _reload(store, run_id)
+            outcome_evidence = {}
+        _release_run_locks(store, run)
+        return {"run": run, "process": process_result, "failed": True, "evidence": outcome_evidence}
 
     # Post-run resolution — real HEAD/branch after provider work
     from buildforme.changed_files import collect_changed_file_manifest, collect_patch_evidence
@@ -1311,70 +1434,107 @@ def cancel_run(
     actor: str = "shan",
     reason: str = "",
 ) -> dict[str, Any]:
-    run = store.get_run(validate_safe_id(run_id, field="run_id"))
+    run_id = validate_safe_id(run_id, field="run_id")
+    run = store.get_run(run_id)
     actor = validate_actor(actor)
     status = str(run.get("status"))
     if is_terminal(status):
         raise ValueError("cannot cancel terminal run")
     note = reason or "cancel requested"
-    # Signal process supervisor for live runs
-    try:
-        from buildforme.process_supervisor import get_process_supervisor
 
-        get_process_supervisor().cancel(run_id)
-        adapter = get_adapter(
-            str(run.get("provider_id") or "codex"),
-            mode=str(run.get("execution_mode") or "dry_run"),
-        )
-        adapter.cancel(run_id)
-    except Exception:
-        pass
-    if status in {"running", "starting", "queued"}:
-        run = transition_run(run, "cancel_requested", actor, note)
-        run = _persist_transition(
-            store,
-            run,
-            event_type="cancel_requested",
-            event_summary=note,
-            actor=actor,
-            require_db_status_in={"running", "starting", "queued"},
-            mutation_type="cancel",
-        )
-        run = transition_run(run, "cancelled", actor, note)
-        saved = _persist_transition(
-            store,
-            run,
-            event_type="run_cancelled",
-            event_summary=note,
-            actor=actor,
-            require_db_status_in={"cancel_requested"},
-            mutation_type="cancel",
-        )
+    from buildforme.process_supervisor import get_process_supervisor
+
+    try:
+        process_result = get_process_supervisor().cancel(run_id)
+    except Exception as exc:
+        process_result = {
+            "cancelled": True,
+            "cleanup_ok": False,
+            "error": redact_text(str(exc)[:500]),
+            "termination_log": [],
+            "termination_confirmation": {
+                "confirmed": False,
+                "reason": "cancel API raised",
+                "live_pids": [],
+            },
+        }
+
+    if status in {"running", "starting", "queued", "cancel_requested"}:
+        confirmed = _termination_confirmed(process_result)
+        if confirmed:
+            if status == "cancel_requested":
+                path = ["cancel_requested", "cancelled"]
+            else:
+                path = [status, "cancel_requested", "cancelled"]
+            saved, evidence = _commit_terminal_outcome(
+                store,
+                run_id=run_id,
+                process_result=process_result,
+                outcome="cancelled",
+                target_status="cancelled",
+                event_type="run_cancelled",
+                event_summary=note,
+                mutation_type="cancel",
+                transition_path=path,
+                worktree=run.get("worktree") if isinstance(run.get("worktree"), dict) else None,
+            )
+        else:
+            saved, evidence = _commit_terminal_outcome(
+                store,
+                run_id=run_id,
+                process_result=process_result,
+                outcome="termination_unconfirmed",
+                target_status="failed",
+                event_type="cancel_cleanup_failed",
+                event_summary="cancel requested but process-tree termination was not confirmed",
+                mutation_type="failure_detail",
+                worktree=run.get("worktree") if isinstance(run.get("worktree"), dict) else None,
+            )
     elif can_transition(status, "rejected"):
-        run = transition_run(run, "rejected", actor, note)
-        saved = _persist_transition(
+        process_result.setdefault("cleanup_ok", True)
+        process_result.setdefault(
+            "termination_confirmation",
+            {
+                "confirmed": True,
+                "reason": "run had not started; no active process tree",
+                "live_pids": [],
+            },
+        )
+        saved, evidence = _commit_terminal_outcome(
             store,
-            run,
-            event_type="run_cancelled",
+            run_id=run_id,
+            process_result=process_result,
+            outcome="cancelled",
+            target_status="rejected",
+            event_type="run_cancelled_before_start",
             event_summary=note,
-            actor=actor,
             mutation_type="cancel",
         )
     elif can_transition(status, "blocked"):
-        run = transition_run(run, "blocked", actor, note)
-        saved = _persist_transition(
+        process_result.setdefault("cleanup_ok", True)
+        process_result.setdefault(
+            "termination_confirmation",
+            {
+                "confirmed": True,
+                "reason": "run had not started; no active process tree",
+                "live_pids": [],
+            },
+        )
+        saved, evidence = _commit_terminal_outcome(
             store,
-            run,
-            event_type="run_cancelled",
+            run_id=run_id,
+            process_result=process_result,
+            outcome="cancelled",
+            target_status="blocked",
+            event_type="run_cancelled_before_start",
             event_summary=note,
-            actor=actor,
             mutation_type="cancel",
         )
     else:
         raise ValueError(f"cannot cancel from status {status}")
     _release_run_locks(store, saved)
+    saved["outcome_evidence_id"] = evidence.get("evidence_id")
     return saved
-
 
 def _release_run_locks(store: LocalStore, run: dict[str, Any]) -> None:
     lock_id = run.get("task_lock_id")

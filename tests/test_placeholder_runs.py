@@ -270,8 +270,13 @@ class MigrationOrphanTests(unittest.TestCase):
             self.assertNotEqual(run.get("repository"), "unknown/unknown")
             self.assertNotIn(run.get("id"), {"run-does-not-exist", "run-missing-ev"})
         self.assertEqual(store.list_run_events("run-does-not-exist"), [])
-        # Valid run still imported
-        store.get_run("run-ok")
+        # Atomic migration is all-or-nothing: the valid row is rolled back with
+        # the orphan records and the existing authority remains unchanged.
+        self.assertTrue(report.get("rolled_back"))
+        self.assertFalse(report.get("atomic_commit"))
+        with self.assertRaises(KeyError):
+            store.get_run("run-ok")
+        self.assertEqual(store.list_runs(), [])
 
     def test_valid_migration_still_succeeds(self):
         temp = tempfile.TemporaryDirectory()

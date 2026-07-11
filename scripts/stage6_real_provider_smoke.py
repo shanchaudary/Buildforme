@@ -25,6 +25,7 @@ from buildforme.execution_service import (  # noqa: E402
 )
 from buildforme.provider_discovery import health_check_provider  # noqa: E402
 from buildforme.storage import LocalStore  # noqa: E402
+from buildforme.stage6_smoke_acceptance import evaluate_stage6_smoke_acceptance  # noqa: E402
 from governance.constitution_engine import get_engine  # noqa: E402
 
 
@@ -45,6 +46,7 @@ def main() -> int:
     _git(root, ["commit", "-m", "init"])
     _git(root, ["remote", "add", "origin", "https://github.com/example/disposable-smoke.git"])
     base = _git_out(root, ["rev-parse", "HEAD"]).strip()
+    original_branch = _git_out(root, ["branch", "--show-current"]).strip()
     print("REPO", root)
     print("BASE", base)
 
@@ -191,6 +193,7 @@ def main() -> int:
         evidence.get("final_head_sha") or evidence.get("post_run_head_sha"),
     )
     print("REVIEW_ACCEPT", review.get("accept_for_pr_prep_allowed"))
+    decision_evidence = None
     if result["run"].get("status") == "needs_review" and review.get(
         "accept_for_pr_prep_allowed"
     ):
@@ -204,6 +207,7 @@ def main() -> int:
         print("FOUNDER_KEYS", list(d.keys()) if isinstance(d, dict) else type(d))
         if isinstance(d, dict):
             run_after = d.get("run") if isinstance(d.get("run"), dict) else {}
+            decision_evidence = d.get("decision_evidence") if isinstance(d.get("decision_evidence"), dict) else None
             print("FOUNDER_STATUS", run_after.get("status") or d.get("decision"))
     else:
         print("FOUNDER skipped; status=", result["run"].get("status"))
@@ -211,12 +215,23 @@ def main() -> int:
             print("STDERR_PREVIEW", str(process.get("stderr"))[:800])
         if process.get("stdout"):
             print("STDOUT_PREVIEW", str(process.get("stdout"))[:800])
+
+    final_run = store.get_run(run["id"])
+    persisted_evidence = store.get_evidence_by_id(str(evidence.get("evidence_id") or ""))
+    acceptance = evaluate_stage6_smoke_acceptance(
+        health=health,
+        execution_result=result,
+        final_run=final_run,
+        persisted_evidence=persisted_evidence,
+        decision_evidence=decision_evidence,
+        repository_root=root,
+        original_head=base,
+        original_branch=original_branch,
+    )
+    print("SMOKE_ACCEPTANCE_JSON", json.dumps(acceptance, sort_keys=True))
     print("SMOKE_DIR", td)
     print("MERGE", "no")
-    # Success criteria for smoke: real process + verification path completed.
-    # File production is provider-dependent; report honestly.
-    ok = result["run"].get("status") in {"needs_review", "completed"} and process.get("exit_code") == 0
-    return 0 if ok else 4
+    return 0 if acceptance.get("passed") else 4
 
 
 def _git(cwd: Path, args: list[str]) -> None:

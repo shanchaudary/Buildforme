@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from buildforme.process_env import build_provider_env, env_policy_summary
+from buildforme.process_termination import (
+    confirm_process_tree_terminated,
+    terminate_process_tree,
+)
 from buildforme.redaction import redact_argv, redact_event, redact_process_result, redact_text
 from buildforme.storage import utc_now_iso
 
@@ -159,6 +163,7 @@ class ProcessSupervisor:
         started = time.monotonic()
         timed_out = False
         cancelled = False
+        termination_confirmation: dict[str, Any] | None = None
 
         def reader(stream: Any, bucket: list[str], which: str) -> None:
             nonlocal stdout_bytes, stderr_bytes, event_lines
@@ -195,12 +200,26 @@ class ProcessSupervisor:
                 if self._cancel_flags.get(run_id):
                     cancelled = True
             if cancelled:
-                term_log.extend(_terminate_tree(proc, reason="cancel"))
+                terminated = terminate_process_tree(
+                    proc,
+                    reason="cancel",
+                    graceful_wait_sec=GRACEFUL_WAIT_SEC,
+                    force_wait_sec=FORCE_WAIT_SEC,
+                )
+                term_log.extend(terminated["log"])
+                termination_confirmation = terminated["confirmation"]
                 emit("process_cancel", "cancel requested — terminating isolated process tree")
                 break
             if time.monotonic() > deadline:
                 timed_out = True
-                term_log.extend(_terminate_tree(proc, reason="timeout"))
+                terminated = terminate_process_tree(
+                    proc,
+                    reason="timeout",
+                    graceful_wait_sec=GRACEFUL_WAIT_SEC,
+                    force_wait_sec=FORCE_WAIT_SEC,
+                )
+                term_log.extend(terminated["log"])
+                termination_confirmation = terminated["confirmation"]
                 emit("process_timeout", f"timeout after {timeout_seconds}s")
                 break
             if proc.poll() is not None:
@@ -210,23 +229,14 @@ class ProcessSupervisor:
         try:
             proc.wait(timeout=FORCE_WAIT_SEC)
         except subprocess.TimeoutExpired:
-            term_log.extend(_terminate_tree(proc, reason="wait_timeout_escalate"))
-            try:
-                proc.wait(timeout=FORCE_WAIT_SEC)
-            except subprocess.TimeoutExpired:
-                term_log.append(
-                    {
-                        "at": utc_now_iso(),
-                        "action": "cleanup_incomplete",
-                        "pid": proc.pid,
-                        "ok": False,
-                        "detail": "process still alive after force",
-                    }
-                )
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+            terminated = terminate_process_tree(
+                proc,
+                reason="wait_timeout_escalate",
+                graceful_wait_sec=0.1,
+                force_wait_sec=FORCE_WAIT_SEC,
+            )
+            term_log.extend(terminated["log"])
+            termination_confirmation = terminated["confirmation"]
 
         # Never block forever on stream threads
         t_out.join(timeout=1)
@@ -240,8 +250,13 @@ class ProcessSupervisor:
 
         duration = time.monotonic() - started
         exit_code = proc.returncode
-        alive = proc.poll() is None
-        cleanup_ok = not alive
+        if termination_confirmation is None:
+            termination_confirmation = confirm_process_tree_terminated(
+                proc.pid,
+                process_group_id=proc.pid if os.name != "nt" else None,
+                known_pids=[proc.pid],
+            )
+        cleanup_ok = bool(termination_confirmation.get("confirmed"))
 
         with self._lock:
             self._procs.pop(run_id, None)
@@ -275,6 +290,7 @@ class ProcessSupervisor:
             "env_names": env_names,
             "env_policy": env_policy_summary(provider_id, env_names),
             "termination_log": term_log,
+            "termination_confirmation": termination_confirmation,
             "cleanup_ok": cleanup_ok,
             "process_group_isolated": True,
             "pid": proc.pid,
@@ -288,16 +304,41 @@ class ProcessSupervisor:
             self._cancel_flags[run_id] = True
             proc = self._procs.get(run_id)
         if proc and proc.poll() is None:
-            log = _terminate_tree(proc, reason="cancel_api")
+            terminated = terminate_process_tree(
+                proc,
+                reason="cancel_api",
+                graceful_wait_sec=GRACEFUL_WAIT_SEC,
+                force_wait_sec=FORCE_WAIT_SEC,
+            )
+            log = list(terminated["log"])
+            confirmation = dict(terminated["confirmation"])
             self._termination_log.setdefault(run_id, []).extend(log)
             return {
                 "cancelled": True,
                 "run_id": run_id,
                 "signal_sent": True,
                 "termination_log": log,
-                "cleanup_ok": proc.poll() is not None,
+                "termination_confirmation": confirmation,
+                "cleanup_ok": bool(confirmation.get("confirmed")),
             }
-        return {"cancelled": True, "run_id": run_id, "signal_sent": bool(proc), "cleanup_ok": True}
+        confirmation = {
+            "confirmed": True,
+            "root_exited": True,
+            "group_absent": True,
+            "known_pids": [],
+            "live_pids": [],
+            "method": "no_active_process",
+            "problems": [],
+            "checked_at": utc_now_iso(),
+        }
+        return {
+            "cancelled": True,
+            "run_id": run_id,
+            "signal_sent": bool(proc),
+            "termination_log": [],
+            "termination_confirmation": confirmation,
+            "cleanup_ok": True,
+        }
 
 
 _SUPERVISOR = ProcessSupervisor()

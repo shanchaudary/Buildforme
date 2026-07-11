@@ -4,7 +4,7 @@ Design (red-teamed):
 - Version profile: known CLI family strings
 - Help inspection: required subcommands/flags present
 - Bounded no-op probe: non-interactive help/version only (never starts a coding agent)
-- Auth: env marker required for live_ready; unknown ≠ ready
+- Auth: successful read-only executable probe required; env markers are not proof
 - Cache: keyed by executable path + mtime + version; short TTL
 - Adapter-owned profiles so core policy stays provider-neutral
 
@@ -79,6 +79,7 @@ def verify_provider_compatibility(
     version_text: str | None = None,
     force: bool = False,
     timeout_sec: float = 8.0,
+    auth_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return structured compatibility profile. Never marks live_ready alone."""
     pid = str(provider_id or "").strip().lower()
@@ -123,7 +124,12 @@ def verify_provider_compatibility(
     except OSError:
         mtime = None
 
-    cache_key = f"{pid}|{executable}|{mtime}|{version_text}"
+    auth_cache_material = (
+        str((auth_result or {}).get("status")),
+        str((auth_result or {}).get("exit_code")),
+        str((auth_result or {}).get("checked_at")),
+    )
+    cache_key = f"{pid}|{executable}|{mtime}|{version_text}|{auth_cache_material}"
     if not force and cache_key in _CACHE:
         cached = _CACHE[cache_key]
         if int(cached.get("expires_at_epoch") or 0) > int(time.time()):
@@ -194,12 +200,12 @@ def verify_provider_compatibility(
         result["command_contract_verified"] and result["non_interactive_mode_verified"]
     )
 
-    # Auth component (env markers only — values never stored)
-    auth = _auth_component(pid)
-    result["auth_verified"] = auth.get("status") == "ready"
+    # Auth is supplied only by the executable status probe in provider_discovery.
+    auth = dict(auth_result or {})
+    result["auth_verified"] = auth.get("status") == "ready" and bool(auth.get("probe_verified"))
     result["auth"] = auth
     if not result["auth_verified"]:
-        result["problems"].append(f"auth not verified: {auth.get('detail')}")
+        result["problems"].append(f"auth not verified by executable probe: {auth.get('detail') or 'missing probe result'}")
 
     result["live_ready_components"] = _components_from(result)
     result["expires_at_epoch"] = int(time.time()) + COMPAT_TTL_SEC

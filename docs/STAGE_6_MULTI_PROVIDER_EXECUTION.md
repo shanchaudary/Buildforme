@@ -71,3 +71,12 @@ local acceptance proof for Stage 6.
 ## Acceptance
 
 Complete only when multi-provider architecture is real, isolation + evidence + independent verification + review gate work, cancellation/timeouts proved, **GitHub CI green**, no merge/deploy authority added, hardening table above is implemented and tested, and at least one real-provider smoke has been demonstrated.
+
+
+## Final blocker closure requirements
+
+- Cancellation and timeout are terminal only after process-tree absence is confirmed.
+- Cancelled, timed-out, failed, unavailable, and termination-unconfirmed outcomes carry immutable evidence committed atomically with state and audit events.
+- Authentication readiness requires a successful read-only executable probe; environment-variable presence is never proof.
+- JSON migration imports into a temporary SQLite authority and atomically replaces the database only after full validation and integrity checks.
+- Real-provider smoke acceptance is machine-verifiable and requires auth proof, process cleanup proof, deterministic verification, required files, immutable evidence, founder decision evidence, and proof that the source branch was not merged or modified.

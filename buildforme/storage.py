@@ -1384,6 +1384,19 @@ class LocalStore:
     def record_review_execution_atomic(self, **kwargs: Any) -> dict[str, Any]:
         return self.s6.record_review_execution_atomic(**kwargs)
 
+    # —— Stage 7 Packet 7D governed repair packets ——
+    def create_repair_packet_atomic(self, **kwargs: Any) -> dict[str, Any]:
+        return self.s6.create_repair_packet_atomic(**kwargs)
+
+    def get_repair_packet(self, repair_packet_id: str) -> dict[str, Any]:
+        return self.s6.get_repair_packet(repair_packet_id)
+
+    def get_repair_packet_for_cycle(self, cycle_id: str) -> dict[str, Any]:
+        return self.s6.get_repair_packet_for_cycle(cycle_id)
+
+    def list_repair_packets(self, source_run_id: str | None = None) -> list[dict[str, Any]]:
+        return self.s6.list_repair_packets(source_run_id=source_run_id)
+
     # —— Internals ——
 
     def _load_object(self, path: Path, *, default: dict[str, Any], list_key: str) -> dict[str, Any]:

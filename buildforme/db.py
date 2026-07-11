@@ -17,7 +17,7 @@ from typing import Any, Iterator
 from buildforme.coordination_lock import CoordinationFileLock
 from buildforme.storage import utc_now_iso
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -332,6 +332,21 @@ CREATE TABLE IF NOT EXISTS review_executions (
 );
 CREATE INDEX IF NOT EXISTS idx_review_executions_assignment
   ON review_executions(assignment_id, created_at);
+
+CREATE TABLE IF NOT EXISTS repair_packets (
+  repair_packet_id TEXT PRIMARY KEY,
+  source_cycle_id TEXT NOT NULL UNIQUE REFERENCES review_cycles(id),
+  source_run_id TEXT NOT NULL REFERENCES runs(id),
+  source_evidence_id TEXT NOT NULL REFERENCES evidence(evidence_id),
+  repair_provider_id TEXT NOT NULL,
+  aggregate_fingerprint TEXT NOT NULL,
+  repair_fingerprint TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  immutable INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_repair_packets_run
+  ON repair_packets(source_run_id, created_at);
 """
 
 
@@ -383,6 +398,8 @@ class ExecutionDB:
                         self._migrate_to_v4(conn)
                     if current < 5:
                         self._migrate_to_v5(conn)
+                    if current < 6:
+                        self._migrate_to_v6(conn)
                     if current < SCHEMA_VERSION:
                         conn.execute(
                             "UPDATE schema_meta SET value=? WHERE key='version'",
@@ -602,6 +619,27 @@ class ExecutionDB:
             );
             CREATE INDEX IF NOT EXISTS idx_review_executions_assignment
               ON review_executions(assignment_id, created_at);
+            """
+        )
+
+    def _migrate_to_v6(self, conn: sqlite3.Connection) -> None:
+        """Add immutable Stage 7 governed repair packets."""
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS repair_packets (
+              repair_packet_id TEXT PRIMARY KEY,
+              source_cycle_id TEXT NOT NULL UNIQUE REFERENCES review_cycles(id),
+              source_run_id TEXT NOT NULL REFERENCES runs(id),
+              source_evidence_id TEXT NOT NULL REFERENCES evidence(evidence_id),
+              repair_provider_id TEXT NOT NULL,
+              aggregate_fingerprint TEXT NOT NULL,
+              repair_fingerprint TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              immutable INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_repair_packets_run
+              ON repair_packets(source_run_id, created_at);
             """
         )
 

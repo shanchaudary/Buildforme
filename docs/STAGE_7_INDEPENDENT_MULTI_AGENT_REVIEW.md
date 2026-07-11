@@ -122,3 +122,12 @@ worktree is never used as reviewer cwd. The full disposable tree is fingerprinte
 after review, the authoritative worktree is separately re-proved unchanged, escaping symlinks
 are rejected, and the copy is destroyed on every outcome. Review packets also carry the
 canonical Constitution reminder bound to the run lease.
+
+
+## Packet 7D-A — governed repair-packet authority
+
+- Exactly one append-only repair packet may be created from a finalized `repair_required` cycle.
+- SQLite independently binds the source run, execution evidence, scope, Constitution, aggregate, every report fingerprint, and every persisted blocking finding.
+- Allowed and forbidden files are copied exactly from the source execution packet; callers cannot expand repair scope.
+- A provider that participated in the source review cannot author the repair. The selected repair provider becomes the implementer identity and is excluded from the next independent review.
+- Packet creation only establishes immutable repair authority. The seed-commit and child-run admission seam remains the next Packet 7D implementation slice.

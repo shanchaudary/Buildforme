@@ -2979,6 +2979,173 @@ class Stage6Store:
             ).fetchone()
         return loads(row[0], {}) if row else None
 
+    # —— Stage 7 governed repair packets ——
+    def create_repair_packet_atomic(
+        self,
+        *,
+        packet: dict[str, Any],
+        actor: str,
+    ) -> dict[str, Any]:
+        from buildforme.repair_contracts import validate_repair_packet_for_storage
+
+        record = dict(packet)
+        packet_id = str(record.get("repair_packet_id") or "")
+        cycle_id = str(record.get("source_cycle_id") or "")
+        if not packet_id or not cycle_id:
+            raise ValueError("repair_packet_id and source_cycle_id required")
+        now = utc_now_iso()
+        with self.db.transaction() as conn:
+            cycle_row = conn.execute(
+                "SELECT run_id, evidence_id, evidence_fingerprint, scope_fingerprint, constitution_hash, status, aggregate_json, payload_json FROM review_cycles WHERE id=?",
+                (cycle_id,),
+            ).fetchone()
+            if not cycle_row:
+                raise KeyError(f"Review cycle not found: {cycle_id}")
+            cycle = loads(cycle_row[7], {})
+            cycle["status"] = cycle_row[5]
+            cycle["aggregate"] = loads(cycle_row[6], {}) if cycle_row[6] else cycle.get("aggregate")
+            if str(cycle_row[5]) != "repair_required":
+                raise ValueError("repair packet requires finalized repair_required cycle")
+            run_id = str(cycle_row[0])
+            run_row = conn.execute(
+                "SELECT row_version, status, payload_json FROM runs WHERE id=?", (run_id,)
+            ).fetchone()
+            if not run_row:
+                raise KeyError(f"Run not found: {run_id}")
+            run = loads(run_row[2], {})
+            run["status"] = run_row[1]
+            run["row_version"] = int(run_row[0] or 1)
+            if str(run_row[1]) != "needs_review":
+                raise ValueError("repair packet requires source run status needs_review")
+            if str(run.get("stage7_review_cycle_id") or "") != cycle_id:
+                raise ValueError("source run is not bound to repair review cycle")
+            evidence_row = conn.execute(
+                "SELECT payload_json FROM evidence WHERE evidence_id=? AND run_id=?",
+                (str(cycle_row[1]), run_id),
+            ).fetchone()
+            if not evidence_row:
+                raise ValueError("repair packet source evidence not found")
+            evidence = loads(evidence_row[0], {})
+            reports = [
+                loads(row[0], {})
+                for row in conn.execute(
+                    "SELECT payload_json FROM review_reports WHERE cycle_id=? ORDER BY created_at, report_id",
+                    (cycle_id,),
+                ).fetchall()
+            ]
+            findings = [
+                loads(row[0], {})
+                for row in conn.execute(
+                    "SELECT payload_json FROM review_findings WHERE cycle_id=? ORDER BY created_at, finding_id",
+                    (cycle_id,),
+                ).fetchall()
+            ]
+            provider_id = str(record.get("repair_provider_id") or "")
+            ack_row = conn.execute(
+                "SELECT payload_json, constitution_acknowledged, constitution_hash FROM provider_acks WHERE provider_id=?",
+                (provider_id,),
+            ).fetchone()
+            if not ack_row:
+                raise ValueError("repair provider Constitution acknowledgement missing")
+            provider_ack = loads(ack_row[0], {})
+            provider_ack["constitution_acknowledged"] = bool(ack_row[1])
+            provider_ack["constitution_hash"] = ack_row[2]
+            problems = validate_repair_packet_for_storage(
+                record,
+                cycle=cycle,
+                run=run,
+                evidence=evidence,
+                reports=reports,
+                findings=findings,
+                provider_ack=provider_ack,
+            )
+            if problems:
+                raise ValueError("repair packet rejected: " + "; ".join(problems))
+            existing = conn.execute(
+                "SELECT payload_json, repair_fingerprint FROM repair_packets WHERE source_cycle_id=? OR repair_packet_id=?",
+                (cycle_id, packet_id),
+            ).fetchone()
+            if existing:
+                prior = loads(existing[0], {})
+                if str(existing[1] or "") == str(record.get("repair_fingerprint") or "") and prior == record:
+                    return prior
+                raise ValueError("repair packet is append-only and source cycle may create only one")
+            aggregate = cycle.get("aggregate") if isinstance(cycle.get("aggregate"), dict) else {}
+            conn.execute(
+                "INSERT INTO repair_packets(repair_packet_id, source_cycle_id, source_run_id, source_evidence_id, repair_provider_id, aggregate_fingerprint, repair_fingerprint, payload_json, created_at, immutable) VALUES (?,?,?,?,?,?,?,?,?,1)",
+                (
+                    packet_id,
+                    cycle_id,
+                    run_id,
+                    str(record.get("source_evidence_id") or ""),
+                    provider_id,
+                    str(aggregate.get("aggregate_fingerprint") or ""),
+                    str(record.get("repair_fingerprint") or ""),
+                    dumps(record),
+                    record.get("created_at") or now,
+                ),
+            )
+            run["stage7_repair_packet_id"] = packet_id
+            run["stage7_repair_status"] = "packet_ready"
+            run["stage7_repair_provider_id"] = provider_id
+            run["updated_at"] = now
+            new_version = int(run_row[0] or 1) + 1
+            run["row_version"] = new_version
+            cur = conn.execute(
+                "UPDATE runs SET payload_json=?, updated_at=?, row_version=? WHERE id=? AND row_version=?",
+                (dumps(run), now, new_version, run_id, int(run_row[0] or 1)),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("stale run race while binding repair packet")
+            metadata = {
+                "repair_packet_id": packet_id,
+                "source_cycle_id": cycle_id,
+                "repair_provider_id": provider_id,
+                "repair_fingerprint": record.get("repair_fingerprint"),
+            }
+            conn.execute(
+                "INSERT INTO review_events(id, cycle_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (new_id("rve"), cycle_id, "repair_packet_created", "Governed repair packet created", actor, dumps(metadata), now),
+            )
+            conn.execute(
+                "INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (new_id("re"), run_id, "stage7_repair_packet_created", "Governed repair packet bound to source run", actor, dumps(metadata), now),
+            )
+        return record
+
+    def get_repair_packet(self, repair_packet_id: str) -> dict[str, Any]:
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM repair_packets WHERE repair_packet_id=?",
+                (str(repair_packet_id),),
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Repair packet not found: {repair_packet_id}")
+        return loads(row[0], {})
+
+    def get_repair_packet_for_cycle(self, cycle_id: str) -> dict[str, Any]:
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM repair_packets WHERE source_cycle_id=?",
+                (str(cycle_id),),
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Repair packet not found for cycle: {cycle_id}")
+        return loads(row[0], {})
+
+    def list_repair_packets(self, source_run_id: str | None = None) -> list[dict[str, Any]]:
+        with self.db.transaction() as conn:
+            if source_run_id:
+                rows = conn.execute(
+                    "SELECT payload_json FROM repair_packets WHERE source_run_id=? ORDER BY created_at DESC",
+                    (str(source_run_id),),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT payload_json FROM repair_packets ORDER BY created_at DESC"
+                ).fetchall()
+        return [loads(row[0], {}) for row in rows]
+
     # —— Execution control ——
     def get_execution_control(self) -> dict[str, Any]:
         with self.db.transaction() as conn:

@@ -31,6 +31,11 @@ from buildforme.github_client import GitHubClient, GitHubClientError
 from buildforme.packet_generator import generate_agent_packet
 from buildforme.planner import plan_project, recommendation_to_packet_input
 from buildforme.policy import classify_task, validate_task_packet
+from buildforme.review_service import (
+    aggregate_independent_review_cycle,
+    create_independent_review_cycle,
+    submit_independent_review_report,
+)
 from buildforme.storage import DEFAULT_STATE_PATH, LocalStore
 from buildforme.work_queue import build_pr_status, build_work_queue
 
@@ -213,6 +218,25 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             run_id = path.removeprefix("/api/runs/").removesuffix("/events").strip("/")
             self._json(HTTPStatus.OK, {"events": self._store().list_run_events(run_id)})
             return
+        if path.startswith("/api/runs/") and path.endswith("/reviews"):
+            run_id = path.removeprefix("/api/runs/").removesuffix("/reviews").strip("/")
+            self._json(HTTPStatus.OK, {"review_cycles": self._store().list_review_cycles(run_id)})
+            return
+        if path.startswith("/api/review-cycles/"):
+            cycle_id = path.removeprefix("/api/review-cycles/").strip("/")
+            try:
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        "cycle": self._store().get_review_cycle(cycle_id),
+                        "assignments": self._store().list_review_assignments(cycle_id),
+                        "reports": self._store().list_review_reports(cycle_id),
+                        "findings": self._store().list_review_findings(cycle_id),
+                    },
+                )
+            except KeyError as exc:
+                self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            return
         if path.startswith("/api/runs/") and path.endswith("/evidence"):
             run_id = path.removeprefix("/api/runs/").removesuffix("/evidence").strip("/")
             try:
@@ -336,6 +360,15 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/founder/session":
             self._create_founder_session()
+            return
+        if path.startswith("/api/runs/") and path.endswith("/reviews"):
+            self._stage7_review_action(path, "create")
+            return
+        if path.startswith("/api/review-cycles/") and path.endswith("/aggregate"):
+            self._stage7_review_action(path, "aggregate")
+            return
+        if path.startswith("/api/review-cycles/") and "/assignments/" in path and path.endswith("/submit"):
+            self._stage7_review_action(path, "submit")
             return
         if path.startswith("/api/runs/") and path.endswith("/preflight"):
             self._run_action(path, "preflight")
@@ -1027,6 +1060,43 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
         except (KeyError, ValueError, json.JSONDecodeError) as exc:
             code = HTTPStatus.NOT_FOUND if isinstance(exc, KeyError) else HTTPStatus.BAD_REQUEST
             self._json(code, {"error": str(exc)})
+
+    def _stage7_review_action(self, path: str, action: str) -> None:
+        try:
+            payload = self._read_json() if int(self.headers.get("Content-Length") or "0") else {}
+            if not isinstance(payload, dict):
+                payload = {}
+            auth = self._require_founder_mutation(payload)
+            actor = str(payload.get("actor") or auth.get("actor") or "shan")
+            if action == "create":
+                run_id = path.removeprefix("/api/runs/").removesuffix("/reviews").strip("/")
+                result = create_independent_review_cycle(
+                    self._store(),
+                    run_id,
+                    reviewers=payload.get("reviewers") if isinstance(payload.get("reviewers"), list) else [],
+                    actor=actor,
+                    policy=payload.get("policy") if isinstance(payload.get("policy"), dict) else None,
+                )
+            elif action == "aggregate":
+                cycle_id = path.removeprefix("/api/review-cycles/").removesuffix("/aggregate").strip("/")
+                result = aggregate_independent_review_cycle(self._store(), cycle_id, actor=actor)
+            elif action == "submit":
+                rest = path.removeprefix("/api/review-cycles/").removesuffix("/submit").strip("/")
+                cycle_id, assignment_id = rest.split("/assignments/", 1)
+                result = submit_independent_review_report(
+                    self._store(),
+                    cycle_id,
+                    assignment_id,
+                    payload=payload.get("report") if isinstance(payload.get("report"), dict) else payload,
+                    actor=actor,
+                )
+            else:
+                raise ValueError("unknown Stage 7 review action")
+            self._json(HTTPStatus.OK, result)
+        except KeyError as exc:
+            self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+        except (ValueError, json.JSONDecodeError) as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
     def _run_action(self, path: str, action: str) -> None:
         run_id = path.removeprefix("/api/runs/").rsplit("/", 1)[0].strip("/")

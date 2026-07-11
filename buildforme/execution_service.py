@@ -1316,6 +1316,10 @@ def founder_review_decision(
     run = store.get_run(run_id)
     actor = validate_actor(actor)
     current = str(run.get("status") or "")
+    if decision == "accept_for_pr_prep" and run.get("stage7_review_required"):
+        from buildforme.review_service import require_clear_independent_review
+
+        require_clear_independent_review(store, run)
     if current not in {"needs_review"}:
         # Only needs_review may receive a new founder decision (no silent re-decide)
         raise ValueError(

@@ -1712,6 +1712,386 @@ class Stage6Store:
             "updated_at": row[5],
         }
 
+    # —— Stage 7 independent reviews ——
+    def create_review_cycle_atomic(
+        self,
+        *,
+        cycle: dict[str, Any],
+        assignments: list[dict[str, Any]],
+        actor: str,
+    ) -> dict[str, Any]:
+        from buildforme.review_contracts import validate_assignment_record, validate_cycle_record
+
+        cycle_record = dict(cycle)
+        problems = validate_cycle_record(cycle_record)
+        if problems:
+            raise ValueError("review cycle rejected: " + "; ".join(problems))
+        assignment_records = [dict(item) for item in assignments]
+        for item in assignment_records:
+            problems = validate_assignment_record(item, cycle_record)
+            if problems:
+                raise ValueError("review assignment rejected: " + "; ".join(problems))
+        cycle_id = str(cycle_record["cycle_id"])
+        run_id = str(cycle_record["run_id"])
+        now = utc_now_iso()
+        with self.db.transaction() as conn:
+            run_row = conn.execute(
+                "SELECT row_version, payload_json FROM runs WHERE id=?", (run_id,)
+            ).fetchone()
+            if not run_row:
+                raise KeyError(f"Run not found: {run_id}")
+            run = loads(run_row[1], {})
+            if str(run.get("status") or "") != "needs_review":
+                raise ValueError("review cycle requires run status needs_review")
+            evidence_row = conn.execute(
+                "SELECT run_id, evidence_fingerprint FROM evidence WHERE evidence_id=?",
+                (str(cycle_record["evidence_id"]),),
+            ).fetchone()
+            if not evidence_row:
+                raise ValueError("bound execution evidence not found")
+            if str(evidence_row[0]) != run_id:
+                raise ValueError("bound execution evidence belongs to another run")
+            if str(evidence_row[1] or "") != str(cycle_record["evidence_fingerprint"]):
+                raise ValueError("bound execution evidence fingerprint mismatch")
+            if conn.execute(
+                "SELECT id FROM review_cycles WHERE run_id=? AND status IN ('open','collecting','ready_to_aggregate')",
+                (run_id,),
+            ).fetchone():
+                raise ValueError("an active independent review cycle already exists for this run")
+            conn.execute(
+                """INSERT INTO review_cycles(
+                   id, run_id, evidence_id, evidence_fingerprint, scope_fingerprint,
+                   constitution_hash, status, required_reviewer_count, min_distinct_providers,
+                   policy_json, aggregate_json, payload_json, created_at, updated_at,
+                   finalized_at, row_version)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,1)""",
+                (
+                    cycle_id,
+                    run_id,
+                    cycle_record["evidence_id"],
+                    cycle_record["evidence_fingerprint"],
+                    cycle_record["scope_fingerprint"],
+                    cycle_record["constitution_hash"],
+                    "open",
+                    int(cycle_record["required_reviewer_count"]),
+                    int(cycle_record["min_distinct_providers"]),
+                    dumps(cycle_record.get("policy") or {}),
+                    None,
+                    dumps(cycle_record),
+                    cycle_record.get("created_at") or now,
+                    now,
+                ),
+            )
+            for assignment in assignment_records:
+                conn.execute(
+                    """INSERT INTO review_assignments(
+                       id, cycle_id, reviewer_id, provider_id, role, status, blind,
+                       payload_json, created_at, submitted_at)
+                       VALUES (?,?,?,?,?,'pending',1,?,?,NULL)""",
+                    (
+                        assignment["assignment_id"],
+                        cycle_id,
+                        assignment["reviewer_id"],
+                        assignment["provider_id"],
+                        assignment["role"],
+                        dumps(assignment),
+                        assignment.get("created_at") or now,
+                    ),
+                )
+            run["stage7_review_required"] = True
+            run["stage7_review_cycle_id"] = cycle_id
+            run["independent_review"] = {
+                "cycle_id": cycle_id,
+                "status": "collecting",
+                "quorum_met": False,
+                "evidence_id": cycle_record["evidence_id"],
+                "evidence_fingerprint": cycle_record["evidence_fingerprint"],
+                "required_reviewer_count": cycle_record["required_reviewer_count"],
+            }
+            run["updated_at"] = now
+            new_run_version = int(run_row[0] or 1) + 1
+            run["row_version"] = new_run_version
+            cur = conn.execute(
+                "UPDATE runs SET payload_json=?, updated_at=?, row_version=? WHERE id=? AND row_version=?",
+                (dumps(run), now, new_run_version, run_id, int(run_row[0] or 1)),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("stale run race while binding review cycle")
+            conn.execute(
+                "INSERT INTO review_events(id, cycle_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (new_id("rve"), cycle_id, "review_cycle_created", "Blind independent review cycle created", actor, dumps({"assignment_count": len(assignment_records)}), now),
+            )
+            conn.execute(
+                "INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (new_id("re"), run_id, "stage7_review_cycle_created", "Stage 7 independent review required", actor, dumps({"cycle_id": cycle_id}), now),
+            )
+        return {"cycle": cycle_record, "assignments": assignment_records, "run": run}
+
+    def get_review_cycle(self, cycle_id: str) -> dict[str, Any]:
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT payload_json, aggregate_json, status, row_version, finalized_at FROM review_cycles WHERE id=?",
+                (str(cycle_id),),
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Review cycle not found: {cycle_id}")
+        record = loads(row[0], {})
+        record["status"] = row[2]
+        record["row_version"] = int(row[3] or 1)
+        record["finalized_at"] = row[4]
+        record["aggregate"] = loads(row[1], None) if row[1] else record.get("aggregate")
+        return record
+
+    def list_review_cycles(self, run_id: str | None = None) -> list[dict[str, Any]]:
+        with self.db.transaction() as conn:
+            if run_id:
+                rows = conn.execute(
+                    "SELECT id FROM review_cycles WHERE run_id=? ORDER BY created_at DESC",
+                    (str(run_id),),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id FROM review_cycles ORDER BY created_at DESC"
+                ).fetchall()
+        return [self.get_review_cycle(str(row[0])) for row in rows]
+
+    def get_review_assignment(self, assignment_id: str) -> dict[str, Any]:
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT payload_json, status, submitted_at FROM review_assignments WHERE id=?",
+                (str(assignment_id),),
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Review assignment not found: {assignment_id}")
+        record = loads(row[0], {})
+        record["status"] = row[1]
+        record["submitted_at"] = row[2]
+        return record
+
+    def list_review_assignments(self, cycle_id: str) -> list[dict[str, Any]]:
+        with self.db.transaction() as conn:
+            rows = conn.execute(
+                "SELECT id FROM review_assignments WHERE cycle_id=? ORDER BY provider_id, reviewer_id",
+                (str(cycle_id),),
+            ).fetchall()
+        return [self.get_review_assignment(str(row[0])) for row in rows]
+
+    def list_review_reports(self, cycle_id: str) -> list[dict[str, Any]]:
+        with self.db.transaction() as conn:
+            rows = conn.execute(
+                "SELECT payload_json FROM review_reports WHERE cycle_id=? ORDER BY created_at, report_id",
+                (str(cycle_id),),
+            ).fetchall()
+        return [loads(row[0], {}) for row in rows]
+
+    def list_review_findings(self, cycle_id: str) -> list[dict[str, Any]]:
+        with self.db.transaction() as conn:
+            rows = conn.execute(
+                "SELECT payload_json FROM review_findings WHERE cycle_id=? ORDER BY created_at, finding_id",
+                (str(cycle_id),),
+            ).fetchall()
+        return [loads(row[0], {}) for row in rows]
+
+    def submit_review_report_atomic(
+        self,
+        *,
+        cycle_id: str,
+        assignment_id: str,
+        report: dict[str, Any],
+        findings: list[dict[str, Any]],
+        actor: str,
+    ) -> dict[str, Any]:
+        from buildforme.review_contracts import validate_report_for_storage
+
+        now = utc_now_iso()
+        with self.db.transaction() as conn:
+            cycle_row = conn.execute(
+                "SELECT run_id, status, required_reviewer_count, payload_json, row_version FROM review_cycles WHERE id=?",
+                (str(cycle_id),),
+            ).fetchone()
+            if not cycle_row:
+                raise KeyError(f"Review cycle not found: {cycle_id}")
+            if str(cycle_row[1]) not in {"open", "collecting"}:
+                raise ValueError("review cycle is not accepting reports")
+            cycle = loads(cycle_row[3], {})
+            cycle["status"] = cycle_row[1]
+            cycle["row_version"] = int(cycle_row[4] or 1)
+            assignment_row = conn.execute(
+                "SELECT cycle_id, status, payload_json FROM review_assignments WHERE id=?",
+                (str(assignment_id),),
+            ).fetchone()
+            if not assignment_row:
+                raise KeyError(f"Review assignment not found: {assignment_id}")
+            if str(assignment_row[0]) != str(cycle_id):
+                raise ValueError("review assignment cycle mismatch")
+            if str(assignment_row[1]) != "pending":
+                raise ValueError("review assignment already submitted or unavailable")
+            assignment = loads(assignment_row[2], {})
+            assignment["status"] = assignment_row[1]
+            problems = validate_report_for_storage(report, cycle, assignment)
+            if problems:
+                raise ValueError("review report rejected: " + "; ".join(problems))
+            report_id = str(report["report_id"])
+            if conn.execute(
+                "SELECT report_id FROM review_reports WHERE report_id=? OR assignment_id=?",
+                (report_id, str(assignment_id)),
+            ).fetchone():
+                raise ValueError("review report is append-only and assignment may submit only once")
+            conn.execute(
+                "INSERT INTO review_reports(report_id, cycle_id, assignment_id, verdict, report_fingerprint, payload_json, created_at, immutable) VALUES (?,?,?,?,?,?,?,1)",
+                (report_id, cycle_id, assignment_id, report["verdict"], report["report_fingerprint"], dumps(report), report.get("created_at") or now),
+            )
+            for finding in findings:
+                finding_id = str(finding["finding_id"])
+                if conn.execute(
+                    "SELECT finding_id FROM review_findings WHERE finding_id=?", (finding_id,)
+                ).fetchone():
+                    raise ValueError(f"review finding mutation forbidden: {finding_id}")
+                conn.execute(
+                    "INSERT INTO review_findings(finding_id, report_id, cycle_id, assignment_id, severity, category, blocking, finding_fingerprint, payload_json, created_at, immutable) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+                    (finding_id, report_id, cycle_id, assignment_id, finding["severity"], finding["category"], 1 if finding.get("blocking") else 0, finding["finding_fingerprint"], dumps(finding), now),
+                )
+            assignment["status"] = "submitted"
+            assignment["submitted_at"] = now
+            assignment["report_id"] = report_id
+            assignment["report_fingerprint"] = report["report_fingerprint"]
+            conn.execute(
+                "UPDATE review_assignments SET status='submitted', payload_json=?, submitted_at=? WHERE id=? AND status='pending'",
+                (dumps(assignment), now, assignment_id),
+            )
+            submitted = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM review_assignments WHERE cycle_id=? AND status='submitted'",
+                    (cycle_id,),
+                ).fetchone()[0]
+            )
+            required = int(cycle_row[2] or 0)
+            new_status = "ready_to_aggregate" if submitted >= required else "collecting"
+            cycle["status"] = new_status
+            cycle["submitted_reviewer_count"] = submitted
+            cycle["updated_at"] = now
+            new_cycle_version = int(cycle_row[4] or 1) + 1
+            cycle["row_version"] = new_cycle_version
+            cur = conn.execute(
+                "UPDATE review_cycles SET status=?, payload_json=?, updated_at=?, row_version=? WHERE id=? AND row_version=?",
+                (new_status, dumps(cycle), now, new_cycle_version, cycle_id, int(cycle_row[4] or 1)),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("stale review cycle race while submitting report")
+            conn.execute(
+                "INSERT INTO review_events(id, cycle_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (new_id("rve"), cycle_id, "review_report_submitted", "Blind reviewer report submitted", actor, dumps({"assignment_id": assignment_id, "report_id": report_id, "submitted": submitted, "required": required}), now),
+            )
+            conn.execute(
+                "INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (new_id("re"), str(cycle_row[0]), "stage7_review_report_submitted", "Independent reviewer report submitted", actor, dumps({"cycle_id": cycle_id, "assignment_id": assignment_id, "report_id": report_id}), now),
+            )
+        return {"cycle": cycle, "assignment": assignment, "report": report, "findings": findings}
+
+    def finalize_review_cycle_atomic(
+        self,
+        *,
+        cycle_id: str,
+        expected_row_version: int,
+        aggregate: dict[str, Any],
+        actor: str,
+    ) -> dict[str, Any]:
+        from buildforme.review_contracts import aggregate_review_reports
+
+        now = utc_now_iso()
+        with self.db.transaction() as conn:
+            cycle_row = conn.execute(
+                "SELECT run_id, status, payload_json, row_version FROM review_cycles WHERE id=?",
+                (str(cycle_id),),
+            ).fetchone()
+            if not cycle_row:
+                raise KeyError(f"Review cycle not found: {cycle_id}")
+            current_version = int(cycle_row[3] or 1)
+            if current_version != int(expected_row_version):
+                raise ValueError("stale review cycle aggregation rejected")
+            if str(cycle_row[1]) != "ready_to_aggregate":
+                raise ValueError("review cycle is not ready to aggregate")
+            cycle = loads(cycle_row[2], {})
+            cycle["status"] = cycle_row[1]
+            cycle["row_version"] = current_version
+            assignment_rows = conn.execute(
+                "SELECT payload_json, status FROM review_assignments WHERE cycle_id=? ORDER BY provider_id, reviewer_id",
+                (cycle_id,),
+            ).fetchall()
+            assignments = []
+            for row in assignment_rows:
+                item = loads(row[0], {})
+                item["status"] = row[1]
+                assignments.append(item)
+            reports = [
+                loads(row[0], {})
+                for row in conn.execute(
+                    "SELECT payload_json FROM review_reports WHERE cycle_id=? ORDER BY created_at, report_id",
+                    (cycle_id,),
+                ).fetchall()
+            ]
+            canonical = aggregate_review_reports(cycle=cycle, assignments=assignments, reports=reports)
+            if canonical.get("aggregate_fingerprint") != aggregate.get("aggregate_fingerprint"):
+                raise ValueError("review aggregate fingerprint mismatch")
+            if canonical.get("status") != aggregate.get("status"):
+                raise ValueError("review aggregate status mismatch")
+            final_status = str(canonical["status"])
+            cycle["status"] = final_status
+            cycle["aggregate"] = canonical
+            cycle["updated_at"] = now
+            cycle["finalized_at"] = now
+            new_cycle_version = current_version + 1
+            cycle["row_version"] = new_cycle_version
+            cur = conn.execute(
+                "UPDATE review_cycles SET status=?, aggregate_json=?, payload_json=?, updated_at=?, finalized_at=?, row_version=? WHERE id=? AND row_version=?",
+                (final_status, dumps(canonical), dumps(cycle), now, now, new_cycle_version, cycle_id, current_version),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("stale review cycle finalization race")
+            run_id = str(cycle_row[0])
+            run_row = conn.execute(
+                "SELECT row_version, payload_json FROM runs WHERE id=?", (run_id,)
+            ).fetchone()
+            if not run_row:
+                raise KeyError(f"Run not found: {run_id}")
+            run = loads(run_row[1], {})
+            if str(run.get("status") or "") != "needs_review":
+                raise ValueError("review cycle can finalize only while run needs_review")
+            if str(run.get("stage7_review_cycle_id") or "") != str(cycle_id):
+                raise ValueError("run is not bound to this review cycle")
+            run["independent_review"] = {
+                "cycle_id": cycle_id,
+                "status": final_status,
+                "quorum_met": canonical.get("quorum_met"),
+                "evidence_id": cycle.get("evidence_id"),
+                "evidence_fingerprint": cycle.get("evidence_fingerprint"),
+                "aggregate_fingerprint": canonical.get("aggregate_fingerprint"),
+                "required_reviewer_count": canonical.get("required_reviewer_count"),
+                "submitted_reviewer_count": canonical.get("submitted_reviewer_count"),
+                "distinct_provider_count": canonical.get("distinct_provider_count"),
+                "blocking_finding_count": canonical.get("blocking_finding_count"),
+                "finding_count": canonical.get("finding_count"),
+                "disagreement": canonical.get("disagreement"),
+            }
+            run["updated_at"] = now
+            run_version = int(run_row[0] or 1)
+            run["row_version"] = run_version + 1
+            run_cur = conn.execute(
+                "UPDATE runs SET payload_json=?, updated_at=?, row_version=? WHERE id=? AND row_version=?",
+                (dumps(run), now, run_version + 1, run_id, run_version),
+            )
+            if run_cur.rowcount != 1:
+                raise ValueError("stale run race while binding review aggregate")
+            conn.execute(
+                "INSERT INTO review_events(id, cycle_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (new_id("rve"), cycle_id, "review_cycle_finalized", f"Independent review verdict: {final_status}", actor, dumps({"aggregate_fingerprint": canonical.get("aggregate_fingerprint")}), now),
+            )
+            conn.execute(
+                "INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (new_id("re"), run_id, "stage7_review_finalized", f"Independent review verdict: {final_status}", actor, dumps({"cycle_id": cycle_id, "aggregate_fingerprint": canonical.get("aggregate_fingerprint")}), now),
+            )
+        return {"cycle": cycle, "aggregate": canonical, "run": run}
+
     # —— Evidence ——
     def save_run_evidence(self, evidence: dict[str, Any]) -> dict[str, Any]:
         """Append-only evidence persistence with independent fingerprint validation.

@@ -1252,6 +1252,33 @@ class LocalStore:
     def commit_run_mutation(self, run: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
         return self.s6.commit_run_mutation(run, **kwargs)
 
+    def create_review_cycle_atomic(self, **kwargs: Any) -> dict[str, Any]:
+        return self.s6.create_review_cycle_atomic(**kwargs)
+
+    def get_review_cycle(self, cycle_id: str) -> dict[str, Any]:
+        return self.s6.get_review_cycle(cycle_id)
+
+    def list_review_cycles(self, run_id: str | None = None) -> list[dict[str, Any]]:
+        return self.s6.list_review_cycles(run_id=run_id)
+
+    def get_review_assignment(self, assignment_id: str) -> dict[str, Any]:
+        return self.s6.get_review_assignment(assignment_id)
+
+    def list_review_assignments(self, cycle_id: str) -> list[dict[str, Any]]:
+        return self.s6.list_review_assignments(cycle_id)
+
+    def list_review_reports(self, cycle_id: str) -> list[dict[str, Any]]:
+        return self.s6.list_review_reports(cycle_id)
+
+    def list_review_findings(self, cycle_id: str) -> list[dict[str, Any]]:
+        return self.s6.list_review_findings(cycle_id)
+
+    def submit_review_report_atomic(self, **kwargs: Any) -> dict[str, Any]:
+        return self.s6.submit_review_report_atomic(**kwargs)
+
+    def finalize_review_cycle_atomic(self, **kwargs: Any) -> dict[str, Any]:
+        return self.s6.finalize_review_cycle_atomic(**kwargs)
+
     def save_run_legacy_json(self, run: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(run, dict) or not run.get("id"):
             raise ValueError("run with id required")

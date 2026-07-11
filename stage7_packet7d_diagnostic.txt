@@ -1,0 +1,67 @@
+test_repair_service_has_no_unrestricted_run_write (test_stage7_packet7d_contract.Stage7Packet7DContractTests.test_repair_service_has_no_unrestricted_run_write) ... ok
+test_storage_owns_repair_packet_validation (test_stage7_packet7d_contract.Stage7Packet7DContractTests.test_storage_owns_repair_packet_validation) ... ok
+test_create_packet_binds_every_blocking_authority (test_stage7_packet7d_repair_authority.Stage7RepairAuthorityTests.test_create_packet_binds_every_blocking_authority) ... ERROR
+test_non_repair_cycle_is_rejected (test_stage7_packet7d_repair_authority.Stage7RepairAuthorityTests.test_non_repair_cycle_is_rejected) ... ERROR
+test_one_packet_per_source_cycle_append_only (test_stage7_packet7d_repair_authority.Stage7RepairAuthorityTests.test_one_packet_per_source_cycle_append_only) ... ERROR
+test_schema_v6 (test_stage7_packet7d_repair_authority.Stage7RepairAuthorityTests.test_schema_v6) ... ERROR
+test_source_reviewer_cannot_be_repair_provider (test_stage7_packet7d_repair_authority.Stage7RepairAuthorityTests.test_source_reviewer_cannot_be_repair_provider) ... ERROR
+test_storage_rejects_finding_omission_and_scope_expansion (test_stage7_packet7d_repair_authority.Stage7RepairAuthorityTests.test_storage_rejects_finding_omission_and_scope_expansion) ... ERROR
+
+======================================================================
+ERROR: test_create_packet_binds_every_blocking_authority (test_stage7_packet7d_repair_authority.Stage7RepairAuthorityTests.test_create_packet_binds_every_blocking_authority)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_stage7_packet7d_repair_authority.py", line 186, in setUp
+    (finding["finding_id"], finding["report_id"], self.cycle["cycle_id"], finding["assignment_id"], finding["severity"], finding["category"], 1 if finding["blocking"] else 0, finding["finding_fingerprint"], dumps(finding), "now"),
+                            ~~~~~~~^^^^^^^^^^^^^
+KeyError: 'report_id'
+
+======================================================================
+ERROR: test_non_repair_cycle_is_rejected (test_stage7_packet7d_repair_authority.Stage7RepairAuthorityTests.test_non_repair_cycle_is_rejected)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_stage7_packet7d_repair_authority.py", line 186, in setUp
+    (finding["finding_id"], finding["report_id"], self.cycle["cycle_id"], finding["assignment_id"], finding["severity"], finding["category"], 1 if finding["blocking"] else 0, finding["finding_fingerprint"], dumps(finding), "now"),
+                            ~~~~~~~^^^^^^^^^^^^^
+KeyError: 'report_id'
+
+======================================================================
+ERROR: test_one_packet_per_source_cycle_append_only (test_stage7_packet7d_repair_authority.Stage7RepairAuthorityTests.test_one_packet_per_source_cycle_append_only)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_stage7_packet7d_repair_authority.py", line 186, in setUp
+    (finding["finding_id"], finding["report_id"], self.cycle["cycle_id"], finding["assignment_id"], finding["severity"], finding["category"], 1 if finding["blocking"] else 0, finding["finding_fingerprint"], dumps(finding), "now"),
+                            ~~~~~~~^^^^^^^^^^^^^
+KeyError: 'report_id'
+
+======================================================================
+ERROR: test_schema_v6 (test_stage7_packet7d_repair_authority.Stage7RepairAuthorityTests.test_schema_v6)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_stage7_packet7d_repair_authority.py", line 186, in setUp
+    (finding["finding_id"], finding["report_id"], self.cycle["cycle_id"], finding["assignment_id"], finding["severity"], finding["category"], 1 if finding["blocking"] else 0, finding["finding_fingerprint"], dumps(finding), "now"),
+                            ~~~~~~~^^^^^^^^^^^^^
+KeyError: 'report_id'
+
+======================================================================
+ERROR: test_source_reviewer_cannot_be_repair_provider (test_stage7_packet7d_repair_authority.Stage7RepairAuthorityTests.test_source_reviewer_cannot_be_repair_provider)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_stage7_packet7d_repair_authority.py", line 186, in setUp
+    (finding["finding_id"], finding["report_id"], self.cycle["cycle_id"], finding["assignment_id"], finding["severity"], finding["category"], 1 if finding["blocking"] else 0, finding["finding_fingerprint"], dumps(finding), "now"),
+                            ~~~~~~~^^^^^^^^^^^^^
+KeyError: 'report_id'
+
+======================================================================
+ERROR: test_storage_rejects_finding_omission_and_scope_expansion (test_stage7_packet7d_repair_authority.Stage7RepairAuthorityTests.test_storage_rejects_finding_omission_and_scope_expansion)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/runner/work/Buildforme/Buildforme/tests/test_stage7_packet7d_repair_authority.py", line 186, in setUp
+    (finding["finding_id"], finding["report_id"], self.cycle["cycle_id"], finding["assignment_id"], finding["severity"], finding["category"], 1 if finding["blocking"] else 0, finding["finding_fingerprint"], dumps(finding), "now"),
+                            ~~~~~~~^^^^^^^^^^^^^
+KeyError: 'report_id'
+
+----------------------------------------------------------------------
+Ran 8 tests in 0.449s
+
+FAILED (errors=6)

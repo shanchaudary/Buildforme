@@ -31,11 +31,11 @@ from buildforme.github_client import GitHubClient, GitHubClientError
 from buildforme.packet_generator import generate_agent_packet
 from buildforme.planner import plan_project, recommendation_to_packet_input
 from buildforme.policy import classify_task, validate_task_packet
+from buildforme.review_execution import execute_independent_review_assignment
 from buildforme.review_service import (
     aggregate_independent_review_cycle,
     create_independent_review_cycle,
     get_independent_review_cycle_view,
-    submit_independent_review_report,
 )
 from buildforme.storage import DEFAULT_STATE_PATH, LocalStore
 from buildforme.work_queue import build_pr_status, build_work_queue
@@ -363,8 +363,8 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/review-cycles/") and path.endswith("/aggregate"):
             self._stage7_review_action(path, "aggregate")
             return
-        if path.startswith("/api/review-cycles/") and "/assignments/" in path and path.endswith("/submit"):
-            self._stage7_review_action(path, "submit")
+        if path.startswith("/api/review-cycles/") and "/assignments/" in path and path.endswith("/execute"):
+            self._stage7_review_action(path, "execute")
             return
         if path.startswith("/api/runs/") and path.endswith("/preflight"):
             self._run_action(path, "preflight")
@@ -1076,15 +1076,17 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             elif action == "aggregate":
                 cycle_id = path.removeprefix("/api/review-cycles/").removesuffix("/aggregate").strip("/")
                 result = aggregate_independent_review_cycle(self._store(), cycle_id, actor=actor)
-            elif action == "submit":
-                rest = path.removeprefix("/api/review-cycles/").removesuffix("/submit").strip("/")
+            elif action == "execute":
+                rest = path.removeprefix("/api/review-cycles/").removesuffix("/execute").strip("/")
                 cycle_id, assignment_id = rest.split("/assignments/", 1)
-                result = submit_independent_review_report(
+                if payload.get("argv") or payload.get("command") or payload.get("executable"):
+                    raise ValueError("reviewer command authority is code-owned and cannot be supplied")
+                result = execute_independent_review_assignment(
                     self._store(),
                     cycle_id,
                     assignment_id,
-                    payload=payload.get("report") if isinstance(payload.get("report"), dict) else payload,
                     actor=actor,
+                    timeout_seconds=max(30, min(1800, int(payload.get("timeout_seconds") or 900))),
                 )
             else:
                 raise ValueError("unknown Stage 7 review action")

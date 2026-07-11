@@ -1712,6 +1712,163 @@ class Stage6Store:
             "updated_at": row[5],
         }
 
+    # —— Stage 7 Packet 7B review packets/executions ——
+    def save_review_packet_atomic(self, *, packet: dict[str, Any], actor: str) -> dict[str, Any]:
+        from buildforme.review_execution import validate_review_packet_for_storage
+
+        record = dict(packet)
+        cycle_id = str(record.get("cycle_id") or "")
+        assignment_id = str(record.get("assignment_id") or "")
+        packet_id = str(record.get("packet_id") or "")
+        with self.db.transaction() as conn:
+            cycle_row = conn.execute(
+                "SELECT run_id, payload_json, status FROM review_cycles WHERE id=?",
+                (cycle_id,),
+            ).fetchone()
+            assignment_row = conn.execute(
+                "SELECT payload_json, status, cycle_id FROM review_assignments WHERE id=?",
+                (assignment_id,),
+            ).fetchone()
+            if not cycle_row or not assignment_row:
+                raise ValueError("review packet cycle or assignment not found")
+            if str(assignment_row[2]) != cycle_id:
+                raise ValueError("review packet assignment cycle mismatch")
+            if str(assignment_row[1]) != "pending":
+                raise ValueError("review packet requires pending assignment")
+            cycle = loads(cycle_row[1], {})
+            cycle["status"] = cycle_row[2]
+            assignment = loads(assignment_row[0], {})
+            assignment["status"] = assignment_row[1]
+            run_row = conn.execute(
+                "SELECT payload_json FROM runs WHERE id=?", (str(cycle_row[0]),)
+            ).fetchone()
+            evidence_row = conn.execute(
+                "SELECT payload_json FROM evidence WHERE evidence_id=?",
+                (str(cycle.get("evidence_id") or ""),),
+            ).fetchone()
+            if not run_row or not evidence_row:
+                raise ValueError("review packet run or evidence not found")
+            run = loads(run_row[0], {})
+            evidence = loads(evidence_row[0], {})
+            problems = validate_review_packet_for_storage(
+                record,
+                cycle=cycle,
+                assignment=assignment,
+                run=run,
+                evidence=evidence,
+            )
+            if problems:
+                raise ValueError("review packet rejected: " + "; ".join(problems))
+            existing = conn.execute(
+                "SELECT payload_json, packet_fingerprint FROM review_packets WHERE assignment_id=?",
+                (assignment_id,),
+            ).fetchone()
+            if existing:
+                prior = loads(existing[0], {})
+                if str(existing[1] or "") != str(record.get("packet_fingerprint") or ""):
+                    raise ValueError("review packet mutation forbidden")
+                return prior
+            conn.execute(
+                "INSERT INTO review_packets(packet_id, cycle_id, assignment_id, packet_fingerprint, payload_json, created_at, immutable) VALUES (?,?,?,?,?,?,1)",
+                (
+                    packet_id,
+                    cycle_id,
+                    assignment_id,
+                    record.get("packet_fingerprint"),
+                    dumps(record),
+                    record.get("created_at") or utc_now_iso(),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO review_events(id, cycle_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (
+                    new_id("rve"),
+                    cycle_id,
+                    "review_packet_bound",
+                    "Immutable blind-review packet bound to assignment",
+                    actor,
+                    dumps({"assignment_id": assignment_id, "packet_id": packet_id}),
+                    utc_now_iso(),
+                ),
+            )
+        return record
+
+    def get_review_packet_for_assignment(self, assignment_id: str) -> dict[str, Any]:
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM review_packets WHERE assignment_id=?",
+                (str(assignment_id),),
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Review packet not found for assignment: {assignment_id}")
+        return loads(row[0], {})
+
+    def list_review_execution_attempts(self, assignment_id: str) -> list[dict[str, Any]]:
+        with self.db.transaction() as conn:
+            rows = conn.execute(
+                "SELECT payload_json FROM review_executions WHERE assignment_id=? ORDER BY created_at, execution_id",
+                (str(assignment_id),),
+            ).fetchall()
+        return [loads(row[0], {}) for row in rows]
+
+    def record_review_execution_atomic(self, *, execution: dict[str, Any], actor: str) -> dict[str, Any]:
+        from buildforme.review_execution import validate_review_execution_record
+
+        record = dict(execution)
+        if str(record.get("status") or "") == "succeeded":
+            raise ValueError("successful reviewer execution must commit atomically with its report")
+        assignment_id = str(record.get("assignment_id") or "")
+        with self.db.transaction() as conn:
+            assignment_row = conn.execute(
+                "SELECT payload_json FROM review_assignments WHERE id=?",
+                (assignment_id,),
+            ).fetchone()
+            packet_row = conn.execute(
+                "SELECT payload_json FROM review_packets WHERE packet_id=? AND assignment_id=?",
+                (str(record.get("packet_id") or ""), assignment_id),
+            ).fetchone()
+            if not assignment_row or not packet_row:
+                raise ValueError("review execution assignment or packet not found")
+            assignment = loads(assignment_row[0], {})
+            packet = loads(packet_row[0], {})
+            problems = validate_review_execution_record(
+                record, packet=packet, assignment=assignment, report=None
+            )
+            if problems:
+                raise ValueError("review execution rejected: " + "; ".join(problems))
+            if conn.execute(
+                "SELECT execution_id FROM review_executions WHERE execution_id=?",
+                (str(record.get("execution_id") or ""),),
+            ).fetchone():
+                raise ValueError("review execution evidence is append-only")
+            conn.execute(
+                "INSERT INTO review_executions(execution_id, cycle_id, assignment_id, packet_id, provider_id, status, execution_fingerprint, payload_json, created_at, immutable) VALUES (?,?,?,?,?,?,?,?,?,1)",
+                (
+                    record["execution_id"],
+                    record["cycle_id"],
+                    assignment_id,
+                    record["packet_id"],
+                    record["provider_id"],
+                    record["status"],
+                    record["execution_fingerprint"],
+                    dumps(record),
+                    record.get("created_at") or utc_now_iso(),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO review_events(id, cycle_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (
+                    new_id("rve"),
+                    record["cycle_id"],
+                    "review_execution_failed",
+                    "Automated reviewer execution failed closed",
+                    actor,
+                    dumps({"assignment_id": assignment_id, "execution_id": record["execution_id"]}),
+                    utc_now_iso(),
+                ),
+            )
+        return record
+
     # —— Stage 7 independent reviews ——
     def create_review_cycle_atomic(
         self,
@@ -1958,12 +2115,17 @@ class Stage6Store:
         report: dict[str, Any],
         findings: list[dict[str, Any]],
         actor: str,
+        execution: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         from buildforme.review_contracts import (
             validate_finding_for_storage,
             validate_report_for_storage,
         )
+        from buildforme.review_execution import validate_review_execution_record
 
+        if not isinstance(execution, dict):
+            raise ValueError("direct review report submission disabled; authenticated reviewer execution required")
+        execution_record = dict(execution)
         now = utc_now_iso()
         with self.db.transaction() as conn:
             cycle_row = conn.execute(
@@ -1992,6 +2154,28 @@ class Stage6Store:
             problems = validate_report_for_storage(report, cycle, assignment)
             if problems:
                 raise ValueError("review report rejected: " + "; ".join(problems))
+            packet_row = conn.execute(
+                "SELECT payload_json FROM review_packets WHERE assignment_id=?",
+                (str(assignment_id),),
+            ).fetchone()
+            if not packet_row:
+                raise ValueError("authenticated reviewer execution requires immutable review packet")
+            review_packet = loads(packet_row[0], {})
+            execution_problems = validate_review_execution_record(
+                execution_record,
+                packet=review_packet,
+                assignment=assignment,
+                report=report,
+            )
+            if execution_problems:
+                raise ValueError("review execution rejected: " + "; ".join(execution_problems))
+            if str(execution_record.get("status") or "") != "succeeded":
+                raise ValueError("review report requires successful reviewer execution")
+            if conn.execute(
+                "SELECT execution_id FROM review_executions WHERE execution_id=?",
+                (str(execution_record.get("execution_id") or ""),),
+            ).fetchone():
+                raise ValueError("review execution evidence is append-only")
             report_findings = report.get("findings") if isinstance(report.get("findings"), list) else []
             if findings != report_findings:
                 raise ValueError("separate review findings diverge from report findings")
@@ -2015,6 +2199,20 @@ class Stage6Store:
                 (report_id, str(assignment_id)),
             ).fetchone():
                 raise ValueError("review report is append-only and assignment may submit only once")
+            conn.execute(
+                "INSERT INTO review_executions(execution_id, cycle_id, assignment_id, packet_id, provider_id, status, execution_fingerprint, payload_json, created_at, immutable) VALUES (?,?,?,?,?,?,?,?,?,1)",
+                (
+                    execution_record["execution_id"],
+                    execution_record["cycle_id"],
+                    execution_record["assignment_id"],
+                    execution_record["packet_id"],
+                    execution_record["provider_id"],
+                    execution_record["status"],
+                    execution_record["execution_fingerprint"],
+                    dumps(execution_record),
+                    execution_record.get("created_at") or now,
+                ),
+            )
             conn.execute(
                 "INSERT INTO review_reports(report_id, cycle_id, assignment_id, verdict, report_fingerprint, payload_json, created_at, immutable) VALUES (?,?,?,?,?,?,?,1)",
                 (report_id, cycle_id, assignment_id, report["verdict"], report["report_fingerprint"], dumps(report), report.get("created_at") or now),
@@ -2058,7 +2256,7 @@ class Stage6Store:
                 raise ValueError("stale review cycle race while submitting report")
             conn.execute(
                 "INSERT INTO review_events(id, cycle_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
-                (new_id("rve"), cycle_id, "review_report_submitted", "Blind reviewer report submitted", actor, dumps({"assignment_id": assignment_id, "report_id": report_id, "submitted": submitted, "required": required}), now),
+                (new_id("rve"), cycle_id, "review_report_submitted", "Blind reviewer report submitted", actor, dumps({"assignment_id": assignment_id, "report_id": report_id, "execution_id": execution_record.get("execution_id"), "submitted": submitted, "required": required}), now),
             )
             conn.execute(
                 "INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",

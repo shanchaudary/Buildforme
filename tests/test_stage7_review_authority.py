@@ -21,9 +21,78 @@ from buildforme.review_service import (
     create_independent_review_cycle,
     get_independent_review_cycle_view,
     require_clear_independent_review,
-    submit_independent_review_report,
+)
+from buildforme.review_execution import (
+    build_review_execution_record,
+    build_review_packet_record,
 )
 from buildforme.storage import LocalStore
+
+
+def submit_independent_review_report(
+    store,
+    cycle_id,
+    assignment_id,
+    *,
+    payload,
+    actor="reviewer",
+):
+    cycle = store.get_review_cycle(cycle_id)
+    assignment = store.get_review_assignment(assignment_id)
+    run = store.get_run(str(cycle["run_id"]))
+    evidence = store.get_evidence_by_id(str(cycle["evidence_id"]))
+    snapshot = {
+        "manifest_fingerprint": evidence.get("manifest_fingerprint"),
+        "patch_fingerprint": evidence.get("patch_fingerprint"),
+        "head_commit": evidence.get("final_head_sha"),
+        "file_count": evidence.get("file_count"),
+        "files_changed": list(evidence.get("files_changed") or []),
+        "files": list((evidence.get("changed_file_manifest") or {}).get("files") or []),
+        "diff_stat": evidence.get("diff_stat") or "",
+        "patch_size": 1,
+    }
+    packet = build_review_packet_record(
+        cycle=cycle,
+        assignment=assignment,
+        run=run,
+        evidence=evidence,
+        snapshot=snapshot,
+    )
+    packet = store.save_review_packet_atomic(packet=packet, actor="test")
+    report, findings = build_review_report_record(
+        cycle=cycle,
+        assignment=assignment,
+        payload=payload,
+    )
+    process = {
+        "ok": True,
+        "exit_code": 0,
+        "pid": 123,
+        "stdout": "{}",
+        "stderr": "",
+        "cleanup_ok": True,
+        "process_group_isolated": True,
+        "argv": ["test-reviewer", "--read-only"],
+    }
+    execution = build_review_execution_record(
+        packet=packet,
+        assignment=assignment,
+        command={"contract_id": "test.read-only.v1", "read_only": True, "argv": process["argv"]},
+        health={"version": "test", "executable": "test-reviewer"},
+        process_result=process,
+        pre_snapshot=snapshot,
+        post_snapshot=snapshot,
+        status="succeeded",
+        report_fingerprint=report["report_fingerprint"],
+    )
+    return store.submit_review_report_atomic(
+        cycle_id=cycle_id,
+        assignment_id=assignment_id,
+        report=report,
+        findings=findings,
+        actor=actor,
+        execution=execution,
+    )
 
 
 class Stage7ReviewAuthorityTests(unittest.TestCase):
@@ -124,9 +193,9 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
             actor=assignment["reviewer_id"],
         )
 
-    def test_schema_v4(self):
-        self.assertEqual(SCHEMA_VERSION, 4)
-        self.assertEqual(self.store.s6.db.pragmas()["schema_version"], 4)
+    def test_schema_v5(self):
+        self.assertEqual(SCHEMA_VERSION, 5)
+        self.assertEqual(self.store.s6.db.pragmas()["schema_version"], 5)
 
     def test_implementer_cannot_review_own_execution(self):
         reviewers = [
@@ -199,7 +268,9 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
         result = self._cycle()
         assignment = result["assignments"][0]
         self._pass_report(assignment)
-        with self.assertRaisesRegex(ValueError, "not pending|append-only"):
+        with self.assertRaisesRegex(
+            ValueError, "not pending|append-only|requires pending assignment"
+        ):
             self._pass_report(assignment)
 
     def test_quorum_required_before_aggregation(self):
@@ -386,7 +457,9 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
         )
         divergent = [dict(findings[0])]
         divergent[0]["summary"] = "different row"
-        with self.assertRaisesRegex(ValueError, "diverge"):
+        with self.assertRaisesRegex(
+            ValueError, "direct review report submission disabled"
+        ):
             self.store.submit_review_report_atomic(
                 cycle_id=cycle["cycle_id"],
                 assignment_id=assignment["assignment_id"],

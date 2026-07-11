@@ -1368,6 +1368,19 @@ class LocalStore:
         }
         return self.s6.save_run_approval(record)
 
+    # —— Stage 7 Packet 7B review packets/executions ——
+    def save_review_packet_atomic(self, **kwargs: Any) -> dict[str, Any]:
+        return self.s6.save_review_packet_atomic(**kwargs)
+
+    def get_review_packet_for_assignment(self, assignment_id: str) -> dict[str, Any]:
+        return self.s6.get_review_packet_for_assignment(assignment_id)
+
+    def list_review_execution_attempts(self, assignment_id: str) -> list[dict[str, Any]]:
+        return self.s6.list_review_execution_attempts(assignment_id)
+
+    def record_review_execution_atomic(self, **kwargs: Any) -> dict[str, Any]:
+        return self.s6.record_review_execution_atomic(**kwargs)
+
     # —— Internals ——
 
     def _load_object(self, path: Path, *, default: dict[str, Any], list_key: str) -> dict[str, Any]:

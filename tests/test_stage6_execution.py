@@ -59,7 +59,7 @@ class SqliteAuthorityTests(unittest.TestCase):
         self.assertEqual(str(p["journal_mode"]).lower(), "wal")
         self.assertTrue(p["foreign_keys"])
         self.assertEqual(p["integrity_check"], "ok")
-        self.assertEqual(p["schema_version"], 4)
+        self.assertEqual(p["schema_version"], 5)
 
     def test_concurrent_task_locks(self):
         temp = tempfile.TemporaryDirectory()

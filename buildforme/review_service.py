@@ -82,23 +82,15 @@ def submit_independent_review_report(
     payload: dict[str, Any],
     actor: str = "reviewer",
 ) -> dict[str, Any]:
-    cycle = store.get_review_cycle(validate_safe_id(cycle_id, field="cycle_id"))
-    assignment = store.get_review_assignment(
-        validate_safe_id(assignment_id, field="assignment_id")
-    )
-    if assignment.get("cycle_id") != cycle.get("cycle_id"):
-        raise ValueError("assignment does not belong to review cycle")
-    report, findings = build_review_report_record(
-        cycle=cycle,
-        assignment=assignment,
-        payload=payload,
-    )
-    return store.submit_review_report_atomic(
-        cycle_id=cycle_id,
-        assignment_id=assignment_id,
-        report=report,
-        findings=findings,
-        actor=str(actor or assignment.get("reviewer_id") or "reviewer"),
+    """Direct report ingestion is intentionally disabled in Packet 7B.
+
+    Reports must originate from execute_independent_review_assignment(), which
+    binds a code-owned read-only process, immutable packet, before/after worktree
+    proof, and reviewer process evidence in the same transaction as the report.
+    """
+    del store, cycle_id, assignment_id, payload, actor
+    raise ValueError(
+        "direct review report submission disabled; execute the bound reviewer assignment"
     )
 
 

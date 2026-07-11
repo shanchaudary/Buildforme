@@ -100,6 +100,7 @@ def build_review_cycle_record(
         "implementer_provider_forbidden": True,
         "critical_high_always_blocking": True,
         "founder_override_blocking_findings": False,
+        "automated_reviewer_execution_required": True,
     }
     for key, required_value in immutable_policy.items():
         if key in requested_policy and requested_policy[key] != required_value:
@@ -216,6 +217,7 @@ def validate_cycle_record(cycle: dict[str, Any]) -> list[str]:
         "implementer_provider_forbidden": True,
         "critical_high_always_blocking": True,
         "founder_override_blocking_findings": False,
+        "automated_reviewer_execution_required": True,
     }
     for key, required_value in immutable_policy.items():
         if policy.get(key) != required_value:

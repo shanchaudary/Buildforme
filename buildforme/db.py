@@ -17,7 +17,7 @@ from typing import Any, Iterator
 from buildforme.coordination_lock import CoordinationFileLock
 from buildforme.storage import utc_now_iso
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -306,6 +306,32 @@ CREATE TABLE IF NOT EXISTS review_events (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_review_events_cycle ON review_events(cycle_id, created_at);
+
+CREATE TABLE IF NOT EXISTS review_packets (
+  packet_id TEXT PRIMARY KEY,
+  cycle_id TEXT NOT NULL REFERENCES review_cycles(id),
+  assignment_id TEXT NOT NULL REFERENCES review_assignments(id),
+  packet_fingerprint TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  immutable INTEGER NOT NULL DEFAULT 1,
+  UNIQUE(assignment_id)
+);
+
+CREATE TABLE IF NOT EXISTS review_executions (
+  execution_id TEXT PRIMARY KEY,
+  cycle_id TEXT NOT NULL REFERENCES review_cycles(id),
+  assignment_id TEXT NOT NULL REFERENCES review_assignments(id),
+  packet_id TEXT NOT NULL REFERENCES review_packets(packet_id),
+  provider_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  execution_fingerprint TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  immutable INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_review_executions_assignment
+  ON review_executions(assignment_id, created_at);
 """
 
 
@@ -355,6 +381,8 @@ class ExecutionDB:
                         self._migrate_to_v3(conn)
                     if current < 4:
                         self._migrate_to_v4(conn)
+                    if current < 5:
+                        self._migrate_to_v5(conn)
                     if current < SCHEMA_VERSION:
                         conn.execute(
                             "UPDATE schema_meta SET value=? WHERE key='version'",
@@ -543,6 +571,37 @@ class ExecutionDB:
               created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_review_events_cycle ON review_events(cycle_id, created_at);
+            """
+        )
+
+    def _migrate_to_v5(self, conn: sqlite3.Connection) -> None:
+        """Add immutable review packets and reviewer execution evidence."""
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS review_packets (
+              packet_id TEXT PRIMARY KEY,
+              cycle_id TEXT NOT NULL REFERENCES review_cycles(id),
+              assignment_id TEXT NOT NULL REFERENCES review_assignments(id),
+              packet_fingerprint TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              immutable INTEGER NOT NULL DEFAULT 1,
+              UNIQUE(assignment_id)
+            );
+            CREATE TABLE IF NOT EXISTS review_executions (
+              execution_id TEXT PRIMARY KEY,
+              cycle_id TEXT NOT NULL REFERENCES review_cycles(id),
+              assignment_id TEXT NOT NULL REFERENCES review_assignments(id),
+              packet_id TEXT NOT NULL REFERENCES review_packets(packet_id),
+              provider_id TEXT NOT NULL,
+              status TEXT NOT NULL,
+              execution_fingerprint TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              immutable INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_review_executions_assignment
+              ON review_executions(assignment_id, created_at);
             """
         )
 

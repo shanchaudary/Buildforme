@@ -57,3 +57,21 @@ and re-verification are implemented and independently accepted.
 - Review shopping is prohibited: an execution-evidence record can be bound to only
   one independent review cycle. A repair verdict requires fresh repair execution
   evidence and re-verification before another cycle can begin.
+
+
+## Packet 7B — automated blind reviewer execution
+
+- Each assignment receives one immutable, fingerprinted blind-review packet.
+- Before execution, Buildforme re-collects the worktree manifest and patch identity and
+  requires exact equality with the bound Stage 6 execution evidence.
+- Reviewer commands are code-owned. Packet 7B initially enables only the verified
+  Codex `exec` read-only sandbox contract; providers without an approved auth and
+  read-only command contract remain unavailable.
+- The process runs through the Stage 6 supervisor with environment allowlisting,
+  timeout, cancellation, process-tree cleanup proof, and kill-switch observation.
+- The worktree is re-collected after review. Any change blocks the report and records
+  immutable failed reviewer-execution evidence.
+- Provider output must contain exactly one strict JSON review object. Markdown,
+  ambiguous output, unknown fields, and authority claims are rejected.
+- Successful reviewer process evidence and the report/findings commit atomically.
+- Direct/manual report submission is disabled; the API exposes assignment execution.

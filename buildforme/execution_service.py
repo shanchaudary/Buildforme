@@ -1315,6 +1315,7 @@ def founder_review_decision(
     run_id = validate_safe_id(run_id, field="run_id")
     run = store.get_run(run_id)
     actor = validate_actor(actor)
+    decision = str(decision or "").strip().lower()
     current = str(run.get("status") or "")
     if decision == "accept_for_pr_prep" and run.get("stage7_review_required"):
         from buildforme.review_service import require_clear_independent_review

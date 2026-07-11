@@ -157,7 +157,7 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
 
     def test_second_active_cycle_rejected(self):
         self._cycle()
-        with self.assertRaisesRegex(ValueError, "active independent review cycle"):
+        with self.assertRaisesRegex(ValueError, "active independent review cycle|already been independently reviewed"):
             self._cycle()
 
     def test_blind_report_cannot_claim_consensus_or_founder_authority(self):
@@ -444,6 +444,48 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
         )
         self.assertFalse(final["blind_material_withheld"])
         self.assertEqual(len(final["reports"]), 2)
+
+    def test_blocking_cycle_cannot_be_re_reviewed_without_fresh_evidence(self):
+        result = self._cycle()
+        first, second = result["assignments"]
+        submit_independent_review_report(
+            self.store,
+            first["cycle_id"],
+            first["assignment_id"],
+            payload={
+                "verdict": "changes_required",
+                "summary": "repair required",
+                "findings": [
+                    {
+                        "severity": "high",
+                        "category": "governance",
+                        "summary": "authority defect",
+                        "evidence": "exact failing path",
+                        "recommendation": "repair and re-execute",
+                    }
+                ],
+            },
+        )
+        self._pass_report(second)
+        finalized = aggregate_independent_review_cycle(
+            self.store, result["cycle"]["cycle_id"]
+        )
+        self.assertEqual(finalized["cycle"]["status"], "repair_required")
+        with self.assertRaisesRegex(ValueError, "fresh repair and execution evidence"):
+            create_independent_review_cycle(
+                self.store,
+                self.run["id"],
+                reviewers=self.reviewers,
+                actor="shan",
+            )
+
+    def test_founder_decision_is_normalized_before_stage7_gate(self):
+        source = Path("buildforme/execution_service.py").read_text(encoding="utf-8")
+        normalization = 'decision = str(decision or "").strip().lower()'
+        gate = 'if decision == "accept_for_pr_prep" and run.get("stage7_review_required")'
+        self.assertIn(normalization, source)
+        self.assertIn(gate, source)
+        self.assertLess(source.index(normalization), source.index(gate))
 
     def test_review_service_has_no_unrestricted_run_write(self):
         source = Path("buildforme/review_service.py").read_text(encoding="utf-8")

@@ -53,3 +53,7 @@ and re-verification are implemented and independently accepted.
   independently recomputed before insertion.
 - Reports are withheld from the read API until the cycle is finalized, preserving
   blind independence during collection.
+
+- Review shopping is prohibited: an execution-evidence record can be bound to only
+  one independent review cycle. A repair verdict requires fresh repair execution
+  evidence and re-verification before another cycle can begin.

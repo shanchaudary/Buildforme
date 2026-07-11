@@ -1802,6 +1802,15 @@ class Stage6Store:
             )
             if str(evidence_constitution.get("hash") or "") != str(run.get("constitution_hash") or ""):
                 raise ValueError("execution evidence Constitution is stale")
+            prior_same_evidence = conn.execute(
+                "SELECT id, status FROM review_cycles WHERE run_id=? AND evidence_id=? ORDER BY created_at DESC LIMIT 1",
+                (run_id, str(cycle_record["evidence_id"])),
+            ).fetchone()
+            if prior_same_evidence:
+                raise ValueError(
+                    "execution evidence has already been independently reviewed; "
+                    "a new cycle requires fresh repair and execution evidence"
+                )
             if conn.execute(
                 "SELECT id FROM review_cycles WHERE run_id=? AND status IN ('open','collecting','ready_to_aggregate')",
                 (run_id,),

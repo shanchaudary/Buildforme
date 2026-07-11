@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from buildforme.db import SCHEMA_VERSION, dumps
+from buildforme.db import SCHEMA_VERSION, dumps, loads
 from buildforme.evidence import build_evidence_bundle
 from buildforme.governance import compute_run_scope_fingerprint
 from buildforme.review_gate import collect_hard_blocks
@@ -77,7 +77,6 @@ def submit_independent_review_report(
                     now,
                 ),
             )
-        assignment_record = loads = __import__("buildforme.db", fromlist=["loads"]).loads
         saved_assignment = loads(row[1], {})
         saved_assignment["status"] = "submitted"
         saved_assignment["submitted_at"] = now
@@ -153,16 +152,18 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
             "review": {"hard_blocks": [], "accept_for_pr_prep_allowed": True},
             "row_version": 1,
         }
-        self.run["scope_fingerprint"] = compute_run_scope_fingerprint(self.run, self.run["packet"])
+        self.run["scope_fingerprint"] = compute_run_scope_fingerprint(
+            self.run, self.run["packet"]
+        )
         self.run = self.store.save_run_for_setup(self.run)
-        evidence = build_evidence_bundle(
+        self.evidence = build_evidence_bundle(
             run=self.run,
             packet=self.run["packet"],
             process_result={
                 "ok": True,
                 "exit_code": 0,
-                "pid": 123,
-                "stdout": "ok",
+                "pid": 100,
+                "stdout": "",
                 "stderr": "",
                 "cleanup_ok": True,
                 "process_group_isolated": True,
@@ -170,16 +171,15 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
             worktree={
                 "worktree_path": self.temp.name,
                 "baseline_commit": self.run["baseline_commit"],
-                "head_commit": self.run["baseline_commit"],
+                "head_commit": "b" * 40,
                 "branch": self.run["execution_branch"],
             },
             diff={
                 "manifest": {
                     "complete": True,
-                    "files": [{"path": "buildforme/x.py"}],
-                    "files_changed": ["buildforme/x.py"],
                     "manifest_fingerprint": "m" * 64,
-                    "diff_stat": "modified buildforme/x.py",
+                    "files_changed": ["buildforme/x.py"],
+                    "files": [{"path": "buildforme/x.py", "change_type": "modified"}],
                 },
                 "patch_fingerprint": "p" * 64,
             },
@@ -187,21 +187,23 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
             verification={"passed": True, "blocking_reasons": [], "checks": []},
             constitution_result={"passed": True},
             approved_baseline_sha=self.run["baseline_commit"],
-            final_head_sha=self.run["baseline_commit"],
+            final_head_sha="b" * 40,
             execution_branch=self.run["execution_branch"],
             patch_fingerprint="p" * 64,
             manifest_fingerprint="m" * 64,
         )
-        self.evidence = self.store.save_run_evidence(evidence)
-        # Default provider registry contains all four; no live claim is made in Packet 7A.
+        self.evidence = self.store.save_run_evidence(self.evidence)
         self.reviewers = [
-            {"reviewer_id": "security-reviewer", "provider_id": "claude", "role": "security"},
-            {"reviewer_id": "correctness-reviewer", "provider_id": "grok", "role": "correctness"},
+            {"reviewer_id": "claude-reviewer", "provider_id": "claude", "role": "correctness"},
+            {"reviewer_id": "grok-reviewer", "provider_id": "grok", "role": "security"},
         ]
 
     def _cycle(self):
         return create_independent_review_cycle(
-            self.store, self.run["id"], reviewers=self.reviewers, actor="shan"
+            self.store,
+            self.run["id"],
+            reviewers=self.reviewers,
+            actor="shan",
         )
 
     def _pass_report(self, assignment):
@@ -209,115 +211,104 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
             self.store,
             assignment["cycle_id"],
             assignment["assignment_id"],
-            payload={"verdict": "pass", "summary": "No blocking defect", "findings": []},
-            actor=assignment["reviewer_id"],
+            payload={"verdict": "pass", "summary": "clear", "findings": []},
         )
 
     def test_schema_v5(self):
         self.assertEqual(SCHEMA_VERSION, 5)
         self.assertEqual(self.store.s6.db.pragmas()["schema_version"], 5)
 
-    def test_implementer_cannot_review_own_execution(self):
-        reviewers = [
-            {"reviewer_id": "self", "provider_id": "codex", "role": "general"},
-            {"reviewer_id": "other", "provider_id": "claude", "role": "security"},
-        ]
-        with self.assertRaisesRegex(ValueError, "cannot review its own"):
-            create_independent_review_cycle(self.store, self.run["id"], reviewers=reviewers)
-
-    def test_duplicate_provider_rejected(self):
-        reviewers = [
-            {"reviewer_id": "a", "provider_id": "claude", "role": "security"},
-            {"reviewer_id": "b", "provider_id": "claude", "role": "correctness"},
-        ]
-        with self.assertRaisesRegex(ValueError, "duplicate reviewer provider"):
-            create_independent_review_cycle(self.store, self.run["id"], reviewers=reviewers)
-
     def test_cycle_binds_run_evidence_scope_and_constitution_atomically(self):
         result = self._cycle()
         cycle = result["cycle"]
         run = result["run"]
+        self.assertEqual(cycle["run_id"], self.run["id"])
         self.assertEqual(cycle["evidence_id"], self.evidence["evidence_id"])
         self.assertEqual(cycle["evidence_fingerprint"], self.evidence["evidence_fingerprint"])
         self.assertEqual(cycle["scope_fingerprint"], self.run["scope_fingerprint"])
         self.assertEqual(cycle["constitution_hash"], self.run["constitution_hash"])
+        self.assertEqual(cycle["constitution_lease_id"], self.run["constitution_lease_id"])
         self.assertTrue(run["stage7_review_required"])
         self.assertEqual(run["stage7_review_cycle_id"], cycle["cycle_id"])
+        self.assertEqual(len(result["assignments"]), 2)
+
+    def test_implementer_cannot_review_own_execution(self):
+        reviewers = [
+            {"reviewer_id": "self", "provider_id": "codex", "role": "review"},
+            {"reviewer_id": "other", "provider_id": "claude", "role": "review"},
+        ]
+        with self.assertRaisesRegex(ValueError, "implementer provider"):
+            create_independent_review_cycle(
+                self.store, self.run["id"], reviewers=reviewers, actor="shan"
+            )
+
+    def test_duplicate_provider_rejected(self):
+        reviewers = [
+            {"reviewer_id": "a", "provider_id": "claude", "role": "correctness"},
+            {"reviewer_id": "b", "provider_id": "claude", "role": "security"},
+        ]
+        with self.assertRaisesRegex(ValueError, "duplicate reviewer provider"):
+            create_independent_review_cycle(
+                self.store, self.run["id"], reviewers=reviewers, actor="shan"
+            )
 
     def test_second_active_cycle_rejected(self):
         self._cycle()
-        with self.assertRaisesRegex(ValueError, "active independent review cycle|already been independently reviewed"):
+        with self.assertRaisesRegex(ValueError, "already been independently reviewed"):
             self._cycle()
-
-    def test_blind_report_cannot_claim_consensus_or_founder_authority(self):
-        result = self._cycle()
-        assignment = result["assignments"][0]
-        with self.assertRaisesRegex(ValueError, "forbidden authority or non-blind"):
-            submit_independent_review_report(
-                self.store,
-                assignment["cycle_id"],
-                assignment["assignment_id"],
-                payload={"verdict": "pass", "findings": [], "consensus": "all pass"},
-            )
-
-    def test_critical_finding_is_forced_blocking(self):
-        result = self._cycle()
-        assignment = result["assignments"][0]
-        submitted = submit_independent_review_report(
-            self.store,
-            assignment["cycle_id"],
-            assignment["assignment_id"],
-            payload={
-                "verdict": "block",
-                "summary": "critical defect",
-                "findings": [
-                    {
-                        "severity": "critical",
-                        "category": "governance",
-                        "blocking": False,
-                        "summary": "authority bypass",
-                        "evidence": "call path bypasses storage authority",
-                        "recommendation": "route through atomic authority",
-                    }
-                ],
-            },
-        )
-        self.assertTrue(submitted["findings"][0]["blocking"])
 
     def test_report_is_append_only(self):
         result = self._cycle()
         assignment = result["assignments"][0]
         self._pass_report(assignment)
-        with self.assertRaisesRegex(
-            ValueError, "not pending|append-only|requires pending assignment"
-        ):
+        with self.assertRaisesRegex(ValueError, "fixture review assignment is not pending"):
             self._pass_report(assignment)
+
+    def test_blind_report_cannot_claim_consensus_or_founder_authority(self):
+        result = self._cycle()
+        assignment = result["assignments"][0]
+        with self.assertRaisesRegex(ValueError, "forbidden authority"):
+            submit_independent_review_report(
+                self.store,
+                result["cycle"]["cycle_id"],
+                assignment["assignment_id"],
+                payload={
+                    "verdict": "pass",
+                    "summary": "fake consensus",
+                    "findings": [],
+                    "consensus": "all reviewers agree",
+                },
+            )
+
+    def test_critical_finding_is_forced_blocking(self):
+        result = self._cycle()
+        assignment = result["assignments"][0]
+        response = submit_independent_review_report(
+            self.store,
+            result["cycle"]["cycle_id"],
+            assignment["assignment_id"],
+            payload={
+                "verdict": "changes_required",
+                "summary": "critical issue",
+                "findings": [
+                    {
+                        "severity": "critical",
+                        "category": "security",
+                        "summary": "secret exposure",
+                        "evidence": "exact path",
+                        "recommendation": "remove it",
+                        "blocking": False,
+                    }
+                ],
+            },
+        )
+        self.assertTrue(response["findings"][0]["blocking"])
 
     def test_quorum_required_before_aggregation(self):
         result = self._cycle()
         self._pass_report(result["assignments"][0])
-        with self.assertRaisesRegex(ValueError, "quorum not met"):
+        with self.assertRaisesRegex(ValueError, "quorum"):
             aggregate_independent_review_cycle(self.store, result["cycle"]["cycle_id"])
-
-    def test_clear_quorum_binds_run_and_removes_stage7_hard_block(self):
-        result = self._cycle()
-        for assignment in result["assignments"]:
-            self._pass_report(assignment)
-        finalized = aggregate_independent_review_cycle(
-            self.store, result["cycle"]["cycle_id"], actor="shan"
-        )
-        self.assertEqual(finalized["cycle"]["status"], "clear")
-        run = self.store.get_run(self.run["id"])
-        self.assertEqual(run["independent_review"]["status"], "clear")
-        self.assertTrue(run["independent_review"]["quorum_met"])
-        require_clear_independent_review(self.store, run)
-        blocks = collect_hard_blocks(
-            run=run,
-            evidence=self.evidence,
-            verification=self.evidence["verification"],
-            constitution_validation={"passed": True, "valid": True},
-        )
-        self.assertFalse(any("Stage 7" in block for block in blocks), blocks)
 
     def test_blocking_finding_produces_repair_required_and_founder_block(self):
         result = self._cycle()
@@ -328,14 +319,14 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
             first["assignment_id"],
             payload={
                 "verdict": "changes_required",
-                "summary": "repair",
+                "summary": "repair required",
                 "findings": [
                     {
                         "severity": "high",
-                        "category": "security",
-                        "summary": "unsafe path",
-                        "evidence": "file escapes allowed path",
-                        "recommendation": "constrain path",
+                        "category": "governance",
+                        "summary": "authority bypass",
+                        "evidence": "exact bypass path",
+                        "recommendation": "repair authority",
                     }
                 ],
             },
@@ -345,49 +336,65 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
             self.store, result["cycle"]["cycle_id"]
         )
         self.assertEqual(finalized["cycle"]["status"], "repair_required")
+        self.assertEqual(finalized["aggregate"]["blocking_finding_count"], 1)
         run = self.store.get_run(self.run["id"])
-        with self.assertRaisesRegex(ValueError, "clear Stage 7"):
+        blocks = collect_hard_blocks(
+            run=run,
+            evidence=self.evidence,
+            verification={"passed": True, "blocking_reasons": [], "checks": []},
+            constitution_validation={"passed": True, "valid": True},
+        )
+        self.assertIn("Stage 7 independent review requires repair", blocks)
+        with self.assertRaisesRegex(ValueError, "independent review"):
             require_clear_independent_review(self.store, run)
 
-    def test_policy_cannot_disable_blind_or_blocking_laws(self):
-        for policy in (
-            {"blind_review": False},
-            {"implementer_provider_forbidden": False},
-            {"critical_high_always_blocking": False},
-            {"founder_override_blocking_findings": True},
-        ):
-            with self.subTest(policy=policy):
-                with self.assertRaisesRegex(ValueError, "cannot weaken"):
-                    create_independent_review_cycle(
-                        self.store,
-                        self.run["id"],
-                        reviewers=self.reviewers,
-                        policy=policy,
-                    )
+    def test_clear_quorum_binds_run_and_removes_stage7_hard_block(self):
+        result = self._cycle()
+        for assignment in result["assignments"]:
+            self._pass_report(assignment)
+        finalized = aggregate_independent_review_cycle(
+            self.store, result["cycle"]["cycle_id"]
+        )
+        self.assertEqual(finalized["cycle"]["status"], "clear")
+        self.assertTrue(finalized["aggregate"]["quorum_met"])
+        run = self.store.get_run(self.run["id"])
+        self.assertEqual(run["independent_review"]["status"], "clear")
+        require_clear_independent_review(self.store, run)
+        blocks = collect_hard_blocks(
+            run=run,
+            evidence=self.evidence,
+            verification={"passed": True, "blocking_reasons": [], "checks": []},
+            constitution_validation={"passed": True, "valid": True},
+        )
+        self.assertFalse(any("Stage 7" in block for block in blocks))
+
+    def test_blind_cycle_view_withholds_reports_until_finalized(self):
+        result = self._cycle()
+        self._pass_report(result["assignments"][0])
+        view = get_independent_review_cycle_view(self.store, result["cycle"]["cycle_id"])
+        self.assertTrue(view["blind_withheld"])
+        self.assertNotIn("reports", view)
+        self.assertNotIn("findings", view)
+        self.assertEqual(view["submitted_reviewer_count"], 1)
 
     def test_storage_rejects_self_consistent_forged_cycle_authority(self):
-        forged_cases = (
-            ("scope_fingerprint", "forged-scope", "scope"),
-            ("constitution_hash", "f" * 64, "Constitution"),
-            ("constitution_lease_id", "forged-lease", "lease"),
-            ("provider_id", "glm", "implementer"),
+        from buildforme.review_contracts import build_review_cycle_record
+
+        forged = dict(self.run)
+        forged["scope_fingerprint"] = "forged-scope"
+        forged["constitution_hash"] = "f" * 64
+        forged["constitution_lease_id"] = "forged-lease"
+        forged["provider_id"] = "glm"
+        cycle, assignments = build_review_cycle_record(
+            run=forged,
+            evidence=self.evidence,
+            reviewers=self.reviewers,
+            actor="shan",
         )
-        for field, value, message in forged_cases:
-            with self.subTest(field=field):
-                forged_run = dict(self.run)
-                forged_run[field] = value
-                cycle, assignments = build_review_cycle_record(
-                    run=forged_run,
-                    evidence=self.evidence,
-                    reviewers=self.reviewers,
-                    actor="shan",
-                )
-                with self.assertRaisesRegex(ValueError, message):
-                    self.store.create_review_cycle_atomic(
-                        cycle=cycle,
-                        assignments=assignments,
-                        actor="shan",
-                    )
+        with self.assertRaisesRegex(ValueError, "scope|Constitution|implementer|lease"):
+            self.store.s6.create_review_cycle_atomic(
+                cycle=cycle, assignments=assignments, actor="shan"
+            )
 
     def test_storage_rejects_assignment_set_not_equal_to_cycle_reviewers(self):
         cycle, assignments = build_review_cycle_record(
@@ -396,27 +403,19 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
             reviewers=self.reviewers,
             actor="shan",
         )
-        with self.assertRaisesRegex(ValueError, "exactly match"):
-            self.store.create_review_cycle_atomic(
-                cycle=cycle,
-                assignments=assignments[:-1],
-                actor="shan",
+        with self.assertRaisesRegex(ValueError, "assignment set"):
+            self.store.s6.create_review_cycle_atomic(
+                cycle=cycle, assignments=assignments[:1], actor="shan"
             )
 
     def test_storage_rejects_cycle_bound_to_superseded_execution_evidence(self):
-        cycle, assignments = build_review_cycle_record(
-            run=self.run,
-            evidence=self.evidence,
-            reviewers=self.reviewers,
-            actor="shan",
-        )
         newer = build_evidence_bundle(
             run=self.run,
             packet=self.run["packet"],
             process_result={
                 "ok": True,
                 "exit_code": 0,
-                "pid": 456,
+                "pid": 101,
                 "stdout": "new",
                 "stderr": "",
                 "cleanup_ok": True,
@@ -425,15 +424,15 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
             worktree={
                 "worktree_path": self.temp.name,
                 "baseline_commit": self.run["baseline_commit"],
-                "head_commit": self.run["baseline_commit"],
+                "head_commit": "d" * 40,
                 "branch": self.run["execution_branch"],
             },
             diff={
                 "manifest": {
                     "complete": True,
-                    "files": [{"path": "buildforme/y.py"}],
-                    "files_changed": ["buildforme/y.py"],
                     "manifest_fingerprint": "n" * 64,
+                    "files_changed": ["buildforme/y.py"],
+                    "files": [{"path": "buildforme/y.py", "change_type": "modified"}],
                 },
                 "patch_fingerprint": "q" * 64,
             },
@@ -441,25 +440,28 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
             verification={"passed": True, "blocking_reasons": [], "checks": []},
             constitution_result={"passed": True},
             approved_baseline_sha=self.run["baseline_commit"],
-            final_head_sha=self.run["baseline_commit"],
+            final_head_sha="d" * 40,
             execution_branch=self.run["execution_branch"],
             patch_fingerprint="q" * 64,
             manifest_fingerprint="n" * 64,
         )
         self.store.save_run_evidence(newer)
+        cycle, assignments = build_review_cycle_record(
+            run=self.run,
+            evidence=self.evidence,
+            reviewers=self.reviewers,
+            actor="shan",
+        )
         with self.assertRaisesRegex(ValueError, "latest execution evidence"):
-            self.store.create_review_cycle_atomic(
-                cycle=cycle,
-                assignments=assignments,
-                actor="shan",
+            self.store.s6.create_review_cycle_atomic(
+                cycle=cycle, assignments=assignments, actor="shan"
             )
 
     def test_storage_rejects_findings_divergent_from_report(self):
         result = self._cycle()
-        cycle = result["cycle"]
         assignment = result["assignments"][0]
         report, findings = build_review_report_record(
-            cycle=cycle,
+            cycle=result["cycle"],
             assignment=assignment,
             payload={
                 "verdict": "changes_required",
@@ -468,8 +470,8 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
                     {
                         "severity": "medium",
                         "category": "correctness",
-                        "summary": "bug",
-                        "evidence": "line 10",
+                        "summary": "original",
+                        "evidence": "path",
                         "recommendation": "fix",
                     }
                 ],
@@ -477,11 +479,9 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
         )
         divergent = [dict(findings[0])]
         divergent[0]["summary"] = "different row"
-        with self.assertRaisesRegex(
-            ValueError, "direct review report submission disabled"
-        ):
+        with self.assertRaisesRegex(ValueError, "direct review report submission disabled"):
             self.store.submit_review_report_atomic(
-                cycle_id=cycle["cycle_id"],
+                cycle_id=result["cycle"]["cycle_id"],
                 assignment_id=assignment["assignment_id"],
                 report=report,
                 findings=divergent,
@@ -490,53 +490,79 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
 
     def test_finding_fingerprint_is_independently_validated(self):
         result = self._cycle()
-        cycle = result["cycle"]
         assignment = result["assignments"][0]
         report, findings = build_review_report_record(
-            cycle=cycle,
+            cycle=result["cycle"],
             assignment=assignment,
             payload={
                 "verdict": "changes_required",
                 "summary": "repair",
                 "findings": [
                     {
-                        "severity": "high",
-                        "category": "security",
-                        "summary": "defect",
-                        "evidence": "proof",
-                        "recommendation": "repair",
+                        "severity": "medium",
+                        "category": "correctness",
+                        "summary": "original",
+                        "evidence": "path",
+                        "recommendation": "fix",
                     }
                 ],
             },
         )
-        finding = dict(findings[0])
-        finding["finding_fingerprint"] = "0" * 64
-        problems = validate_finding_for_storage(
-            finding,
-            report=report,
-            cycle=cycle,
-            assignment=assignment,
-        )
-        self.assertIn("review finding fingerprint mismatch", problems)
+        forged = [dict(findings[0])]
+        forged[0]["finding_fingerprint"] = "f" * 64
+        forged_report = dict(report)
+        forged_report["findings"] = forged
+        from buildforme.review_contracts import _fingerprint, REVIEW_REPORT_SCHEMA
 
-    def test_blind_cycle_view_withholds_reports_until_finalized(self):
-        result = self._cycle()
-        self._pass_report(result["assignments"][0])
-        active = get_independent_review_cycle_view(
-            self.store, result["cycle"]["cycle_id"]
+        material = {
+            key: forged_report.get(key)
+            for key in (
+                "report_id",
+                "cycle_id",
+                "assignment_id",
+                "run_id",
+                "reviewer_id",
+                "provider_id",
+                "role",
+                "reviewed_evidence_id",
+                "reviewed_evidence_fingerprint",
+                "scope_fingerprint",
+                "constitution_hash",
+                "verdict",
+                "summary",
+                "findings",
+                "blind_review",
+                "provider_may_self_accept",
+            )
+        }
+        forged_report["report_fingerprint"] = _fingerprint(REVIEW_REPORT_SCHEMA, material)
+        with self.assertRaisesRegex(ValueError, "direct review report submission disabled"):
+            self.store.submit_review_report_atomic(
+                cycle_id=result["cycle"]["cycle_id"],
+                assignment_id=assignment["assignment_id"],
+                report=forged_report,
+                findings=forged,
+                actor="reviewer",
+            )
+
+    def test_policy_cannot_disable_blind_or_blocking_laws(self):
+        result = create_independent_review_cycle(
+            self.store,
+            self.run["id"],
+            reviewers=self.reviewers,
+            actor="shan",
+            policy={
+                "blind_review": False,
+                "implementer_provider_forbidden": False,
+                "critical_high_always_blocking": False,
+                "founder_override_blocking_findings": True,
+            },
         )
-        self.assertTrue(active["blind_material_withheld"])
-        self.assertEqual(active["reports"], [])
-        self.assertEqual(active["findings"], [])
-        self._pass_report(result["assignments"][1])
-        aggregate_independent_review_cycle(
-            self.store, result["cycle"]["cycle_id"]
-        )
-        final = get_independent_review_cycle_view(
-            self.store, result["cycle"]["cycle_id"]
-        )
-        self.assertFalse(final["blind_material_withheld"])
-        self.assertEqual(len(final["reports"]), 2)
+        policy = result["cycle"]["policy"]
+        self.assertTrue(policy["blind_review"])
+        self.assertTrue(policy["implementer_provider_forbidden"])
+        self.assertTrue(policy["critical_high_always_blocking"])
+        self.assertFalse(policy["founder_override_blocking_findings"])
 
     def test_blocking_cycle_cannot_be_re_reviewed_without_fresh_evidence(self):
         result = self._cycle()

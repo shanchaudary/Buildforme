@@ -47,6 +47,19 @@ jobs:
           git diff --check
       - name: Packet 7D schema v6
         run: python -m unittest discover -s tests -p 'test_stage7_packet7d_repair_authority.py' -k test_schema_v6 -v
+      - name: Preserve Packet 7D diagnostic
+        if: failure()
+        run: |
+          if [ ! -f stage7_packet7d_diagnostic.txt ]; then
+            python -m unittest discover -s tests -p 'test_stage7_packet7d*.py' -v > stage7_packet7d_diagnostic.txt 2>&1 || true
+            git restore .
+            git clean -fd buildforme tests docs scripts
+            git config user.name "Buildforme Governance Bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add -f stage7_packet7d_diagnostic.txt
+            git commit -m "Record Packet 7D focused validation failure"
+            git push origin HEAD:stage-7-independent-multi-agent-review-loop
+          fi
       - name: Packet 7D exact authority binding
         run: python -m unittest discover -s tests -p 'test_stage7_packet7d_repair_authority.py' -k test_create_packet_binds_every_blocking_authority -v
       - name: Packet 7D omission and scope rejection

@@ -1,9 +1,11 @@
+== correct patch anchor ==
+Stage 6 final-blocker patch anchor narrowed
 == apply ==
 Traceback (most recent call last):
-  File "/home/runner/work/Buildforme/Buildforme/scripts/apply_stage6_final_blockers.py", line 775, in <module>
-    text = replace_once(
-           ^^^^^^^^^^^^^
+  File "/home/runner/work/Buildforme/Buildforme/scripts/apply_stage6_final_blockers.py", line 778, in <module>
+    mutation_text = replace_once(
+                    ^^^^^^^^^^^^^
   File "/home/runner/work/Buildforme/Buildforme/scripts/apply_stage6_final_blockers.py", line 11, in replace_once
     raise RuntimeError(f"{label}: expected one match, found {count}")
 RuntimeError: atomic outcome evidence validation: expected one match, found 2
-statuses apply=1 syntax=99 focused=99 full=99 policy=99 constitution=99
+statuses correction=0 apply=1 syntax=99 focused=99 full=99 policy=99 constitution=99

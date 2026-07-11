@@ -1720,6 +1720,7 @@ class Stage6Store:
         assignments: list[dict[str, Any]],
         actor: str,
     ) -> dict[str, Any]:
+        from buildforme.evidence import EVIDENCE_KIND_EXECUTION, validate_evidence_for_storage
         from buildforme.review_contracts import validate_assignment_record, validate_cycle_record
 
         cycle_record = dict(cycle)
@@ -1731,6 +1732,18 @@ class Stage6Store:
             problems = validate_assignment_record(item, cycle_record)
             if problems:
                 raise ValueError("review assignment rejected: " + "; ".join(problems))
+        declared_reviewers = {
+            (str(item.get("reviewer_id")), str(item.get("provider_id")), str(item.get("role")))
+            for item in (cycle_record.get("reviewers") or [])
+        }
+        assigned_reviewers = {
+            (str(item.get("reviewer_id")), str(item.get("provider_id")), str(item.get("role")))
+            for item in assignment_records
+        }
+        if declared_reviewers != assigned_reviewers or len(assignment_records) != len(
+            cycle_record.get("reviewers") or []
+        ):
+            raise ValueError("review assignments do not exactly match declared reviewers")
         cycle_id = str(cycle_record["cycle_id"])
         run_id = str(cycle_record["run_id"])
         now = utc_now_iso()
@@ -1743,16 +1756,52 @@ class Stage6Store:
             run = loads(run_row[1], {})
             if str(run.get("status") or "") != "needs_review":
                 raise ValueError("review cycle requires run status needs_review")
-            evidence_row = conn.execute(
-                "SELECT run_id, evidence_fingerprint FROM evidence WHERE evidence_id=?",
-                (str(cycle_record["evidence_id"]),),
-            ).fetchone()
-            if not evidence_row:
-                raise ValueError("bound execution evidence not found")
-            if str(evidence_row[0]) != run_id:
-                raise ValueError("bound execution evidence belongs to another run")
-            if str(evidence_row[1] or "") != str(cycle_record["evidence_fingerprint"]):
+            if str(cycle_record.get("scope_fingerprint") or "") != str(
+                run.get("scope_fingerprint") or ""
+            ):
+                raise ValueError("review cycle scope does not match canonical run")
+            if str(cycle_record.get("constitution_hash") or "") != str(
+                run.get("constitution_hash") or ""
+            ):
+                raise ValueError("review cycle Constitution does not match canonical run")
+            if str(cycle_record.get("constitution_lease_id") or "") != str(
+                run.get("constitution_lease_id") or ""
+            ):
+                raise ValueError("review cycle Constitution lease does not match canonical run")
+            if str(cycle_record.get("implementer_provider_id") or "") != str(
+                run.get("provider_id") or ""
+            ):
+                raise ValueError("review cycle implementer provider does not match canonical run")
+            evidence_rows = conn.execute(
+                "SELECT evidence_id, payload_json, evidence_fingerprint FROM evidence WHERE run_id=? ORDER BY sequence DESC",
+                (run_id,),
+            ).fetchall()
+            latest_execution = None
+            for candidate in evidence_rows:
+                payload = loads(candidate[1], {})
+                if str(payload.get("evidence_kind") or "") == EVIDENCE_KIND_EXECUTION:
+                    latest_execution = (candidate, payload)
+                    break
+            if latest_execution is None:
+                raise ValueError("latest execution evidence not found")
+            evidence_row, evidence_payload = latest_execution
+            if str(evidence_row[0]) != str(cycle_record["evidence_id"]):
+                raise ValueError("review cycle must bind the latest execution evidence")
+            evidence_problems = validate_evidence_for_storage(evidence_payload)
+            if evidence_problems:
+                raise ValueError("bound execution evidence invalid: " + "; ".join(evidence_problems))
+            actual_evidence_fp = str(
+                evidence_payload.get("evidence_fingerprint") or evidence_row[2] or ""
+            )
+            if actual_evidence_fp != str(cycle_record["evidence_fingerprint"]):
                 raise ValueError("bound execution evidence fingerprint mismatch")
+            evidence_constitution = (
+                evidence_payload.get("constitution")
+                if isinstance(evidence_payload.get("constitution"), dict)
+                else {}
+            )
+            if str(evidence_constitution.get("hash") or "") != str(run.get("constitution_hash") or ""):
+                raise ValueError("execution evidence Constitution is stale")
             if conn.execute(
                 "SELECT id FROM review_cycles WHERE run_id=? AND status IN ('open','collecting','ready_to_aggregate')",
                 (run_id,),
@@ -1901,7 +1950,10 @@ class Stage6Store:
         findings: list[dict[str, Any]],
         actor: str,
     ) -> dict[str, Any]:
-        from buildforme.review_contracts import validate_report_for_storage
+        from buildforme.review_contracts import (
+            validate_finding_for_storage,
+            validate_report_for_storage,
+        )
 
         now = utc_now_iso()
         with self.db.transaction() as conn:
@@ -1911,7 +1963,7 @@ class Stage6Store:
             ).fetchone()
             if not cycle_row:
                 raise KeyError(f"Review cycle not found: {cycle_id}")
-            if str(cycle_row[1]) not in {"open", "collecting"}:
+            if str(cycle_row[1]) not in {"open", "collecting", "ready_to_aggregate"}:
                 raise ValueError("review cycle is not accepting reports")
             cycle = loads(cycle_row[3], {})
             cycle["status"] = cycle_row[1]
@@ -1931,6 +1983,23 @@ class Stage6Store:
             problems = validate_report_for_storage(report, cycle, assignment)
             if problems:
                 raise ValueError("review report rejected: " + "; ".join(problems))
+            report_findings = report.get("findings") if isinstance(report.get("findings"), list) else []
+            if findings != report_findings:
+                raise ValueError("separate review findings diverge from report findings")
+            finding_ids: set[str] = set()
+            for finding in findings:
+                finding_problems = validate_finding_for_storage(
+                    finding,
+                    report=report,
+                    cycle=cycle,
+                    assignment=assignment,
+                )
+                if finding_problems:
+                    raise ValueError("review finding rejected: " + "; ".join(finding_problems))
+                finding_id = str(finding.get("finding_id") or "")
+                if finding_id in finding_ids:
+                    raise ValueError("duplicate finding id within review report")
+                finding_ids.add(finding_id)
             report_id = str(report["report_id"])
             if conn.execute(
                 "SELECT report_id FROM review_reports WHERE report_id=? OR assignment_id=?",

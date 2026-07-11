@@ -39,3 +39,17 @@ and re-verification are implemented and independently accepted.
 - No same-provider quorum by default.
 - No consensus sharing before each reviewer submits.
 - No finding is closed without fresh repair evidence and re-verification.
+
+
+## Packet 7A red-team hardening
+
+- Storage independently revalidates the canonical run scope, Constitution, lease,
+  implementer provider, latest execution evidence kind, evidence fingerprint, and
+  evidence Constitution before creating a review cycle.
+- Persisted assignments must exactly equal the cycle's declared reviewer set.
+- Governance policy flags for blind review, self-review prohibition, blocking
+  critical/high findings, and no founder override cannot be weakened by input.
+- Finding rows must exactly match the report and each finding fingerprint is
+  independently recomputed before insertion.
+- Reports are withheld from the read API until the cycle is finalized, preserving
+  blind independence during collection.

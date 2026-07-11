@@ -34,6 +34,7 @@ from buildforme.policy import classify_task, validate_task_packet
 from buildforme.review_service import (
     aggregate_independent_review_cycle,
     create_independent_review_cycle,
+    get_independent_review_cycle_view,
     submit_independent_review_report,
 )
 from buildforme.storage import DEFAULT_STATE_PATH, LocalStore
@@ -227,12 +228,7 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
             try:
                 self._json(
                     HTTPStatus.OK,
-                    {
-                        "cycle": self._store().get_review_cycle(cycle_id),
-                        "assignments": self._store().list_review_assignments(cycle_id),
-                        "reports": self._store().list_review_reports(cycle_id),
-                        "findings": self._store().list_review_findings(cycle_id),
-                    },
+                    get_independent_review_cycle_view(self._store(), cycle_id),
                 )
             except KeyError as exc:
                 self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})

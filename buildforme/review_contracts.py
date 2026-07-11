@@ -16,6 +16,7 @@ from buildforme.storage import utc_now_iso
 REVIEW_CYCLE_SCHEMA = "buildforme.review_cycle.v1"
 REVIEW_ASSIGNMENT_SCHEMA = "buildforme.review_assignment.v1"
 REVIEW_REPORT_SCHEMA = "buildforme.review_report.v1"
+REVIEW_FINDING_SCHEMA = "buildforme.review_finding.v1"
 REVIEW_AGGREGATE_SCHEMA = "buildforme.review_aggregate.v1"
 
 SEVERITIES = ("critical", "high", "medium", "low", "info")
@@ -93,14 +94,25 @@ def build_review_cycle_record(
         reviewers,
         implementer_provider_id=str(run.get("provider_id") or ""),
     )
-    policy_record = {
-        "required_reviewer_count": len(normalized),
-        "min_distinct_providers": len(normalized),
+    requested_policy = dict(policy or {})
+    immutable_policy = {
         "blind_review": True,
         "implementer_provider_forbidden": True,
         "critical_high_always_blocking": True,
         "founder_override_blocking_findings": False,
-        **(policy or {}),
+    }
+    for key, required_value in immutable_policy.items():
+        if key in requested_policy and requested_policy[key] != required_value:
+            raise ValueError(f"review policy cannot weaken {key}")
+    policy_record = {
+        **requested_policy,
+        "required_reviewer_count": int(
+            requested_policy.get("required_reviewer_count") or len(normalized)
+        ),
+        "min_distinct_providers": int(
+            requested_policy.get("min_distinct_providers") or len(normalized)
+        ),
+        **immutable_policy,
     }
     required = int(policy_record.get("required_reviewer_count") or len(normalized))
     distinct = int(policy_record.get("min_distinct_providers") or len(normalized))
@@ -192,6 +204,26 @@ def validate_cycle_record(cycle: dict[str, Any]) -> list[str]:
     except ValueError as exc:
         problems.append(str(exc))
         normalized = []
+    policy = cycle.get("policy") if isinstance(cycle.get("policy"), dict) else {}
+    required = int(cycle.get("required_reviewer_count") or 0)
+    distinct = int(cycle.get("min_distinct_providers") or 0)
+    if required != int(policy.get("required_reviewer_count") or 0):
+        problems.append("review cycle required_reviewer_count does not match policy")
+    if distinct != int(policy.get("min_distinct_providers") or 0):
+        problems.append("review cycle min_distinct_providers does not match policy")
+    immutable_policy = {
+        "blind_review": True,
+        "implementer_provider_forbidden": True,
+        "critical_high_always_blocking": True,
+        "founder_override_blocking_findings": False,
+    }
+    for key, required_value in immutable_policy.items():
+        if policy.get(key) != required_value:
+            problems.append(f"review cycle policy weakened: {key}")
+    if required < 2 or required > len(normalized):
+        problems.append("review cycle required reviewer count invalid")
+    if distinct < 2 or distinct > required:
+        problems.append("review cycle distinct provider count invalid")
     authority = {
         "run_id": cycle.get("run_id"),
         "evidence_id": cycle.get("evidence_id"),
@@ -201,7 +233,7 @@ def validate_cycle_record(cycle: dict[str, Any]) -> list[str]:
         "constitution_lease_id": cycle.get("constitution_lease_id"),
         "implementer_provider_id": cycle.get("implementer_provider_id"),
         "reviewers": normalized,
-        "policy": cycle.get("policy") if isinstance(cycle.get("policy"), dict) else {},
+        "policy": policy,
     }
     expected = _fingerprint(REVIEW_CYCLE_SCHEMA, authority)
     if cycle.get("cycle_fingerprint") != expected:
@@ -228,6 +260,10 @@ def validate_assignment_record(assignment: dict[str, Any], cycle: dict[str, Any]
         problems.append("review assignment cycle mismatch")
     if assignment.get("run_id") != cycle.get("run_id"):
         problems.append("review assignment run mismatch")
+    if assignment.get("evidence_id") != cycle.get("evidence_id"):
+        problems.append("review assignment evidence id mismatch")
+    if assignment.get("evidence_fingerprint") != cycle.get("evidence_fingerprint"):
+        problems.append("review assignment evidence fingerprint mismatch")
     if assignment.get("provider_id") == cycle.get("implementer_provider_id"):
         problems.append("implementer provider cannot hold reviewer assignment")
     authority = {
@@ -286,9 +322,73 @@ def _build_finding(
     }
     return {
         **material,
-        "finding_fingerprint": _fingerprint("buildforme.review_finding.v1", material),
+        "finding_fingerprint": _fingerprint(REVIEW_FINDING_SCHEMA, material),
         "immutable": True,
     }
+
+
+def validate_finding_for_storage(
+    finding: dict[str, Any],
+    *,
+    report: dict[str, Any],
+    cycle: dict[str, Any],
+    assignment: dict[str, Any],
+) -> list[str]:
+    problems: list[str] = []
+    if not isinstance(finding, dict):
+        return ["review finding must be an object"]
+    for field in (
+        "finding_id",
+        "cycle_id",
+        "assignment_id",
+        "reviewer_id",
+        "provider_id",
+        "severity",
+        "category",
+        "summary",
+        "finding_fingerprint",
+    ):
+        if finding.get(field) in (None, ""):
+            problems.append(f"review finding missing {field}")
+    if finding.get("cycle_id") != cycle.get("cycle_id"):
+        problems.append("review finding cycle mismatch")
+    if finding.get("assignment_id") != assignment.get("assignment_id"):
+        problems.append("review finding assignment mismatch")
+    if finding.get("reviewer_id") != assignment.get("reviewer_id"):
+        problems.append("review finding reviewer mismatch")
+    if finding.get("provider_id") != assignment.get("provider_id"):
+        problems.append("review finding provider mismatch")
+    severity = str(finding.get("severity") or "")
+    if severity not in SEVERITIES:
+        problems.append("review finding severity invalid")
+    if severity in {"critical", "high"} and not finding.get("blocking"):
+        problems.append("critical/high review finding must be blocking")
+    if severity in {"critical", "high"} and not str(finding.get("evidence") or "").strip():
+        problems.append("critical/high review finding requires evidence")
+    material = {
+        key: finding.get(key)
+        for key in (
+            "finding_id",
+            "cycle_id",
+            "assignment_id",
+            "reviewer_id",
+            "provider_id",
+            "severity",
+            "category",
+            "blocking",
+            "summary",
+            "evidence",
+            "recommendation",
+            "file",
+            "line",
+            "law_ids",
+        )
+    }
+    if finding.get("finding_fingerprint") != _fingerprint(REVIEW_FINDING_SCHEMA, material):
+        problems.append("review finding fingerprint mismatch")
+    if finding not in (report.get("findings") or []):
+        problems.append("review finding is not bound into report")
+    return problems
 
 
 def build_review_report_record(
@@ -382,10 +482,25 @@ def validate_report_for_storage(
         problems.append("review report reviewer mismatch")
     if report.get("provider_id") != assignment.get("provider_id"):
         problems.append("review report provider mismatch")
+    if report.get("role") != assignment.get("role"):
+        problems.append("review report role mismatch")
+    if report.get("blind_review") is not True:
+        problems.append("review report must remain blind")
+    if report.get("provider_may_self_accept") is not False:
+        problems.append("review report cannot grant provider self-acceptance")
     if report.get("reviewed_evidence_id") != cycle.get("evidence_id"):
         problems.append("review report evidence id mismatch")
     if report.get("reviewed_evidence_fingerprint") != cycle.get("evidence_fingerprint"):
         problems.append("review report evidence fingerprint mismatch")
+    findings = report.get("findings") if isinstance(report.get("findings"), list) else []
+    blocking = [item for item in findings if isinstance(item, dict) and item.get("blocking")]
+    verdict = str(report.get("verdict") or "")
+    if verdict == "pass" and blocking:
+        problems.append("pass review report contains blocking findings")
+    if verdict in {"changes_required", "block"} and not findings:
+        problems.append(f"{verdict} review report requires findings")
+    if verdict == "block" and not blocking:
+        problems.append("block review report requires a blocking finding")
     material = {
         key: report.get(key)
         for key in (
@@ -422,6 +537,14 @@ def aggregate_review_reports(
     submitted = [a for a in assignments if a.get("status") == "submitted"]
     if len(submitted) < required or len(reports) < required:
         raise ValueError("review quorum not met")
+    submitted_assignment_ids = {
+        str(a.get("assignment_id") or "") for a in submitted
+    }
+    report_assignment_ids = [str(r.get("assignment_id") or "") for r in reports]
+    if len(report_assignment_ids) != len(set(report_assignment_ids)):
+        raise ValueError("duplicate review report assignment")
+    if not set(report_assignment_ids).issubset(submitted_assignment_ids):
+        raise ValueError("review report does not belong to a submitted assignment")
     provider_ids = sorted({str(r.get("provider_id") or "") for r in reports})
     if len(provider_ids) < int(cycle.get("min_distinct_providers") or required):
         raise ValueError("distinct provider quorum not met")

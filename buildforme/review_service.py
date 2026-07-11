@@ -151,3 +151,33 @@ def require_clear_independent_review(store: LocalStore, run: dict[str, Any]) -> 
     if not aggregate.get("quorum_met"):
         raise ValueError("Stage 7 review quorum is not met")
     return cycle
+
+
+
+def get_independent_review_cycle_view(store: LocalStore, cycle_id: str) -> dict[str, Any]:
+    """Return a blind-safe cycle view.
+
+    Submitted report/finding content is withheld until the cycle is finalized so a
+    pending reviewer cannot anchor on another reviewer's conclusions.
+    """
+    cycle = store.get_review_cycle(validate_safe_id(cycle_id, field="cycle_id"))
+    assignments = store.list_review_assignments(cycle_id)
+    assignment_view = [
+        {
+            "assignment_id": item.get("assignment_id"),
+            "reviewer_id": item.get("reviewer_id"),
+            "provider_id": item.get("provider_id"),
+            "role": item.get("role"),
+            "status": item.get("status"),
+            "submitted_at": item.get("submitted_at"),
+        }
+        for item in assignments
+    ]
+    finalized = str(cycle.get("status") or "") in {"clear", "repair_required", "blocked"}
+    return {
+        "cycle": cycle,
+        "assignments": assignment_view,
+        "reports": store.list_review_reports(cycle_id) if finalized else [],
+        "findings": store.list_review_findings(cycle_id) if finalized else [],
+        "blind_material_withheld": not finalized,
+    }

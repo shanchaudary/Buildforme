@@ -1,5 +1,6 @@
 name: Stage 6 Final Blocker Closure
 
+# Gate revision 3: retrigger after narrowing the mutation patch anchor.
 on:
   push:
     branches:

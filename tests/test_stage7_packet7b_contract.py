@@ -35,6 +35,28 @@ class Stage7Packet7BContractTests(unittest.TestCase):
                         forbidden.append((str(path), node.lineno))
         self.assertEqual(forbidden, [])
 
+    def test_packet7b_final_tree_has_no_gate_or_validation_artifacts(self):
+        forbidden_names = {
+            "stage7_packet7b_validation.txt",
+            "stage7_packet7b_redteam_validation.txt",
+            "stage7_cleanup_diagnostic.txt",
+            "stage7_cleanup_fix_validation.txt",
+        }
+        found = sorted(
+            str(path)
+            for path in Path(".").rglob("*")
+            if path.is_file()
+            and (
+                path.name in forbidden_names
+                or path.name.startswith("apply_stage7_packet7b")
+                or path.name.startswith("run_stage7_packet7b")
+                or path.name.startswith("fix_stage7_packet7b")
+                or path.name.startswith("run_stage7_cleanup")
+                or path.name.startswith("fix_stage7_cleanup")
+            )
+        )
+        self.assertEqual(found, [])
+
 
 if __name__ == "__main__":
     unittest.main()

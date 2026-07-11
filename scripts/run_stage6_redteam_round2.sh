@@ -3,9 +3,17 @@ set +e
 report=stage6_redteam_round2_validation.txt
 : > "$report"
 
+echo '== correct red-team patcher ==' | tee -a "$report"
+python scripts/fix_stage6_redteam_round2_patcher.py 2>&1 | tee -a "$report"
+correction_status=${PIPESTATUS[0]}
+
 echo '== apply red-team round 2 ==' | tee -a "$report"
-python scripts/apply_stage6_redteam_round2.py 2>&1 | tee -a "$report"
-apply_status=${PIPESTATUS[0]}
+if [ "$correction_status" -eq 0 ]; then
+  python scripts/apply_stage6_redteam_round2.py 2>&1 | tee -a "$report"
+  apply_status=${PIPESTATUS[0]}
+else
+  apply_status=1
+fi
 syntax_status=99
 focused_status=99
 full_status=99
@@ -65,7 +73,7 @@ PY
   constitution_status=${PIPESTATUS[0]}
 fi
 
-echo "statuses apply=$apply_status syntax=$syntax_status focused=$focused_status full=$full_status policy=$policy_status constitution=$constitution_status" | tee -a "$report"
+echo "statuses correction=$correction_status apply=$apply_status syntax=$syntax_status focused=$focused_status full=$full_status policy=$policy_status constitution=$constitution_status" | tee -a "$report"
 
 git config user.name "Buildforme Governance Bot"
 git config user.email "actions@users.noreply.github.com"
@@ -101,9 +109,11 @@ jobs:
 YAML
 }
 
-if [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status" -eq 0 ] && [ "$full_status" -eq 0 ] && [ "$policy_status" -eq 0 ] && [ "$constitution_status" -eq 0 ]; then
+if [ "$correction_status" -eq 0 ] && [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status" -eq 0 ] && [ "$full_status" -eq 0 ] && [ "$policy_status" -eq 0 ] && [ "$constitution_status" -eq 0 ]; then
   rm -f "$report" stage6_redteam_round2_validation.txt
-  rm -f scripts/apply_stage6_redteam_round2.py scripts/run_stage6_redteam_round2.sh
+  rm -f scripts/apply_stage6_redteam_round2.py
+  rm -f scripts/fix_stage6_redteam_round2_patcher.py
+  rm -f scripts/run_stage6_redteam_round2.sh
   restore_original_ci
   git diff --check
   git add -A -- \
@@ -120,6 +130,7 @@ if [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status
     tests/test_stage6_redteam_round2.py \
     docs/STAGE_6_MULTI_PROVIDER_EXECUTION.md \
     scripts/apply_stage6_redteam_round2.py \
+    scripts/fix_stage6_redteam_round2_patcher.py \
     scripts/run_stage6_redteam_round2.sh \
     stage6_redteam_round2_validation.txt
   git diff --cached --check

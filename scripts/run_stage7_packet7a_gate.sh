@@ -4,9 +4,17 @@ set +e
 report=stage7_packet7a_validation.txt
 : > "$report"
 
+echo '== correct Stage 7 Packet 7A patcher ==' | tee -a "$report"
+python scripts/fix_stage7_packet7a_patcher.py 2>&1 | tee -a "$report"
+correction_status=${PIPESTATUS[0]}
+
 echo '== apply Stage 7 Packet 7A ==' | tee -a "$report"
-python scripts/apply_stage7_packet7a.py 2>&1 | tee -a "$report"
-apply_status=${PIPESTATUS[0]}
+if [ "$correction_status" -eq 0 ]; then
+  python scripts/apply_stage7_packet7a.py 2>&1 | tee -a "$report"
+  apply_status=${PIPESTATUS[0]}
+else
+  apply_status=1
+fi
 syntax_status=99
 focused_status=99
 full_status=99
@@ -24,7 +32,8 @@ if [ "$apply_status" -eq 0 ]; then
     buildforme/review_gate.py \
     buildforme/execution_service.py \
     buildforme/server.py \
-    tests/test_stage7_review_authority.py 2>&1 | tee -a "$report"
+    tests/test_stage7_review_authority.py \
+    tests/test_stage6_execution.py 2>&1 | tee -a "$report"
   syntax_status=${PIPESTATUS[0]}
   if [ "$syntax_status" -eq 0 ]; then
     git diff --check 2>&1 | tee -a "$report"
@@ -38,7 +47,9 @@ if [ "$apply_status" -eq 0 ]; then
   mutation_status=${PIPESTATUS[0]}
   python -m unittest discover -s tests -p 'test_stage6_final_blockers.py' -v 2>&1 | tee -a "$report"
   stage6_status=${PIPESTATUS[0]}
-  if [ "$stage7_status" -eq 0 ] && [ "$mutation_status" -eq 0 ] && [ "$stage6_status" -eq 0 ]; then
+  python -m unittest discover -s tests -p 'test_stage6_execution.py' -v 2>&1 | tee -a "$report"
+  stage6_execution_status=${PIPESTATUS[0]}
+  if [ "$stage7_status" -eq 0 ] && [ "$mutation_status" -eq 0 ] && [ "$stage6_status" -eq 0 ] && [ "$stage6_execution_status" -eq 0 ]; then
     focused_status=0
   else
     focused_status=1
@@ -63,7 +74,7 @@ PY
   constitution_status=${PIPESTATUS[0]}
 fi
 
-echo "statuses apply=$apply_status syntax=$syntax_status focused=$focused_status full=$full_status policy=$policy_status constitution=$constitution_status" | tee -a "$report"
+echo "statuses correction=$correction_status apply=$apply_status syntax=$syntax_status focused=$focused_status full=$full_status policy=$policy_status constitution=$constitution_status" | tee -a "$report"
 
 git config user.name "Buildforme Governance Bot"
 git config user.email "actions@users.noreply.github.com"
@@ -99,9 +110,9 @@ jobs:
 YAML
 }
 
-if [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status" -eq 0 ] && [ "$full_status" -eq 0 ] && [ "$policy_status" -eq 0 ] && [ "$constitution_status" -eq 0 ]; then
+if [ "$correction_status" -eq 0 ] && [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status" -eq 0 ] && [ "$full_status" -eq 0 ] && [ "$policy_status" -eq 0 ] && [ "$constitution_status" -eq 0 ]; then
   rm -f "$report"
-  rm -f scripts/apply_stage7_packet7a.py scripts/run_stage7_packet7a_gate.sh
+  rm -f scripts/apply_stage7_packet7a.py scripts/fix_stage7_packet7a_patcher.py scripts/run_stage7_packet7a_gate.sh
   restore_original_ci
   git diff --check
   git add -A -- \
@@ -115,8 +126,10 @@ if [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status
     buildforme/execution_service.py \
     buildforme/server.py \
     tests/test_stage7_review_authority.py \
+    tests/test_stage6_execution.py \
     docs/STAGE_7_INDEPENDENT_MULTI_AGENT_REVIEW.md \
     scripts/apply_stage7_packet7a.py \
+    scripts/fix_stage7_packet7a_patcher.py \
     scripts/run_stage7_packet7a_gate.sh
   git diff --cached --check
   unexpected=$(git status --porcelain | grep '^??' || true)

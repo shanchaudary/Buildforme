@@ -95,7 +95,7 @@ YAML
 }
 
 if [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status" -eq 0 ] && [ "$full_status" -eq 0 ] && [ "$policy_status" -eq 0 ] && [ "$constitution_status" -eq 0 ]; then
-  rm -f "$report" stage6_windows_suspended_validation.txt
+  rm -f "$report"
   rm -f scripts/apply_stage6_windows_suspended_launch.py
   rm -f scripts/run_stage6_windows_suspended_gate.sh
   restore_original_ci
@@ -107,8 +107,7 @@ if [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status
     tests/test_stage6_windows_suspended_launch.py \
     docs/STAGE_6_MULTI_PROVIDER_EXECUTION.md \
     scripts/apply_stage6_windows_suspended_launch.py \
-    scripts/run_stage6_windows_suspended_gate.sh \
-    stage6_windows_suspended_validation.txt
+    scripts/run_stage6_windows_suspended_gate.sh
   git diff --cached --check
   unexpected=$(git status --porcelain | grep '^??' || true)
   if [ -n "$unexpected" ]; then
@@ -121,12 +120,15 @@ if [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status
   exit 0
 fi
 
+echo '== validation failure report tail ==' >&2
+tail -n 220 "$report" >&2
 cp "$report" /tmp/stage6_windows_suspended_validation.txt
 git restore .
 git clean -fd buildforme tests docs scripts
 restore_original_ci
 cp /tmp/stage6_windows_suspended_validation.txt "$report"
-git add .github/workflows/ci.yml "$report"
+git add .github/workflows/ci.yml
+git add -f "$report"
 git commit -m "Record Stage 6 Windows containment validation failure"
 git push origin HEAD:stage-6-multi-provider-supervised-execution
 exit 1

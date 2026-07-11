@@ -16,13 +16,21 @@ else
   apply_status=1
 fi
 
+echo '== align atomic migration regression ==' | tee -a "$report"
+if [ "$apply_status" -eq 0 ]; then
+  python scripts/fix_stage6_atomic_migration_regression.py 2>&1 | tee -a "$report"
+  regression_status=${PIPESTATUS[0]}
+else
+  regression_status=1
+fi
+
 syntax_status=99
 focused_status=99
 full_status=99
 policy_status=99
 constitution_status=99
 
-if [ "$apply_status" -eq 0 ]; then
+if [ "$apply_status" -eq 0 ] && [ "$regression_status" -eq 0 ]; then
   echo '== syntax and diff ==' | tee -a "$report"
   python -m py_compile \
     buildforme/process_termination.py \
@@ -35,7 +43,8 @@ if [ "$apply_status" -eq 0 ]; then
     buildforme/provider_discovery.py \
     buildforme/provider_compatibility.py \
     scripts/stage6_real_provider_smoke.py \
-    tests/test_stage6_final_blockers.py 2>&1 | tee -a "$report"
+    tests/test_stage6_final_blockers.py \
+    tests/test_placeholder_runs.py 2>&1 | tee -a "$report"
   syntax_status=${PIPESTATUS[0]}
   if [ "$syntax_status" -eq 0 ]; then
     git diff --check 2>&1 | tee -a "$report"
@@ -49,7 +58,9 @@ if [ "$apply_status" -eq 0 ]; then
   mutation_status=${PIPESTATUS[0]}
   python -m unittest discover -s tests -p 'test_stage6_execution.py' -v 2>&1 | tee -a "$report"
   execution_status=${PIPESTATUS[0]}
-  if [ "$blockers_status" -eq 0 ] && [ "$mutation_status" -eq 0 ] && [ "$execution_status" -eq 0 ]; then
+  python -m unittest discover -s tests -p 'test_placeholder_runs.py' -v 2>&1 | tee -a "$report"
+  migration_status=${PIPESTATUS[0]}
+  if [ "$blockers_status" -eq 0 ] && [ "$mutation_status" -eq 0 ] && [ "$execution_status" -eq 0 ] && [ "$migration_status" -eq 0 ]; then
     focused_status=0
   else
     focused_status=1
@@ -74,7 +85,7 @@ PY
   constitution_status=${PIPESTATUS[0]}
 fi
 
-echo "statuses correction=$correction_status apply=$apply_status syntax=$syntax_status focused=$focused_status full=$full_status policy=$policy_status constitution=$constitution_status" | tee -a "$report"
+echo "statuses correction=$correction_status apply=$apply_status regression=$regression_status syntax=$syntax_status focused=$focused_status full=$full_status policy=$policy_status constitution=$constitution_status" | tee -a "$report"
 
 git config user.name "Buildforme Governance Bot"
 git config user.email "actions@users.noreply.github.com"
@@ -110,10 +121,11 @@ jobs:
 YAML
 }
 
-if [ "$correction_status" -eq 0 ] && [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status" -eq 0 ] && [ "$full_status" -eq 0 ] && [ "$policy_status" -eq 0 ] && [ "$constitution_status" -eq 0 ]; then
+if [ "$correction_status" -eq 0 ] && [ "$apply_status" -eq 0 ] && [ "$regression_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status" -eq 0 ] && [ "$full_status" -eq 0 ] && [ "$policy_status" -eq 0 ] && [ "$constitution_status" -eq 0 ]; then
   rm -f "$report"
   rm -f scripts/apply_stage6_final_blockers.py
   rm -f scripts/fix_stage6_final_blocker_patcher.py
+  rm -f scripts/fix_stage6_atomic_migration_regression.py
   rm -f scripts/run_stage6_final_gate.sh
   rm -f .github/workflows/stage6-final-blockers.yml
   restore_original_ci
@@ -132,9 +144,11 @@ if [ "$correction_status" -eq 0 ] && [ "$apply_status" -eq 0 ] && [ "$syntax_sta
     buildforme/provider_compatibility.py \
     scripts/stage6_real_provider_smoke.py \
     tests/test_stage6_final_blockers.py \
+    tests/test_placeholder_runs.py \
     docs/STAGE_6_MULTI_PROVIDER_EXECUTION.md \
     scripts/apply_stage6_final_blockers.py \
     scripts/fix_stage6_final_blocker_patcher.py \
+    scripts/fix_stage6_atomic_migration_regression.py \
     scripts/run_stage6_final_gate.sh \
     stage6_final_blocker_validation.txt
   git diff --cached --check

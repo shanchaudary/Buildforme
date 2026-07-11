@@ -47,8 +47,20 @@ jobs:
           node --check public/app.js
           git diff --check
       - name: Run Packet 7E focused and red-team tests
+        run: python -m unittest discover -s tests -p 'test_stage7_packet7e*.py' -v
+      - name: Preserve Packet 7E red-team diagnostic
+        if: failure()
         run: |
-          python -m unittest discover -s tests -p 'test_stage7_packet7e*.py' -v
+          if [ ! -f stage7_packet7e_redteam_diagnostic.txt ]; then
+            python -m unittest discover -s tests -p 'test_stage7_packet7e*.py' -v > stage7_packet7e_redteam_diagnostic.txt 2>&1 || true
+            git restore .
+            git clean -fd buildforme tests docs public scripts
+            git config user.name "Buildforme Governance Bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add -f stage7_packet7e_redteam_diagnostic.txt
+            git commit -m "Record Packet 7E red-team validation failure"
+            git push origin HEAD:stage-7-independent-multi-agent-review-loop
+          fi
       - name: Run Packet 7D and review regressions
         run: |
           python -m unittest discover -s tests -p 'test_stage7_packet7d*.py' -v

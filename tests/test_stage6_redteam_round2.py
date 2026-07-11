@@ -181,9 +181,9 @@ class AuthProbeAuthorityTests(unittest.TestCase):
         self.assertTrue(result["positive_status_marker"])
         self.assertFalse(result["negative_status_marker"])
 
-    def test_unverified_claude_status_contract_fails_closed(self):
+    def test_claude_auth_probe_fails_closed_on_non_claude_executable(self):
         result = probe_authentication("claude", sys.executable)
-        self.assertEqual(result["status"], "unknown")
+        self.assertEqual(result["status"], "failed")
         self.assertFalse(result["probe_verified"])
 
 

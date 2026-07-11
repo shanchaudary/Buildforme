@@ -77,7 +77,7 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
         )
         lease = engine.issue_run_lease(
             run_id="run-stage7b",
-            provider_id="claude",
+            provider_id="glm",
             packet_id=packet["id"],
             actor="test",
         )
@@ -85,7 +85,7 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
         run = {
             "id": "run-stage7b",
             "project_id": "buildforme",
-            "provider_id": "claude",
+            "provider_id": "glm",
             "repository": "shanchaudary/Buildforme",
             "repository_local_path": str(self.root),
             "baseline_ref": "HEAD",
@@ -130,7 +130,7 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
                 "branch": self.run["execution_branch"],
             },
             diff={"manifest": manifest, "patch_fingerprint": patch_ev["patch_fingerprint"]},
-            provider_health={"version": "test", "executable": "claude"},
+            provider_health={"version": "test", "executable": "glm"},
             verification={"passed": True, "blocking_reasons": [], "checks": []},
             constitution_result={"passed": True},
             approved_baseline_sha=self.baseline,
@@ -140,29 +140,33 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
             manifest_fingerprint=manifest["manifest_fingerprint"],
         )
         self.evidence = self.store.save_run_evidence(evidence)
-        self.store.set_provider_constitution_ack(
-            "codex",
-            {
-                "constitution_supported": True,
-                "constitution_acknowledged": True,
-                "constitution_version": engine.version(),
-                "constitution_hash": engine.content_hash(),
-                "constitution_last_refresh": "now",
-                "constitution_acknowledged_at": "now",
-                "constitution_ack_actor": "test",
-            },
-        )
+        for provider_id in ("codex", "claude"):
+            self.store.set_provider_constitution_ack(
+                provider_id,
+                {
+                    "constitution_supported": True,
+                    "constitution_acknowledged": True,
+                    "constitution_version": engine.version(),
+                    "constitution_hash": engine.content_hash(),
+                    "constitution_last_refresh": "now",
+                    "constitution_acknowledged_at": "now",
+                    "constitution_ack_actor": "test",
+                },
+            )
         result = create_independent_review_cycle(
             self.store,
             self.run["id"],
             reviewers=[
                 {"reviewer_id": "codex-reviewer", "provider_id": "codex", "role": "correctness"},
-                {"reviewer_id": "grok-reviewer", "provider_id": "grok", "role": "security"},
+                {"reviewer_id": "claude-reviewer", "provider_id": "claude", "role": "security"},
             ],
             actor="shan",
         )
         self.cycle = result["cycle"]
         self.assignment = next(a for a in result["assignments"] if a["provider_id"] == "codex")
+        self.claude_assignment = next(
+            a for a in result["assignments"] if a["provider_id"] == "claude"
+        )
 
     def _git(self, *args):
         subprocess.run(["git", *args], cwd=self.root, check=True, capture_output=True)
@@ -199,6 +203,38 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
             "auth": {"status": "ready", "probe_verified": True},
         }
 
+    def _fake_claude(self, *, payload=None, mutate=False):
+        path = Path(self.temp.name) / "claude"
+        if payload is None:
+            payload = {"verdict": "pass", "summary": "clear", "findings": []}
+        wrapper = {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "structured_output": payload,
+        }
+        path.write_text(
+            "#!/usr/bin/env python3\n"
+            "import pathlib, sys\n"
+            "_ = sys.stdin.read()\n"
+            + ("pathlib.Path('claude-wrote.txt').write_text('bad')\n" if mutate else "")
+            + f"print({json.dumps(wrapper)!r})\n",
+            encoding="utf-8",
+        )
+        path.chmod(path.stat().st_mode | stat.S_IXUSR)
+        return str(path)
+
+    def _claude_health(self, executable):
+        return {
+            "provider_id": "claude",
+            "live_ready": True,
+            "available": True,
+            "executable": executable,
+            "version": "2.1.205",
+            "unsupported_reasons": [],
+            "auth": {"status": "ready", "probe_verified": True},
+        }
+
     def test_schema_v5(self):
         self.assertEqual(SCHEMA_VERSION, 5)
         self.assertEqual(self.store.s6.db.pragmas()["schema_version"], 5)
@@ -225,9 +261,13 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
         self.assertTrue(command["read_only"])
         self.assertIn("read-only", command["argv"])
         self.assertNotIn("workspace-write", command["argv"])
-        self.assertEqual(set(REVIEW_COMMAND_CONTRACTS), {"codex"})
+        self.assertEqual(set(REVIEW_COMMAND_CONTRACTS), {"codex", "claude"})
+        claude = build_review_command("claude", "/tmp/claude")
+        self.assertIn("plan", claude["argv"])
+        self.assertIn("Read,Grep,Glob", claude["argv"])
+        self.assertNotIn("workspace-write", claude["argv"])
         with self.assertRaisesRegex(ValueError, "no approved"):
-            build_review_command("claude", "/tmp/claude")
+            build_review_command("grok", "/tmp/grok")
 
     def test_strict_parser_rejects_prose_fences_and_ambiguity(self):
         with self.assertRaisesRegex(ValueError, "exactly one"):
@@ -259,6 +299,42 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
         self.assertTrue(attempts[0]["post_snapshot_proven"])
         self.assertTrue(attempts[0]["auth_probe_verified"])
         self.assertEqual(len(self.store.list_review_reports(self.cycle["cycle_id"])), 1)
+
+    @unittest.skipIf(os.name == "nt", "POSIX executable fixture")
+    def test_two_distinct_provider_reviewers_reach_clear_quorum(self):
+        codex_executable = self._fake_codex()
+        claude_executable = self._fake_claude()
+
+        def health(provider_id, _provider, force_compat=True):
+            del force_compat
+            if provider_id == "codex":
+                return self._health(codex_executable)
+            if provider_id == "claude":
+                return self._claude_health(claude_executable)
+            raise AssertionError(provider_id)
+
+        with patch(
+            "buildforme.review_execution.health_check_provider",
+            side_effect=health,
+        ):
+            execute_independent_review_assignment(
+                self.store, self.cycle["cycle_id"], self.assignment["assignment_id"]
+            )
+            execute_independent_review_assignment(
+                self.store,
+                self.cycle["cycle_id"],
+                self.claude_assignment["assignment_id"],
+            )
+        from buildforme.review_service import aggregate_independent_review_cycle
+
+        finalized = aggregate_independent_review_cycle(
+            self.store, self.cycle["cycle_id"]
+        )
+        self.assertEqual(finalized["cycle"]["status"], "clear")
+        self.assertEqual(
+            set(finalized["aggregate"]["provider_ids"]), {"codex", "claude"}
+        )
+        self.assertEqual(finalized["aggregate"]["distinct_provider_count"], 2)
 
     @unittest.skipIf(os.name == "nt", "POSIX executable fixture")
     def test_mutating_reviewer_fails_closed_without_report(self):

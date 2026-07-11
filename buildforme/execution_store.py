@@ -2412,10 +2412,12 @@ class Stage6Store:
                 "execution_claim_actor",
             ):
                 assignment.pop(key, None)
-            conn.execute(
-                "UPDATE review_assignments SET status='submitted', payload_json=?, submitted_at=? WHERE id=? AND status='pending'",
+            assignment_cur = conn.execute(
+                "UPDATE review_assignments SET status='submitted', payload_json=?, submitted_at=? WHERE id=? AND status='executing'",
                 (dumps(assignment), now, assignment_id),
             )
+            if assignment_cur.rowcount != 1:
+                raise ValueError("review assignment submission race rejected")
             submitted = int(
                 conn.execute(
                     "SELECT COUNT(*) FROM review_assignments WHERE cycle_id=? AND status='submitted'",

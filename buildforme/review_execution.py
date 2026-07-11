@@ -57,6 +57,50 @@ REVIEW_FAILURE_CODES = frozenset(
     }
 )
 
+CLAUDE_REVIEW_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "verdict": {"type": "string", "enum": ["pass", "changes_required", "block"]},
+        "summary": {"type": "string"},
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "severity": {
+                        "type": "string",
+                        "enum": ["critical", "high", "medium", "low", "info"],
+                    },
+                    "category": {"type": "string"},
+                    "blocking": {"type": "boolean"},
+                    "summary": {"type": "string"},
+                    "evidence": {"type": "string"},
+                    "recommendation": {"type": "string"},
+                    "file": {"type": ["string", "null"]},
+                    "line": {"type": ["integer", "null"]},
+                    "law_ids": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": [
+                    "severity",
+                    "category",
+                    "blocking",
+                    "summary",
+                    "evidence",
+                    "recommendation",
+                ],
+            },
+        },
+    },
+    "required": ["verdict", "summary", "findings"],
+}
+CLAUDE_REVIEW_SCHEMA_JSON = json.dumps(
+    CLAUDE_REVIEW_JSON_SCHEMA,
+    sort_keys=True,
+    separators=(",", ":"),
+)
+
 # Reviewed code authority only. Provider records and API payloads cannot alter argv.
 REVIEW_COMMAND_CONTRACTS: dict[str, dict[str, Any]] = {
     "codex": {
@@ -75,6 +119,28 @@ REVIEW_COMMAND_CONTRACTS: dict[str, dict[str, Any]] = {
         "prompt_transport": "stdin",
         "output_protocol": "codex_jsonl_agent_message",
         "read_only": True,
+    },
+    "claude": {
+        "contract_id": "claude.print.plan.structured.v1",
+        "argv_tail": [
+            "-p",
+            "--output-format",
+            "json",
+            "--json-schema",
+            CLAUDE_REVIEW_SCHEMA_JSON,
+            "--permission-mode",
+            "plan",
+            "--tools",
+            "Read,Grep,Glob",
+            "--strict-mcp-config",
+            "--safe-mode",
+            "--no-session-persistence",
+            "Read the blind-review packet from stdin, inspect the repository read-only, and return the validated structured review.",
+        ],
+        "prompt_transport": "stdin_with_query",
+        "output_protocol": "claude_json_structured_output",
+        "read_only": True,
+        "minimum_version": "2.1.205",
     },
 }
 
@@ -645,16 +711,32 @@ def parse_strict_review_output(provider_id: str, stdout: str) -> dict[str, Any]:
     text = str(stdout or "")
     if not text.strip():
         raise ValueError("reviewer produced no structured output")
+    provider = str(provider_id or "").strip().lower()
     candidates: list[Any] = []
-    direct = text.strip()
-    try:
-        parsed = json.loads(direct)
-        if isinstance(parsed, dict) and "verdict" in parsed:
-            candidates.append(parsed)
-    except json.JSONDecodeError:
-        pass
 
-    if str(provider_id).lower() == "codex":
+    if provider == "claude":
+        try:
+            wrapper = json.loads(text.strip())
+        except json.JSONDecodeError as exc:
+            raise ValueError("Claude reviewer output is not one JSON result object") from exc
+        if not isinstance(wrapper, dict):
+            raise ValueError("Claude reviewer output wrapper must be an object")
+        if str(wrapper.get("type") or "") != "result":
+            raise ValueError("Claude reviewer output is not a result message")
+        if str(wrapper.get("subtype") or "") != "success" or wrapper.get("is_error") is True:
+            raise ValueError("Claude reviewer structured output did not complete successfully")
+        structured = wrapper.get("structured_output")
+        if not isinstance(structured, dict):
+            raise ValueError("Claude reviewer result missing structured_output")
+        candidates.append(structured)
+    elif provider == "codex":
+        direct = text.strip()
+        try:
+            parsed = json.loads(direct)
+            if isinstance(parsed, dict) and "verdict" in parsed:
+                candidates.append(parsed)
+        except json.JSONDecodeError:
+            pass
         for line in text.splitlines():
             line = line.strip()
             if not line:
@@ -678,6 +760,8 @@ def parse_strict_review_output(provider_id: str, stdout: str) -> dict[str, Any]:
             except json.JSONDecodeError as exc:
                 raise ValueError("reviewer agent_message is not strict JSON") from exc
             candidates.append(candidate)
+    else:
+        raise ValueError(f"unsupported review output protocol for provider {provider}")
 
     unique: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -688,7 +772,9 @@ def parse_strict_review_output(provider_id: str, stdout: str) -> dict[str, Any]:
             seen.add(key)
             unique.append(candidate)
     if len(unique) != 1:
-        raise ValueError(f"review output must contain exactly one unambiguous review object, found {len(unique)}")
+        raise ValueError(
+            f"review output must contain exactly one unambiguous review object, found {len(unique)}"
+        )
     return unique[0]
 
 

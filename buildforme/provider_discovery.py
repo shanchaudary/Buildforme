@@ -39,8 +39,14 @@ AUTH_PROBES: dict[str, dict[str, Any] | None] = {
         "read_only": True,
         "contract_source": "openai/codex codex-rs/cli/src/login.rs run_login_status",
     },
-    # No primary-source, machine-verifiable status contract has been accepted yet.
-    "claude": None,
+    "claude": {
+        "args": ["auth", "status"],
+        "success_exit_codes": [0],
+        "success_patterns": [r'"loggedIn"\s*:\s*true'],
+        "failure_patterns": [r'"loggedIn"\s*:\s*false'],
+        "read_only": True,
+        "contract_source": "Claude Code CLI reference: claude auth status JSON",
+    },
     "grok": None,
     "glm": None,
 }

@@ -95,3 +95,21 @@ providers remain unavailable.
 No merge, deployment, production mutation, reviewer self-acceptance, review shopping,
 or synthetic provider quorum. PR #10 remains draft until all Stage 7 capabilities are
 complete and independently accepted.
+
+
+### Packet 7C Claude reviewer contract
+
+- Claude Code authentication is verified through the official machine-readable
+  `claude auth status` JSON command; environment markers alone are not accepted.
+- Claude Code must be version 2.1.205 or newer and its installed help must expose every
+  required noninteractive, JSON Schema, read-only, tool-restriction, MCP-isolation,
+  safe-mode, and no-session flag.
+- The code-owned review command uses `--permission-mode plan`, limits built-in tools to
+  `Read,Grep,Glob`, enables safe mode and strict MCP isolation, disables session
+  persistence, and requires validated JSON Schema output.
+- Claude output is accepted only from a successful result wrapper containing one
+  `structured_output` object. Plain prose, plain report JSON, error subtypes, and missing
+  structured output fail closed.
+- Codex and Claude can now execute independent blind assignments and satisfy a genuine
+  two-provider storage quorum in the integration path. A founder-controlled live smoke
+  remains required before Packet 7C acceptance.

@@ -169,3 +169,10 @@ canonical Constitution reminder bound to the run lease.
 - `scripts/stage7_real_repair_loop_smoke.py` creates a disposable authorization-bypass fixture with a failing required test, then runs real authenticated Codex and Claude blind reviews. Acceptance requires a persisted blocking finding and a storage-derived `repair_required` aggregate.
 - The harness creates the governed repair packet and exact-seed child through production authority. The repair execution itself is explicitly disclosed as a controlled fixture, receives fresh deterministic evidence, and opens the mandatory repair re-review link.
 - Codex and Claude then perform a second real blind review. Final acceptance requires two execution-bound persisted reports, a clear aggregate, repair-implementer exclusion, unchanged source and repair worktrees during review, and zero merge commits. No synthetic reviewer report is inserted.
+
+
+## Packet 7G — combined final acceptance
+
+- `scripts/stage7_full_acceptance.py` runs both real-reviewer smoke scenarios and parses only their machine-verifiable acceptance lines.
+- Final Stage 7 acceptance requires both child processes to exit zero, both acceptance payloads to pass, both to report `MERGE no`, and the Buildforme source HEAD, branch, and complete working-tree status to remain exactly unchanged.
+- A passing result is printed as `STAGE7_FULL_ACCEPTANCE_JSON`; any failed child check or source mutation returns a nonzero exit code.

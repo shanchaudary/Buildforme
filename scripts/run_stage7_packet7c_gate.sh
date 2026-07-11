@@ -24,6 +24,8 @@ if [ "$apply_status" -eq 0 ]; then
     buildforme/provider_discovery.py \
     buildforme/provider_compatibility.py \
     buildforme/review_execution.py \
+    buildforme/execution_store.py \
+    tests/test_stage6_redteam_round2.py \
     tests/test_stage7_review_execution.py \
     tests/test_stage7_packet7c_claude_reviewer.py \
     tests/test_stage7_packet7c_contract.py 2>&1 | tee -a "$report"
@@ -41,7 +43,9 @@ if [ "$apply_status" -eq 0 ]; then
   p7a_status=${PIPESTATUS[0]}
   python -m unittest discover -s tests -p 'test_provider_compatibility.py' -v 2>&1 | tee -a "$report"
   compat_status=${PIPESTATUS[0]}
-  if [ "$p7c_status" -eq 0 ] && [ "$p7b_status" -eq 0 ] && [ "$p7a_status" -eq 0 ] && [ "$compat_status" -eq 0 ]; then
+  python -m unittest discover -s tests -p 'test_stage6_redteam_round2.py' -v 2>&1 | tee -a "$report"
+  stage6_redteam_status=${PIPESTATUS[0]}
+  if [ "$p7c_status" -eq 0 ] && [ "$p7b_status" -eq 0 ] && [ "$p7a_status" -eq 0 ] && [ "$compat_status" -eq 0 ] && [ "$stage6_redteam_status" -eq 0 ]; then
     focused_status=0
   else
     focused_status=1
@@ -108,6 +112,8 @@ if [ "$fix_status" -eq 0 ] && [ "$apply_status" -eq 0 ] && [ "$syntax_status" -e
     buildforme/provider_discovery.py \
     buildforme/provider_compatibility.py \
     buildforme/review_execution.py \
+    buildforme/execution_store.py \
+    tests/test_stage6_redteam_round2.py \
     tests/test_stage7_review_execution.py \
     tests/test_stage7_packet7c_claude_reviewer.py \
     tests/test_stage7_packet7c_contract.py \

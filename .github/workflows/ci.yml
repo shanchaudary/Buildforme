@@ -60,41 +60,17 @@ jobs:
           if not result.get('passed'):
               raise SystemExit(1)
           PY
-      - name: Restore permanent CI and stage
+      - name: Stage permanent source changes
         run: |
-          cat > .github/workflows/ci.yml <<'YAML'
-          name: Buildforme CI
-
-          on:
-            pull_request:
-            push:
-              branches:
-                - main
-                - founder-control-plane-mvp
-
-          jobs:
-            test:
-              runs-on: ubuntu-latest
-              steps:
-                - name: Checkout
-                  uses: actions/checkout@v4
-                - name: Set up Python
-                  uses: actions/setup-python@v5
-                  with:
-                    python-version: "3.11"
-                - name: Run unit tests
-                  run: python -m unittest discover -s tests -p 'test_*.py'
-                - name: Run policy smoke check
-                  run: python -m buildforme.cli classify data/sample_task.json
-          YAML
           git config user.name "Buildforme Governance Bot"
           git config user.email "actions@users.noreply.github.com"
-          git add -A
+          git add buildforme/review_execution.py tests/test_stage7_packet7b_isolation_contract.py
+          git add -A -- scripts/apply_stage7_constitution_text_binding.py scripts/run_stage7_constitution_text_binding_gate.sh
           git diff --cached --check
           git status --short
       - name: Create permanent commit
         run: git commit -m "Bind reviewer prompts to canonical Constitution text"
-      - name: Push permanent commit
+      - name: Push permanent source commit
         run: git push origin HEAD:stage-7-independent-multi-agent-review-loop
       - name: Verify remote head
         run: |

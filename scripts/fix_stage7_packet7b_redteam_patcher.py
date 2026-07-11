@@ -143,5 +143,11 @@ if text.count(old) != 1:
     raise RuntimeError(f"governed fixture template count={text.count(old)}")
 text = text.replace(old, new, 1)
 
+old = 'text = text[:start] + new_execute + "\\n"\n'
+new = 'text = text[:start] + new_execute.rstrip() + "\\n"\n'
+if text.count(old) != 1:
+    raise RuntimeError(f"review_execution EOF template count={text.count(old)}")
+text = text.replace(old, new, 1)
+
 path.write_text(text, encoding="utf-8")
 print("Packet 7B red-team fixture templates corrected")

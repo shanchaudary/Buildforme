@@ -215,8 +215,8 @@ class Stage7ReviewAuthorityTests(unittest.TestCase):
         )
 
     def test_schema_v5(self):
-        self.assertEqual(SCHEMA_VERSION, 7)
-        self.assertEqual(self.store.s6.db.pragmas()["schema_version"], 7)
+        self.assertEqual(SCHEMA_VERSION, 8)
+        self.assertEqual(self.store.s6.db.pragmas()["schema_version"], 8)
 
     def test_cycle_binds_run_evidence_scope_and_constitution_atomically(self):
         result = self._cycle()

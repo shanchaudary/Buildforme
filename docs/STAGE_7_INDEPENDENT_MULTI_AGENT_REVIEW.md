@@ -140,3 +140,11 @@ canonical Constitution reminder bound to the run lease.
 - The child run keeps the original approved baseline for complete diff/evidence verification while `execution_seed_commit` controls only the initial repair worktree state.
 - Repair packet, seed proof, child run, fresh Constitution lease, scope fingerprint, task-lock transfer, admission record, source-run binding, and audit events commit through one dedicated SQLite transaction.
 - A failed admission deletes a newly created seed ref; duplicate admission replays the one canonical child.
+
+
+## Packet 7D-C — repair execution and mandatory fresh re-review
+
+- Repair children are marked `stage7_review_required` at admission, so founder acceptance fails closed before a fresh clear cycle exists.
+- After approved supervised repair execution reaches `needs_review` with deterministic verification passed, Buildforme opens a new cycle through the existing review-cycle authority.
+- SQLite requires fresh child execution evidence, the exact source reviewer-provider set, and exclusion of the repair implementer.
+- The repair packet, admission, child, fresh evidence, and new cycle are linked append-only; duplicate orchestration replays the same cycle.

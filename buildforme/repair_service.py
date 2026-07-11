@@ -158,6 +158,12 @@ def admit_governed_repair_run(
             "repair_source_cycle_id": repair_packet.get("source_cycle_id"),
             "repair_source_evidence_id": repair_packet.get("source_evidence_id"),
             "requires_independent_review_after_execution": True,
+            "stage7_review_required": True,
+            "stage7_review_cycle_id": None,
+            "independent_review": {
+                "status": "awaiting_fresh_execution_and_review_cycle",
+                "source_cycle_id": repair_packet.get("source_cycle_id"),
+            },
             "dry_run_result": None,
             "result_summary": None,
             "status_history": [],
@@ -187,3 +193,73 @@ def admit_governed_repair_run(
     except Exception:
         delete_repair_seed_ref(seed)
         raise
+
+
+
+def create_repair_review_cycle(
+    store: LocalStore,
+    repair_packet_id: str,
+    *,
+    actor: str = "shan",
+) -> dict[str, Any]:
+    from buildforme.review_service import create_independent_review_cycle
+
+    packet_id = validate_safe_id(repair_packet_id, field="repair_packet_id")
+    actor = validate_actor(actor)
+    try:
+        link = store.get_repair_review_link(packet_id)
+        return {
+            "cycle": store.get_review_cycle(str(link.get("review_cycle_id") or "")),
+            "assignments": store.list_review_assignments(str(link.get("review_cycle_id") or "")),
+            "repair_review_link": link,
+            "replayed": True,
+        }
+    except KeyError:
+        pass
+    packet = store.get_repair_packet(packet_id)
+    admission = store.get_repair_admission(packet_id)
+    child_run_id = str(admission.get("child_run_id") or "")
+    source_cycle_id = str(packet.get("source_cycle_id") or "")
+    source_assignments = store.list_review_assignments(source_cycle_id)
+    reviewers = [
+        {
+            "reviewer_id": str(item.get("reviewer_id") or ""),
+            "provider_id": str(item.get("provider_id") or ""),
+            "role": str(item.get("role") or "general"),
+        }
+        for item in source_assignments
+    ]
+    result = create_independent_review_cycle(
+        store,
+        child_run_id,
+        reviewers=reviewers,
+        actor=actor,
+    )
+    result["repair_review_link"] = store.get_repair_review_link(packet_id)
+    result["replayed"] = False
+    return result
+
+
+def execute_governed_repair_and_open_review(
+    store: LocalStore,
+    repair_packet_id: str,
+    *,
+    actor: str = "shan",
+) -> dict[str, Any]:
+    from buildforme.execution_service import execute_supervised
+
+    packet_id = validate_safe_id(repair_packet_id, field="repair_packet_id")
+    admission = store.get_repair_admission(packet_id)
+    child_run_id = str(admission.get("child_run_id") or "")
+    child = store.get_run(child_run_id)
+    if str(child.get("status") or "") != "approved":
+        raise ValueError("repair child must be approved before supervised repair execution")
+    execution = execute_supervised(store, child_run_id)
+    saved = execution.get("run") if isinstance(execution, dict) else None
+    if not isinstance(saved, dict) or str(saved.get("status") or "") != "needs_review":
+        raise ValueError("repair execution did not reach needs_review")
+    verification = saved.get("verification") if isinstance(saved.get("verification"), dict) else {}
+    if not verification.get("passed"):
+        raise ValueError("repair execution deterministic verification did not pass")
+    review = create_repair_review_cycle(store, packet_id, actor=actor)
+    return {"execution": execution, "review": review, "run": store.get_run(child_run_id)}

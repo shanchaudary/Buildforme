@@ -2140,6 +2140,51 @@ class Stage6Store:
             )
             if str(evidence_constitution.get("hash") or "") != str(run.get("constitution_hash") or ""):
                 raise ValueError("execution evidence Constitution is stale")
+            repair_context = None
+            repair_packet_id = str(run.get("repair_packet_id") or "")
+            if repair_packet_id:
+                if run.get("stage7_review_required") is not True or run.get(
+                    "requires_independent_review_after_execution"
+                ) is not True:
+                    raise ValueError("repair child is missing mandatory independent-review authority")
+                admission_row = conn.execute(
+                    "SELECT repair_admission_id, source_run_id, child_run_id, payload_json FROM repair_admissions WHERE repair_packet_id=?",
+                    (repair_packet_id,),
+                ).fetchone()
+                if not admission_row:
+                    raise ValueError("repair review cycle requires canonical repair admission")
+                if str(admission_row[2] or "") != run_id:
+                    raise ValueError("repair admission child run mismatch")
+                packet_row = conn.execute(
+                    "SELECT payload_json FROM repair_packets WHERE repair_packet_id=?",
+                    (repair_packet_id,),
+                ).fetchone()
+                if not packet_row:
+                    raise ValueError("repair review cycle requires canonical repair packet")
+                repair_packet = loads(packet_row[0], {})
+                if str(repair_packet.get("repair_provider_id") or "") != str(run.get("provider_id") or ""):
+                    raise ValueError("repair review implementer does not match repair packet")
+                if str(evidence_row[0]) == str(repair_packet.get("source_evidence_id") or ""):
+                    raise ValueError("repair review requires fresh child execution evidence")
+                actual_provider_ids = sorted(str(item.get("provider_id") or "") for item in assignment_records)
+                expected_provider_ids = sorted(
+                    str(item) for item in (repair_packet.get("source_reviewer_provider_ids") or [])
+                )
+                if actual_provider_ids != expected_provider_ids:
+                    raise ValueError("repair re-review assignments must exactly reuse source reviewer providers")
+                if str(run.get("provider_id") or "") in actual_provider_ids:
+                    raise ValueError("repair implementer cannot participate in repair re-review")
+                if conn.execute(
+                    "SELECT repair_packet_id FROM repair_review_links WHERE repair_packet_id=? OR child_run_id=? OR fresh_evidence_id=?",
+                    (repair_packet_id, run_id, str(evidence_row[0])),
+                ).fetchone():
+                    raise ValueError("repair re-review link already exists")
+                repair_context = {
+                    "repair_packet": repair_packet,
+                    "repair_admission_id": str(admission_row[0]),
+                    "source_run_id": str(admission_row[1]),
+                    "fresh_evidence_id": str(evidence_row[0]),
+                }
             prior_same_evidence = conn.execute(
                 "SELECT id, status FROM review_cycles WHERE run_id=? AND evidence_id=? ORDER BY created_at DESC LIMIT 1",
                 (run_id, str(cycle_record["evidence_id"])),
@@ -2213,15 +2258,81 @@ class Stage6Store:
             )
             if cur.rowcount != 1:
                 raise ValueError("stale run race while binding review cycle")
+            if repair_context is not None:
+                repair_packet = repair_context["repair_packet"]
+                repair_link = {
+                    "schema": "buildforme.repair_review_link.v1",
+                    "repair_packet_id": repair_packet_id,
+                    "repair_admission_id": repair_context["repair_admission_id"],
+                    "source_run_id": repair_context["source_run_id"],
+                    "child_run_id": run_id,
+                    "fresh_evidence_id": repair_context["fresh_evidence_id"],
+                    "fresh_evidence_fingerprint": actual_evidence_fp,
+                    "review_cycle_id": cycle_id,
+                    "reviewer_provider_ids": sorted(
+                        str(item.get("provider_id") or "") for item in assignment_records
+                    ),
+                    "repair_provider_id": run.get("provider_id"),
+                    "created_at": now,
+                    "immutable": True,
+                }
+                conn.execute(
+                    "INSERT INTO repair_review_links(repair_packet_id, repair_admission_id, source_run_id, child_run_id, fresh_evidence_id, review_cycle_id, payload_json, created_at, immutable) VALUES (?,?,?,?,?,?,?,?,1)",
+                    (
+                        repair_packet_id,
+                        repair_context["repair_admission_id"],
+                        repair_context["source_run_id"],
+                        run_id,
+                        repair_context["fresh_evidence_id"],
+                        cycle_id,
+                        dumps(repair_link),
+                        now,
+                    ),
+                )
+                source_row = conn.execute(
+                    "SELECT row_version, payload_json FROM runs WHERE id=?",
+                    (repair_context["source_run_id"],),
+                ).fetchone()
+                if not source_row:
+                    raise ValueError("repair source run missing while linking re-review")
+                source_run = loads(source_row[1], {})
+                source_run["stage7_repair_status"] = "re_review_collecting"
+                source_run["stage7_repair_review_cycle_id"] = cycle_id
+                source_run["stage7_repair_fresh_evidence_id"] = repair_context["fresh_evidence_id"]
+                source_run["updated_at"] = now
+                source_version = int(source_row[0] or 1) + 1
+                source_run["row_version"] = source_version
+                source_cur = conn.execute(
+                    "UPDATE runs SET payload_json=?, updated_at=?, row_version=? WHERE id=? AND row_version=?",
+                    (
+                        dumps(source_run),
+                        now,
+                        source_version,
+                        repair_context["source_run_id"],
+                        int(source_row[0] or 1),
+                    ),
+                )
+                if source_cur.rowcount != 1:
+                    raise ValueError("stale repair source race while linking re-review")
             conn.execute(
                 "INSERT INTO review_events(id, cycle_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
-                (new_id("rve"), cycle_id, "review_cycle_created", "Blind independent review cycle created", actor, dumps({"assignment_count": len(assignment_records)}), now),
+                (new_id("rve"), cycle_id, "review_cycle_created", "Blind independent review cycle created", actor, dumps({"assignment_count": len(assignment_records), "repair_packet_id": repair_packet_id or None}), now),
             )
             conn.execute(
                 "INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
                 (new_id("re"), run_id, "stage7_review_cycle_created", "Stage 7 independent review required", actor, dumps({"cycle_id": cycle_id}), now),
             )
         return {"cycle": cycle_record, "assignments": assignment_records, "run": run}
+
+    def get_repair_review_link(self, repair_packet_id: str) -> dict[str, Any]:
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM repair_review_links WHERE repair_packet_id=?",
+                (str(repair_packet_id),),
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Repair review link not found: {repair_packet_id}")
+        return loads(row[0], {})
 
     def get_review_cycle(self, cycle_id: str) -> dict[str, Any]:
         with self.db.transaction() as conn:

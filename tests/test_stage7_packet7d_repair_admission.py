@@ -134,8 +134,8 @@ class Stage7RepairAdmissionTests(unittest.TestCase):
         return subprocess.check_output(["git", *args], cwd=self.repo, text=True).strip()
 
     def test_schema_v7(self):
-        self.assertEqual(SCHEMA_VERSION, 7)
-        self.assertEqual(self.store.s6.db.pragmas()["schema_version"], 7)
+        self.assertEqual(SCHEMA_VERSION, 8)
+        self.assertEqual(self.store.s6.db.pragmas()["schema_version"], 8)
 
     def test_exact_dirty_state_seeded_without_mutating_source_branch(self):
         source_head = self._git_out("rev-parse", "HEAD")

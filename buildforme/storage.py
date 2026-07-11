@@ -1403,6 +1403,9 @@ class LocalStore:
     def get_repair_admission(self, repair_packet_id: str) -> dict[str, Any]:
         return self.s6.get_repair_admission(repair_packet_id)
 
+    def get_repair_review_link(self, repair_packet_id: str) -> dict[str, Any]:
+        return self.s6.get_repair_review_link(repair_packet_id)
+
     # —— Internals ——
 
     def _load_object(self, path: Path, *, default: dict[str, Any], list_key: str) -> dict[str, Any]:

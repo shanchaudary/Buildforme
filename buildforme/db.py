@@ -17,7 +17,7 @@ from typing import Any, Iterator
 from buildforme.coordination_lock import CoordinationFileLock
 from buildforme.storage import utc_now_iso
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -363,6 +363,18 @@ CREATE TABLE IF NOT EXISTS repair_admissions (
 );
 CREATE INDEX IF NOT EXISTS idx_repair_admissions_source
   ON repair_admissions(source_run_id, created_at);
+
+CREATE TABLE IF NOT EXISTS repair_review_links (
+  repair_packet_id TEXT PRIMARY KEY REFERENCES repair_packets(repair_packet_id),
+  repair_admission_id TEXT NOT NULL REFERENCES repair_admissions(repair_admission_id),
+  source_run_id TEXT NOT NULL REFERENCES runs(id),
+  child_run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+  fresh_evidence_id TEXT NOT NULL UNIQUE REFERENCES evidence(evidence_id),
+  review_cycle_id TEXT NOT NULL UNIQUE REFERENCES review_cycles(id),
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  immutable INTEGER NOT NULL DEFAULT 1
+);
 """
 
 
@@ -418,6 +430,8 @@ class ExecutionDB:
                         self._migrate_to_v6(conn)
                     if current < 7:
                         self._migrate_to_v7(conn)
+                    if current < 8:
+                        self._migrate_to_v8(conn)
                     if current < SCHEMA_VERSION:
                         conn.execute(
                             "UPDATE schema_meta SET value=? WHERE key='version'",
@@ -680,6 +694,24 @@ class ExecutionDB:
             );
             CREATE INDEX IF NOT EXISTS idx_repair_admissions_source
               ON repair_admissions(source_run_id, created_at);
+            """
+        )
+
+    def _migrate_to_v8(self, conn: sqlite3.Connection) -> None:
+        """Bind repair child fresh evidence to the mandatory re-review cycle."""
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS repair_review_links (
+              repair_packet_id TEXT PRIMARY KEY REFERENCES repair_packets(repair_packet_id),
+              repair_admission_id TEXT NOT NULL REFERENCES repair_admissions(repair_admission_id),
+              source_run_id TEXT NOT NULL REFERENCES runs(id),
+              child_run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+              fresh_evidence_id TEXT NOT NULL UNIQUE REFERENCES evidence(evidence_id),
+              review_cycle_id TEXT NOT NULL UNIQUE REFERENCES review_cycles(id),
+              payload_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              immutable INTEGER NOT NULL DEFAULT 1
+            );
             """
         )
 

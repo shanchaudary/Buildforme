@@ -112,14 +112,16 @@ text = replace_once(
 '''
 new = '''text = replace_once(
     text,
-    \'\'\'    immutable_policy = {
+    \'\'\'    requested_policy = dict(policy or {})
+    immutable_policy = {
         "blind_review": True,
         "implementer_provider_forbidden": True,
         "critical_high_always_blocking": True,
         "founder_override_blocking_findings": False,
     }
 \'\'\',
-    \'\'\'    immutable_policy = {
+    \'\'\'    requested_policy = dict(policy or {})
+    immutable_policy = {
         "blind_review": True,
         "implementer_provider_forbidden": True,
         "critical_high_always_blocking": True,
@@ -127,7 +129,40 @@ new = '''text = replace_once(
         "automated_reviewer_execution_required": True,
     }
 \'\'\',
-    label="immutable automated review policy",
+    label="review-cycle creation immutable automated policy",
+)
+text = replace_once(
+    text,
+    \'\'\'    policy = cycle.get("policy") if isinstance(cycle.get("policy"), dict) else {}
+    required = int(cycle.get("required_reviewer_count") or 0)
+    distinct = int(cycle.get("min_distinct_providers") or 0)
+    if required != int(policy.get("required_reviewer_count") or 0):
+        problems.append("review cycle required_reviewer_count does not match policy")
+    if distinct != int(policy.get("min_distinct_providers") or 0):
+        problems.append("review cycle min_distinct_providers does not match policy")
+    immutable_policy = {
+        "blind_review": True,
+        "implementer_provider_forbidden": True,
+        "critical_high_always_blocking": True,
+        "founder_override_blocking_findings": False,
+    }
+\'\'\',
+    \'\'\'    policy = cycle.get("policy") if isinstance(cycle.get("policy"), dict) else {}
+    required = int(cycle.get("required_reviewer_count") or 0)
+    distinct = int(cycle.get("min_distinct_providers") or 0)
+    if required != int(policy.get("required_reviewer_count") or 0):
+        problems.append("review cycle required_reviewer_count does not match policy")
+    if distinct != int(policy.get("min_distinct_providers") or 0):
+        problems.append("review cycle min_distinct_providers does not match policy")
+    immutable_policy = {
+        "blind_review": True,
+        "implementer_provider_forbidden": True,
+        "critical_high_always_blocking": True,
+        "founder_override_blocking_findings": False,
+        "automated_reviewer_execution_required": True,
+    }
+\'\'\',
+    label="review-cycle validation immutable automated policy",
 )
 '''
 if text.count(old) != 1:

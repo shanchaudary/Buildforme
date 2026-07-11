@@ -45,8 +45,20 @@ jobs:
           rm -f scripts/apply_stage7_packet7d_repair_authority.py
           python -m py_compile buildforme/repair_contracts.py buildforme/repair_service.py buildforme/db.py buildforme/execution_store.py buildforme/storage.py tests/test_stage7_packet7d_repair_authority.py tests/test_stage7_packet7d_contract.py
           git diff --check
-      - name: Run Packet 7D authority tests
-        run: python -m unittest discover -s tests -p 'test_stage7_packet7d*.py' -v
+      - name: Packet 7D schema v6
+        run: python -m unittest discover -s tests -p 'test_stage7_packet7d_repair_authority.py' -k test_schema_v6 -v
+      - name: Packet 7D exact authority binding
+        run: python -m unittest discover -s tests -p 'test_stage7_packet7d_repair_authority.py' -k test_create_packet_binds_every_blocking_authority -v
+      - name: Packet 7D omission and scope rejection
+        run: python -m unittest discover -s tests -p 'test_stage7_packet7d_repair_authority.py' -k test_storage_rejects_finding_omission_and_scope_expansion -v
+      - name: Packet 7D reviewer provider exclusion
+        run: python -m unittest discover -s tests -p 'test_stage7_packet7d_repair_authority.py' -k test_source_reviewer_cannot_be_repair_provider -v
+      - name: Packet 7D append-only cycle authority
+        run: python -m unittest discover -s tests -p 'test_stage7_packet7d_repair_authority.py' -k test_one_packet_per_source_cycle_append_only -v
+      - name: Packet 7D finalized-cycle requirement
+        run: python -m unittest discover -s tests -p 'test_stage7_packet7d_repair_authority.py' -k test_non_repair_cycle_is_rejected -v
+      - name: Packet 7D permanent contracts
+        run: python -m unittest discover -s tests -p 'test_stage7_packet7d_contract.py' -v
       - name: Run Packet 7A authority regressions
         run: python -m unittest discover -s tests -p 'test_stage7_review_authority.py' -v
       - name: Run Packet 7B execution regressions

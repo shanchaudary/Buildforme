@@ -112,10 +112,18 @@ text = replace_once(
 '''
 new = '''text = replace_once(
     text,
-    \'\'\'        "founder_override_blocking_findings": False,
+    \'\'\'    immutable_policy = {
+        "blind_review": True,
+        "implementer_provider_forbidden": True,
+        "critical_high_always_blocking": True,
+        "founder_override_blocking_findings": False,
     }
 \'\'\',
-    \'\'\'        "founder_override_blocking_findings": False,
+    \'\'\'    immutable_policy = {
+        "blind_review": True,
+        "implementer_provider_forbidden": True,
+        "critical_high_always_blocking": True,
+        "founder_override_blocking_findings": False,
         "automated_reviewer_execution_required": True,
     }
 \'\'\',

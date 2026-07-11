@@ -6,6 +6,7 @@ report=stage7_packet7b_validation.txt
 echo '== correct Packet 7B patcher ==' | tee -a "$report"
 python scripts/fix_stage7_packet7b_patcher.py 2>&1 | tee -a "$report"
 fix_status=${PIPESTATUS[0]}
+regression_fix_status=99
 apply_status=99
 syntax_status=99
 focused_status=99
@@ -14,6 +15,12 @@ policy_status=99
 constitution_status=99
 
 if [ "$fix_status" -eq 0 ]; then
+  echo '== correct Packet 7B regression templates ==' | tee -a "$report"
+  python scripts/fix_stage7_packet7b_regressions.py 2>&1 | tee -a "$report"
+  regression_fix_status=${PIPESTATUS[0]}
+fi
+
+if [ "$fix_status" -eq 0 ] && [ "$regression_fix_status" -eq 0 ]; then
   echo '== apply Stage 7 Packet 7B ==' | tee -a "$report"
   python scripts/apply_stage7_packet7b.py 2>&1 | tee -a "$report"
   apply_status=${PIPESTATUS[0]}
@@ -29,6 +36,7 @@ if [ "$apply_status" -eq 0 ]; then
     buildforme/execution_store.py \
     buildforme/storage.py \
     buildforme/server.py \
+    tests/test_stage7_packet7a_contract.py \
     tests/test_stage7_review_authority.py \
     tests/test_stage7_review_execution.py 2>&1 | tee -a "$report"
   syntax_status=${PIPESTATUS[0]}
@@ -42,11 +50,13 @@ if [ "$apply_status" -eq 0 ]; then
   p7b_status=${PIPESTATUS[0]}
   python -m unittest discover -s tests -p 'test_stage7_review_authority.py' -v 2>&1 | tee -a "$report"
   p7a_status=${PIPESTATUS[0]}
+  python -m unittest discover -s tests -p 'test_stage7_packet7a_contract.py' -v 2>&1 | tee -a "$report"
+  p7a_contract_status=${PIPESTATUS[0]}
   python -m unittest discover -s tests -p 'test_run_mutation_authority*.py' -v 2>&1 | tee -a "$report"
   mutation_status=${PIPESTATUS[0]}
   python -m unittest discover -s tests -p 'test_stage6_final_blockers.py' -v 2>&1 | tee -a "$report"
   stage6_status=${PIPESTATUS[0]}
-  if [ "$p7b_status" -eq 0 ] && [ "$p7a_status" -eq 0 ] && [ "$mutation_status" -eq 0 ] && [ "$stage6_status" -eq 0 ]; then
+  if [ "$p7b_status" -eq 0 ] && [ "$p7a_status" -eq 0 ] && [ "$p7a_contract_status" -eq 0 ] && [ "$mutation_status" -eq 0 ] && [ "$stage6_status" -eq 0 ]; then
     focused_status=0
   else
     focused_status=1
@@ -71,7 +81,7 @@ PY
   constitution_status=${PIPESTATUS[0]}
 fi
 
-echo "statuses fix=$fix_status apply=$apply_status syntax=$syntax_status focused=$focused_status full=$full_status policy=$policy_status constitution=$constitution_status" | tee -a "$report"
+echo "statuses fix=$fix_status regression_fix=$regression_fix_status apply=$apply_status syntax=$syntax_status focused=$focused_status full=$full_status policy=$policy_status constitution=$constitution_status" | tee -a "$report"
 
 git config user.name "Buildforme Governance Bot"
 git config user.email "actions@users.noreply.github.com"
@@ -107,8 +117,12 @@ jobs:
 YAML
 }
 
-if [ "$fix_status" -eq 0 ] && [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status" -eq 0 ] && [ "$full_status" -eq 0 ] && [ "$policy_status" -eq 0 ] && [ "$constitution_status" -eq 0 ]; then
-  rm -f "$report" scripts/apply_stage7_packet7b.py scripts/fix_stage7_packet7b_patcher.py scripts/run_stage7_packet7b_gate.sh
+if [ "$fix_status" -eq 0 ] && [ "$regression_fix_status" -eq 0 ] && [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status" -eq 0 ] && [ "$full_status" -eq 0 ] && [ "$policy_status" -eq 0 ] && [ "$constitution_status" -eq 0 ]; then
+  rm -f "$report" \
+    scripts/apply_stage7_packet7b.py \
+    scripts/fix_stage7_packet7b_patcher.py \
+    scripts/fix_stage7_packet7b_regressions.py \
+    scripts/run_stage7_packet7b_gate.sh
   restore_original_ci
   git diff --check
   git add -A -- \
@@ -121,11 +135,13 @@ if [ "$fix_status" -eq 0 ] && [ "$apply_status" -eq 0 ] && [ "$syntax_status" -e
     buildforme/storage.py \
     buildforme/server.py \
     tests/test_stage6_execution.py \
+    tests/test_stage7_packet7a_contract.py \
     tests/test_stage7_review_authority.py \
     tests/test_stage7_review_execution.py \
     docs/STAGE_7_INDEPENDENT_MULTI_AGENT_REVIEW.md \
     scripts/apply_stage7_packet7b.py \
     scripts/fix_stage7_packet7b_patcher.py \
+    scripts/fix_stage7_packet7b_regressions.py \
     scripts/run_stage7_packet7b_gate.sh
   git diff --cached --check
   unexpected=$(git status --porcelain | grep '^??' || true)
@@ -141,7 +157,7 @@ fi
 
 cp "$report" /tmp/stage7_packet7b_validation.txt
 printf '\n== validation report tail ==\n'
-tail -n 220 "$report" || true
+tail -n 240 "$report" || true
 git restore .
 git clean -fd buildforme tests docs scripts
 git clean -f stage7_packet7b_validation.txt

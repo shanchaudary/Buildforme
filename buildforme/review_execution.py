@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
@@ -32,6 +35,7 @@ from buildforme.redaction import redact_argv, redact_hash, redact_text
 from buildforme.review_contracts import build_review_report_record
 from buildforme.storage import LocalStore, utc_now_iso
 from buildforme.changed_files import collect_changed_file_manifest, collect_patch_evidence
+from governance.constitution_engine import get_engine
 from governance.constitution_lease import validate_run_lease_against_store
 
 REVIEW_PACKET_SCHEMA = "buildforme.review_packet.v1"
@@ -52,6 +56,7 @@ REVIEW_FAILURE_CODES = frozenset(
         "process_failed",
         "process_cleanup_unconfirmed",
         "post_snapshot_unproven",
+        "workspace_isolation_failed",
         "worktree_mutated",
         "output_rejected",
     }
@@ -243,12 +248,72 @@ def _snapshot_identity(snapshot: dict[str, Any] | None) -> dict[str, Any]:
             "file_metadata_fingerprint",
             "head_commit",
             "files_changed",
+            "workspace_tree_fingerprint",
+            "workspace_file_count",
+            "workspace_total_bytes",
         )
     }
 
 
 def _snapshots_equal(left: dict[str, Any] | None, right: dict[str, Any] | None) -> bool:
     return _snapshot_identity(left) == _snapshot_identity(right)
+
+
+def _workspace_tree_snapshot(root: Path) -> dict[str, Any]:
+    entries: list[dict[str, Any]] = []
+    total_bytes = 0
+    for item in sorted(root.rglob("*"), key=lambda p: p.as_posix()):
+        rel = item.relative_to(root).as_posix()
+        if item.is_symlink():
+            entries.append({"path": rel, "kind": "symlink", "target": os.readlink(item)})
+            continue
+        if item.is_dir():
+            entries.append({"path": rel, "kind": "dir"})
+            continue
+        if item.is_file():
+            data = item.read_bytes()
+            total_bytes += len(data)
+            entries.append({
+                "path": rel,
+                "kind": "file",
+                "size": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            })
+    raw = json.dumps(entries, sort_keys=True, separators=(",", ":"))
+    return {
+        "workspace_tree_fingerprint": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        "workspace_file_count": sum(1 for item in entries if item.get("kind") == "file"),
+        "workspace_total_bytes": total_bytes,
+    }
+
+
+def _assert_no_symlink_escape(root: Path) -> None:
+    resolved_root = root.resolve()
+    prefix = str(resolved_root) + os.sep
+    for item in root.rglob("*"):
+        if not item.is_symlink():
+            continue
+        target = item.resolve()
+        if target != resolved_root and not str(target).startswith(prefix):
+            raise ValueError(f"review workspace source contains escaping symlink: {item}")
+
+
+def _create_isolated_review_workspace(root: Path) -> tuple[tempfile.TemporaryDirectory[str], Path, dict[str, Any]]:
+    _assert_no_symlink_escape(root)
+    holder = tempfile.TemporaryDirectory(prefix="buildforme-review-")
+    target = Path(holder.name) / "workspace"
+    try:
+        shutil.copytree(
+            root,
+            target,
+            symlinks=False,
+            ignore=shutil.ignore_patterns(".git"),
+        )
+        snapshot = _workspace_tree_snapshot(target)
+        return holder, target, snapshot
+    except Exception:
+        holder.cleanup()
+        raise
 
 
 def _git_text(root: Path, args: list[str]) -> str:
@@ -475,6 +540,10 @@ def build_review_packet_record(
         "scope_fingerprint": cycle.get("scope_fingerprint"),
         "constitution_hash": cycle.get("constitution_hash"),
         "constitution_lease_id": cycle.get("constitution_lease_id"),
+        "constitution_reminder": get_engine().reminder(
+            phase="independent_review",
+            lease=run.get("constitution_lease") if isinstance(run.get("constitution_lease"), dict) else None,
+        ),
         "repository": run.get("repository"),
         "approved_baseline_commit": evidence.get("approved_baseline_commit"),
         "final_head_sha": evidence.get("final_head_sha"),
@@ -563,6 +632,7 @@ def validate_review_packet_for_storage(
         "scope_fingerprint",
         "constitution_hash",
         "constitution_lease_id",
+        "constitution_reminder",
         "review_material",
         "blind_context",
         "packet_fingerprint",
@@ -627,6 +697,7 @@ def validate_review_packet_for_storage(
             "scope_fingerprint",
             "constitution_hash",
             "constitution_lease_id",
+            "constitution_reminder",
             "repository",
             "approved_baseline_commit",
             "final_head_sha",
@@ -987,9 +1058,10 @@ def execute_independent_review_assignment(
     actor: str = "system",
     timeout_seconds: int = 900,
 ) -> dict[str, Any]:
-    packet, pre_snapshot, root = build_verified_blind_review_packet(
+    packet, source_pre_snapshot, authoritative_root = build_verified_blind_review_packet(
         store, cycle_id, assignment_id
     )
+    pre_snapshot = dict(source_pre_snapshot)
     packet = store.save_review_packet_atomic(packet=packet, actor=actor)
     claim_id = f"rclaim-{uuid.uuid4().hex[:18]}"
     claimed = store.claim_review_assignment_execution_atomic(
@@ -1006,6 +1078,8 @@ def execute_independent_review_assignment(
     health: dict[str, Any] | None = None
     process_result: dict[str, Any] = {}
     process_started = False
+    workspace_holder: tempfile.TemporaryDirectory[str] | None = None
+    review_root = authoritative_root
 
     def fail(
         error: str,
@@ -1032,7 +1106,21 @@ def execute_independent_review_assignment(
             process_started=process_started,
         )
         store.record_review_execution_atomic(execution=execution, actor=actor)
+        if workspace_holder is not None:
+            workspace_holder.cleanup()
         raise ValueError(error)
+
+    try:
+        workspace_holder, review_root, workspace_pre = _create_isolated_review_workspace(
+            authoritative_root
+        )
+        pre_snapshot.update(workspace_pre)
+    except Exception as exc:
+        fail(
+            f"review workspace isolation failed: {exc}",
+            failure_code="workspace_isolation_failed",
+            retry_safe=True,
+        )
 
     if store.get_execution_control().get("kill_switch_active"):
         fail(
@@ -1103,7 +1191,7 @@ def execute_independent_review_assignment(
         process_result = supervisor.run(
             run_id=process_key,
             argv=list(command["argv"]),
-            cwd=root,
+            cwd=review_root,
             timeout_seconds=max(30, min(REVIEW_TIMEOUT_MAX_SECONDS, int(timeout_seconds))),
             provider_id=provider_id,
             on_event=on_event,
@@ -1118,9 +1206,11 @@ def execute_independent_review_assignment(
         )
 
     try:
-        post_snapshot = _collect_snapshot(
-            root, store.get_evidence_by_id(str(packet["evidence_id"]))
+        source_post_snapshot = _collect_snapshot(
+            authoritative_root, store.get_evidence_by_id(str(packet["evidence_id"]))
         )
+        workspace_post = _workspace_tree_snapshot(review_root)
+        post_snapshot = {**source_post_snapshot, **workspace_post}
     except Exception as exc:
         fail(
             f"post-review worktree proof failed: {exc}",
@@ -1183,11 +1273,15 @@ def execute_independent_review_assignment(
         post_snapshot_proven=True,
         process_started=True,
     )
-    return store.submit_review_report_atomic(
-        cycle_id=cycle_id,
-        assignment_id=assignment_id,
-        report=report,
-        findings=findings,
-        actor=str(assignment.get("reviewer_id") or actor),
-        execution=execution,
-    )
+    try:
+        return store.submit_review_report_atomic(
+            cycle_id=cycle_id,
+            assignment_id=assignment_id,
+            report=report,
+            findings=findings,
+            actor=str(assignment.get("reviewer_id") or actor),
+            execution=execution,
+        )
+    finally:
+        if workspace_holder is not None:
+            workspace_holder.cleanup()

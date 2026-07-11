@@ -246,6 +246,8 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
         self.assertEqual(root, self.root.resolve())
         self.assertEqual(snapshot["patch_fingerprint"], self.evidence["patch_fingerprint"])
         self.assertFalse(any(packet["blind_context"].values()))
+        self.assertIn("constitution_reminder", packet)
+        self.assertIn("text", packet["constitution_reminder"])
         self.assertNotIn("reports", packet)
         self.assertNotIn("findings", packet)
 
@@ -348,6 +350,7 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
         attempts = self.store.list_review_execution_attempts(self.assignment["assignment_id"])
         self.assertEqual(attempts[-1]["status"], "failed")
         self.assertFalse(attempts[-1]["worktree_unchanged"])
+        self.assertFalse((self.root / "reviewer-wrote.txt").exists())
         self.assertFalse(attempts[-1]["retry_safe"])
         self.assertEqual(self.store.get_review_cycle(self.cycle["cycle_id"])["status"], "blocked")
 

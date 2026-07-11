@@ -113,3 +113,12 @@ complete and independently accepted.
 - Codex and Claude can now execute independent blind assignments and satisfy a genuine
   two-provider storage quorum in the integration path. A founder-controlled live smoke
   remains required before Packet 7C acceptance.
+
+
+### Packet 7B red-team isolation hardening
+
+Reviewer processes execute only in a disposable copied workspace. The governed execution
+worktree is never used as reviewer cwd. The full disposable tree is fingerprinted before and
+after review, the authoritative worktree is separately re-proved unchanged, escaping symlinks
+are rejected, and the copy is destroyed on every outcome. Review packets also carry the
+canonical Constitution reminder bound to the run lease.

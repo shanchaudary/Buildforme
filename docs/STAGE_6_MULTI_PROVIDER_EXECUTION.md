@@ -80,3 +80,13 @@ Complete only when multi-provider architecture is real, isolation + evidence + i
 - Authentication readiness requires a successful read-only executable probe; environment-variable presence is never proof.
 - JSON migration imports into a temporary SQLite authority and atomically replaces the database only after full validation and integrity checks.
 - Real-provider smoke acceptance is machine-verifiable and requires auth proof, process cleanup proof, deterministic verification, required files, immutable evidence, founder decision evidence, and proof that the source branch was not merged or modified.
+
+
+## Red-team hardening round 2
+
+- A missing in-memory process handle is never accepted as OS termination proof.
+- Windows live processes require Job Object assignment with kill-on-close and zero-active-process accounting.
+- The old duplicate process-tree terminator was removed; `process_termination.py` is the sole termination authority.
+- Outcome fingerprints bind the full caller-produced immutable evidence bundle, including timestamps, previews, and governance fields.
+- Authentication probe commands and success semantics are code-owned. Provider records cannot supply commands or success exit codes.
+- Migration holds an exclusive cross-process coordination lock from active-run check through snapshot, validation, and atomic replacement. Normal DB reads/writes hold shared locks.

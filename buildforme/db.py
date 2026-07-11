@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+from buildforme.coordination_lock import CoordinationFileLock
 from buildforme.storage import utc_now_iso
 
 SCHEMA_VERSION = 3
@@ -243,6 +244,7 @@ class ExecutionDB:
     def __init__(self, path: Path | str):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._coordination_path = Path(str(self.path) + ".coord.lock")
         self._lock = threading.RLock()
         self._initialized = False
         self.ensure_schema()
@@ -256,7 +258,7 @@ class ExecutionDB:
         return conn
 
     def ensure_schema(self) -> None:
-        with self._lock:
+        with CoordinationFileLock(self._coordination_path, shared=True), self._lock:
             conn = self._raw_connect()
             try:
                 conn.executescript(SCHEMA_SQL)
@@ -392,7 +394,7 @@ class ExecutionDB:
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        with self._lock:
+        with CoordinationFileLock(self._coordination_path, shared=True), self._lock:
             conn = self._raw_connect()
             try:
                 conn.execute("BEGIN IMMEDIATE")
@@ -404,8 +406,18 @@ class ExecutionDB:
             finally:
                 conn.close()
 
+    @contextmanager
+    def maintenance_lock(self, *, timeout_seconds: float = 120.0) -> Iterator[None]:
+        """Block every normal reader/writer while maintenance replaces the DB file."""
+        with CoordinationFileLock(
+            self._coordination_path,
+            shared=False,
+            timeout_seconds=timeout_seconds,
+        ), self._lock:
+            yield
+
     def pragmas(self) -> dict[str, Any]:
-        with self._lock:
+        with CoordinationFileLock(self._coordination_path, shared=True), self._lock:
             conn = self._raw_connect()
             try:
                 journal = conn.execute("PRAGMA journal_mode").fetchone()[0]

@@ -2253,6 +2253,26 @@ class Stage6Store:
         dry_run: bool = False,
         cutover: bool = True,
     ) -> dict[str, Any]:
+        if dry_run:
+            return self._migrate_from_json_atomically_locked(
+                runtime_dir,
+                dry_run=True,
+                cutover=False,
+            )
+        with self.db.maintenance_lock(timeout_seconds=120.0):
+            return self._migrate_from_json_atomically_locked(
+                runtime_dir,
+                dry_run=False,
+                cutover=cutover,
+            )
+
+    def _migrate_from_json_atomically_locked(
+        self,
+        runtime_dir: Path,
+        *,
+        dry_run: bool = False,
+        cutover: bool = True,
+    ) -> dict[str, Any]:
         """Import through a temporary SQLite authority and atomically replace on success.
 
         Any malformed record, orphan, integrity failure, or cutover failure leaves the
@@ -2267,12 +2287,15 @@ class Stage6Store:
                 runtime_dir, dry_run=True, cutover=False
             )
 
-        with self.db.transaction() as conn:
+        conn = self.db._raw_connect()
+        try:
             active = int(
                 conn.execute(
                     "SELECT COUNT(*) FROM runs WHERE status IN ('queued','starting','running','cancel_requested')"
                 ).fetchone()[0]
             )
+        finally:
+            conn.close()
         if active:
             return {
                 "errors": [f"migration refused while {active} active run(s) exist"],

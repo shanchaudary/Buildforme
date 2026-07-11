@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import signal
 import subprocess
 import threading
 import time
@@ -17,6 +16,7 @@ from buildforme.process_termination import (
 )
 from buildforme.redaction import redact_argv, redact_event, redact_process_result, redact_text
 from buildforme.storage import utc_now_iso
+from buildforme.windows_job import WindowsJob
 
 MAX_STREAM_BYTES = 512_000
 MAX_EVENT_LINES = 2_000
@@ -30,6 +30,7 @@ class ProcessSupervisor:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._procs: dict[str, subprocess.Popen[str]] = {}
+        self._windows_jobs: dict[str, WindowsJob] = {}
         self._cancel_flags: dict[str, bool] = {}
         self._termination_log: dict[str, list[dict[str, Any]]] = {}
 
@@ -118,8 +119,43 @@ class ProcessSupervisor:
         else:
             popen_kwargs["start_new_session"] = True
 
+        windows_job: WindowsJob | None = None
         try:
             proc = subprocess.Popen(**popen_kwargs)
+            if os.name == "nt":
+                try:
+                    windows_job = WindowsJob.create_and_assign(proc.pid)
+                except Exception as exc:
+                    terminated = terminate_process_tree(
+                        proc,
+                        reason="windows_job_assignment_failed",
+                    )
+                    confirmation = dict(terminated.get("confirmation") or {})
+                    confirmation["confirmed"] = False
+                    problems = list(confirmation.get("problems") or [])
+                    problems.append(redact_text(str(exc))[:300])
+                    confirmation["problems"] = problems
+                    return redact_process_result(
+                        {
+                            "ok": False,
+                            "exit_code": proc.returncode,
+                            "stdout": "",
+                            "stderr": "Windows Job Object assignment failed",
+                            "timed_out": False,
+                            "cancelled": False,
+                            "duration_seconds": 0,
+                            "error": "Windows Job Object assignment failed",
+                            "argv": argv,
+                            "cwd": str(cwd_path),
+                            "env_names": env_names,
+                            "env_policy": env_policy_summary(provider_id, env_names),
+                            "termination_log": terminated.get("log") or [],
+                            "termination_confirmation": confirmation,
+                            "cleanup_ok": False,
+                            "process_group_isolated": False,
+                            "pid": proc.pid,
+                        }
+                    )
             if stdin_bytes is not None and proc.stdin is not None:
                 try:
                     # text mode expects str
@@ -153,6 +189,8 @@ class ProcessSupervisor:
 
         with self._lock:
             self._procs[run_id] = proc
+            if windows_job is not None:
+                self._windows_jobs[run_id] = windows_job
             self._cancel_flags[run_id] = False
 
         stdout_chunks: list[str] = []
@@ -205,6 +243,7 @@ class ProcessSupervisor:
                     reason="cancel",
                     graceful_wait_sec=GRACEFUL_WAIT_SEC,
                     force_wait_sec=FORCE_WAIT_SEC,
+                    windows_job=windows_job,
                 )
                 term_log.extend(terminated["log"])
                 termination_confirmation = terminated["confirmation"]
@@ -217,6 +256,7 @@ class ProcessSupervisor:
                     reason="timeout",
                     graceful_wait_sec=GRACEFUL_WAIT_SEC,
                     force_wait_sec=FORCE_WAIT_SEC,
+                    windows_job=windows_job,
                 )
                 term_log.extend(terminated["log"])
                 termination_confirmation = terminated["confirmation"]
@@ -255,11 +295,23 @@ class ProcessSupervisor:
                 proc.pid,
                 process_group_id=proc.pid if os.name != "nt" else None,
                 known_pids=[proc.pid],
+                windows_job=windows_job,
             )
+        if not termination_confirmation.get("confirmed"):
+            terminated = terminate_process_tree(
+                proc,
+                reason="post_exit_descendant_cleanup",
+                graceful_wait_sec=0.1,
+                force_wait_sec=FORCE_WAIT_SEC,
+                windows_job=windows_job,
+            )
+            term_log.extend(terminated["log"])
+            termination_confirmation = terminated["confirmation"]
         cleanup_ok = bool(termination_confirmation.get("confirmed"))
 
         with self._lock:
             self._procs.pop(run_id, None)
+            self._windows_jobs.pop(run_id, None)
             self._cancel_flags.pop(run_id, None)
 
         stdout = "".join(stdout_chunks)
@@ -297,18 +349,23 @@ class ProcessSupervisor:
         }
         if not cleanup_ok:
             result["error"] = "process-tree cleanup incomplete"
-        return redact_process_result(result)
+        cleaned = redact_process_result(result)
+        if windows_job is not None:
+            windows_job.close()
+        return cleaned
 
     def cancel(self, run_id: str) -> dict[str, Any]:
         with self._lock:
             self._cancel_flags[run_id] = True
             proc = self._procs.get(run_id)
+            windows_job = self._windows_jobs.get(run_id)
         if proc and proc.poll() is None:
             terminated = terminate_process_tree(
                 proc,
                 reason="cancel_api",
                 graceful_wait_sec=GRACEFUL_WAIT_SEC,
                 force_wait_sec=FORCE_WAIT_SEC,
+                windows_job=windows_job,
             )
             log = list(terminated["log"])
             confirmation = dict(terminated["confirmation"])
@@ -322,22 +379,24 @@ class ProcessSupervisor:
                 "cleanup_ok": bool(confirmation.get("confirmed")),
             }
         confirmation = {
-            "confirmed": True,
-            "root_exited": True,
-            "group_absent": True,
+            "confirmed": False,
+            "root_exited": False,
+            "group_absent": False,
             "known_pids": [],
             "live_pids": [],
-            "method": "no_active_process",
-            "problems": [],
+            "method": "process_registry_miss",
+            "problems": [
+                "no active process handle in this supervisor instance; OS termination is not proven"
+            ],
             "checked_at": utc_now_iso(),
         }
         return {
             "cancelled": True,
             "run_id": run_id,
-            "signal_sent": bool(proc),
+            "signal_sent": False,
             "termination_log": [],
             "termination_confirmation": confirmation,
-            "cleanup_ok": True,
+            "cleanup_ok": False,
         }
 
 
@@ -346,104 +405,3 @@ _SUPERVISOR = ProcessSupervisor()
 
 def get_process_supervisor() -> ProcessSupervisor:
     return _SUPERVISOR
-
-
-def _terminate_tree(proc: subprocess.Popen[str], *, reason: str) -> list[dict[str, Any]]:
-    """Graceful then forced termination of the child-owned process group only."""
-    log: list[dict[str, Any]] = []
-    if proc.poll() is not None:
-        log.append({"at": utc_now_iso(), "action": "already_exited", "reason": reason, "ok": True, "pid": proc.pid})
-        return log
-
-    pid = proc.pid
-    if os.name == "nt":
-        # Graceful: CTRL_BREAK_EVENT to the new process group if possible, else taskkill tree.
-        try:
-            proc.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
-            log.append({"at": utc_now_iso(), "action": "ctrl_break", "reason": reason, "ok": True, "pid": pid})
-        except Exception as exc:
-            log.append(
-                {
-                    "at": utc_now_iso(),
-                    "action": "ctrl_break",
-                    "reason": reason,
-                    "ok": False,
-                    "detail": str(exc),
-                    "pid": pid,
-                }
-            )
-        try:
-            proc.wait(timeout=GRACEFUL_WAIT_SEC)
-            log.append({"at": utc_now_iso(), "action": "graceful_exit", "ok": True, "pid": pid})
-            return log
-        except subprocess.TimeoutExpired:
-            pass
-        try:
-            completed = subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                capture_output=True,
-                shell=False,
-                check=False,
-                timeout=15,
-            )
-            log.append(
-                {
-                    "at": utc_now_iso(),
-                    "action": "taskkill_tree",
-                    "reason": reason,
-                    "ok": completed.returncode == 0,
-                    "exit_code": completed.returncode,
-                    "stderr": redact_text((completed.stderr or b"").decode("utf-8", errors="replace")[:300]),
-                    "pid": pid,
-                }
-            )
-        except Exception as exc:
-            log.append(
-                {
-                    "at": utc_now_iso(),
-                    "action": "taskkill_tree",
-                    "reason": reason,
-                    "ok": False,
-                    "detail": str(exc),
-                    "pid": pid,
-                }
-            )
-            try:
-                proc.kill()
-                log.append({"at": utc_now_iso(), "action": "kill", "ok": True, "pid": pid})
-            except Exception as exc2:
-                log.append({"at": utc_now_iso(), "action": "kill", "ok": False, "detail": str(exc2), "pid": pid})
-        return log
-
-    # POSIX: signal only the child's new session/process group.
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-        log.append({"at": utc_now_iso(), "action": "sigterm_group", "reason": reason, "ok": True, "pgid": pid})
-    except ProcessLookupError:
-        log.append({"at": utc_now_iso(), "action": "sigterm_group", "ok": True, "detail": "already gone", "pid": pid})
-        return log
-    except Exception as exc:
-        log.append({"at": utc_now_iso(), "action": "sigterm_group", "ok": False, "detail": str(exc), "pid": pid})
-        try:
-            proc.terminate()
-        except Exception:
-            pass
-    try:
-        proc.wait(timeout=GRACEFUL_WAIT_SEC)
-        log.append({"at": utc_now_iso(), "action": "graceful_exit", "ok": True, "pid": pid})
-        return log
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-        log.append({"at": utc_now_iso(), "action": "sigkill_group", "reason": reason, "ok": True, "pgid": pid})
-    except ProcessLookupError:
-        log.append({"at": utc_now_iso(), "action": "sigkill_group", "ok": True, "detail": "already gone", "pid": pid})
-    except Exception as exc:
-        log.append({"at": utc_now_iso(), "action": "sigkill_group", "ok": False, "detail": str(exc), "pid": pid})
-        try:
-            proc.kill()
-            log.append({"at": utc_now_iso(), "action": "kill", "ok": True, "pid": pid})
-        except Exception as exc2:
-            log.append({"at": utc_now_iso(), "action": "kill", "ok": False, "detail": str(exc2), "pid": pid})
-    return log

@@ -1442,22 +1442,44 @@ def cancel_run(
         raise ValueError("cannot cancel terminal run")
     note = reason or "cancel requested"
 
-    from buildforme.process_supervisor import get_process_supervisor
-
-    try:
-        process_result = get_process_supervisor().cancel(run_id)
-    except Exception as exc:
+    prestart_statuses = {
+        "draft",
+        "awaiting_preflight",
+        "awaiting_approval",
+        "approved",
+        "needs_review",
+    }
+    if status in prestart_statuses:
         process_result = {
             "cancelled": True,
-            "cleanup_ok": False,
-            "error": redact_text(str(exc)[:500]),
+            "cleanup_ok": True,
             "termination_log": [],
             "termination_confirmation": {
-                "confirmed": False,
-                "reason": "cancel API raised",
+                "confirmed": True,
+                "root_exited": True,
+                "group_absent": True,
+                "reason": "governed lifecycle proves no provider process is active",
                 "live_pids": [],
+                "method": "lifecycle_prestart_or_postrun",
             },
         }
+    else:
+        from buildforme.process_supervisor import get_process_supervisor
+
+        try:
+            process_result = get_process_supervisor().cancel(run_id)
+        except Exception as exc:
+            process_result = {
+                "cancelled": True,
+                "cleanup_ok": False,
+                "error": redact_text(str(exc)[:500]),
+                "termination_log": [],
+                "termination_confirmation": {
+                    "confirmed": False,
+                    "reason": "cancel API raised",
+                    "live_pids": [],
+                },
+            }
 
     if status in {"running", "starting", "queued", "cancel_requested"}:
         confirmed = _termination_confirmed(process_result)

@@ -31,8 +31,16 @@ VERSION_ARGS: dict[str, list[str]] = {
 # auth_probe {args, success_exit_codes, read_only:true} for CLI families whose
 # command contract is deployment-specific.
 AUTH_PROBES: dict[str, dict[str, Any] | None] = {
-    "codex": {"args": ["login", "status"], "success_exit_codes": [0], "read_only": True},
-    "claude": {"args": ["auth", "status"], "success_exit_codes": [0], "read_only": True},
+    "codex": {
+        "args": ["login", "status"],
+        "success_exit_codes": [0],
+        "success_patterns": [r"(?i)\blogged in\b"],
+        "failure_patterns": [r"(?i)\bnot logged in\b", r"(?i)\berror checking login status\b"],
+        "read_only": True,
+        "contract_source": "openai/codex codex-rs/cli/src/login.rs run_login_status",
+    },
+    # No primary-source, machine-verifiable status contract has been accepted yet.
+    "claude": None,
     "grok": None,
     "glm": None,
 }
@@ -244,9 +252,9 @@ def probe_authentication(
             "probe_verified": False,
             "detail": "no executable to authenticate",
         }
-    record = provider_record or {}
-    configured = record.get("auth_probe") if isinstance(record.get("auth_probe"), dict) else None
-    probe = dict(configured or AUTH_PROBES.get(pid) or {})
+    # Runtime/provider records cannot supply executable commands or weaken
+    # success criteria. Probe contracts are reviewed code authority only.
+    probe = dict(AUTH_PROBES.get(pid) or {})
     if not probe:
         return {
             "status": "unknown",
@@ -295,13 +303,27 @@ def probe_authentication(
         )
         stdout = completed.stdout or ""
         stderr = completed.stderr or ""
-        ready = completed.returncode in success_codes
+        combined = stdout + "\n" + stderr
+        import re
+
+        success_patterns = [str(pattern) for pattern in (probe.get("success_patterns") or [])]
+        failure_patterns = [str(pattern) for pattern in (probe.get("failure_patterns") or [])]
+        positive = bool(success_patterns) and any(
+            re.search(pattern, combined) is not None for pattern in success_patterns
+        )
+        negative = any(
+            re.search(pattern, combined) is not None for pattern in failure_patterns
+        )
+        ready = completed.returncode in success_codes and positive and not negative
         return {
             "status": "ready" if ready else "failed",
             "probe_verified": bool(ready),
             "detail": "authentication status probe succeeded" if ready else f"authentication status probe exit {completed.returncode}",
             "exit_code": completed.returncode,
             "command_shape": [Path(str(executable)).name, *args],
+            "contract_source": probe.get("contract_source"),
+            "positive_status_marker": bool(positive),
+            "negative_status_marker": bool(negative),
             "stdout_bytes": len(stdout.encode("utf-8", errors="replace")),
             "stderr_bytes": len(stderr.encode("utf-8", errors="replace")),
             "stdout_sha256": redact_hash(stdout),

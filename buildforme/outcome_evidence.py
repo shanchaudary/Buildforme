@@ -87,47 +87,44 @@ def build_run_outcome_evidence(
     return bundle
 
 
-def compute_run_outcome_fingerprint(bundle: dict[str, Any]) -> str:
-    process = bundle.get("process") if isinstance(bundle.get("process"), dict) else {}
-    material = {
-        "schema": OUTCOME_FINGERPRINT_SCHEMA,
-        "evidence_schema": bundle.get("schema"),
-        "evidence_kind": EVIDENCE_KIND_RUN_OUTCOME,
-        "evidence_id": bundle.get("evidence_id") or bundle.get("id"),
-        "run_id": bundle.get("run_id"),
-        "project_id": bundle.get("project_id"),
-        "task_id": bundle.get("task_id"),
-        "packet_id": bundle.get("packet_id"),
-        "repository": bundle.get("repository"),
-        "provider_id": bundle.get("provider_id"),
-        "execution_mode": bundle.get("execution_mode"),
-        "scope_fingerprint": bundle.get("scope_fingerprint"),
-        "constitution_hash": bundle.get("constitution_hash"),
-        "constitution_lease_id": bundle.get("constitution_lease_id"),
-        "constitution_lease_fingerprint": bundle.get("constitution_lease_fingerprint"),
-        "outcome": bundle.get("outcome"),
-        "previous_status": bundle.get("previous_status"),
-        "resulting_status": bundle.get("resulting_status"),
-        "previous_row_version": bundle.get("previous_row_version"),
-        "reason": bundle.get("reason"),
-        "process": {
-            "pid": process.get("pid"),
-            "exit_code": process.get("exit_code"),
-            "timed_out": process.get("timed_out"),
-            "cancelled": process.get("cancelled"),
-            "unavailable": process.get("unavailable"),
-            "cleanup_ok": process.get("cleanup_ok"),
-            "termination_confirmation": process.get("termination_confirmation"),
-            "termination_log": process.get("termination_log"),
-            "stdout_sha256": process.get("stdout_sha256"),
-            "stderr_sha256": process.get("stderr_sha256"),
-            "error": process.get("error"),
-        },
-        "worktree": bundle.get("worktree"),
-    }
-    raw = json.dumps(material, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+def _canonical(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _canonical(value[key])
+            for key in sorted(value.keys(), key=lambda item: str(item))
+        }
+    if isinstance(value, list):
+        return [_canonical(item) for item in value]
+    if isinstance(value, tuple):
+        return [_canonical(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
 
+
+def compute_run_outcome_fingerprint(bundle: dict[str, Any]) -> str:
+    """Bind every caller-produced persisted field in the immutable evidence bundle.
+
+    Database linkage fields are assigned only at append time and are separately
+    protected by the append-only evidence table.
+    """
+    excluded = {
+        "evidence_fingerprint",
+        "sequence",
+        "attempt",
+        "saved_at",
+        "parent_evidence_id",
+    }
+    material = {
+        "fingerprint_schema": OUTCOME_FINGERPRINT_SCHEMA,
+        "bundle": {
+            str(key): _canonical(value)
+            for key, value in bundle.items()
+            if str(key) not in excluded
+        },
+    }
+    raw = json.dumps(material, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 def validate_run_outcome_evidence(evidence: dict[str, Any]) -> list[str]:
     problems: list[str] = []

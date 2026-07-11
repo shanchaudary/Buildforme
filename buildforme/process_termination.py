@@ -136,6 +136,7 @@ def confirm_process_tree_terminated(
     *,
     process_group_id: int | None = None,
     known_pids: list[int] | None = None,
+    windows_job: Any | None = None,
 ) -> dict[str, Any]:
     snapshot = snapshot_process_tree(root_pid, process_group_id=process_group_id)
     candidates = set(int(pid) for pid in (known_pids or []))
@@ -143,18 +144,33 @@ def confirm_process_tree_terminated(
     candidates.add(int(root_pid))
     live_pids = sorted(pid for pid in candidates if _pid_exists(pid))
     group_exists = _group_exists(process_group_id)
-    group_absent = group_exists is False or group_exists is None and os.name == "nt"
-    confirmed = not live_pids and group_absent and not snapshot.get("problems")
+    problems = list(snapshot.get("problems") or [])
+    windows_job_active: int | None = None
+    if os.name == "nt":
+        if windows_job is None:
+            group_absent = False
+            problems.append("Windows Job Object proof unavailable")
+        else:
+            try:
+                windows_job_active = int(windows_job.active_processes())
+                group_absent = windows_job_active == 0
+            except Exception as exc:
+                group_absent = False
+                problems.append(redact_text(str(exc))[:300])
+    else:
+        group_absent = group_exists is False
+    confirmed = not live_pids and group_absent and not problems
     return {
         "confirmed": bool(confirmed),
         "root_pid": int(root_pid),
         "root_exited": int(root_pid) not in live_pids,
         "process_group_id": int(process_group_id) if process_group_id is not None else None,
         "group_absent": bool(group_absent),
+        "windows_job_active_processes": windows_job_active,
         "known_pids": sorted(candidates),
         "live_pids": live_pids,
         "method": snapshot.get("method"),
-        "problems": list(snapshot.get("problems") or []),
+        "problems": problems,
         "checked_at": utc_now_iso(),
     }
 
@@ -165,6 +181,7 @@ def terminate_process_tree(
     reason: str,
     graceful_wait_sec: float = 2.0,
     force_wait_sec: float = 3.0,
+    windows_job: Any | None = None,
 ) -> dict[str, Any]:
     pgid = proc.pid if os.name != "nt" else None
     before = snapshot_process_tree(proc.pid, process_group_id=pgid)
@@ -214,9 +231,16 @@ def terminate_process_tree(
         proc.pid,
         process_group_id=pgid,
         known_pids=known_pids,
+        windows_job=windows_job,
     )
     if not confirmation["confirmed"]:
         if os.name == "nt":
+            if windows_job is not None:
+                try:
+                    windows_job.terminate(exit_code=1)
+                    add("terminate_job_object", True)
+                except Exception as exc:
+                    add("terminate_job_object", False, detail=redact_text(str(exc))[:300])
             try:
                 completed = subprocess.run(
                     ["taskkill", "/PID", str(proc.pid), "/T", "/F"],

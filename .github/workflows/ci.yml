@@ -60,7 +60,7 @@ jobs:
           if not result.get('passed'):
               raise SystemExit(1)
           PY
-      - name: Publish and verify permanent head
+      - name: Restore permanent CI and stage
         run: |
           cat > .github/workflows/ci.yml <<'YAML'
           name: Buildforme CI
@@ -92,9 +92,13 @@ jobs:
           git add -A
           git diff --cached --check
           git status --short
-          git commit -m "Bind reviewer prompts to canonical Constitution text"
+      - name: Create permanent commit
+        run: git commit -m "Bind reviewer prompts to canonical Constitution text"
+      - name: Push permanent commit
+        run: git push origin HEAD:stage-7-independent-multi-agent-review-loop
+      - name: Verify remote head
+        run: |
           published_sha=$(git rev-parse HEAD)
-          git push origin HEAD:stage-7-independent-multi-agent-review-loop
           remote_sha=$(git ls-remote origin refs/heads/stage-7-independent-multi-agent-review-loop | awk '{print $1}')
           echo "published_sha=$published_sha"
           echo "remote_sha=$remote_sha"

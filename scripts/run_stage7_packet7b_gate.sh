@@ -3,14 +3,21 @@ set +e
 report=stage7_packet7b_validation.txt
 : > "$report"
 
-echo '== apply Stage 7 Packet 7B ==' | tee -a "$report"
-python scripts/apply_stage7_packet7b.py 2>&1 | tee -a "$report"
-apply_status=${PIPESTATUS[0]}
+echo '== correct Packet 7B patcher ==' | tee -a "$report"
+python scripts/fix_stage7_packet7b_patcher.py 2>&1 | tee -a "$report"
+fix_status=${PIPESTATUS[0]}
+apply_status=99
 syntax_status=99
 focused_status=99
 full_status=99
 policy_status=99
 constitution_status=99
+
+if [ "$fix_status" -eq 0 ]; then
+  echo '== apply Stage 7 Packet 7B ==' | tee -a "$report"
+  python scripts/apply_stage7_packet7b.py 2>&1 | tee -a "$report"
+  apply_status=${PIPESTATUS[0]}
+fi
 
 if [ "$apply_status" -eq 0 ]; then
   echo '== syntax and diff ==' | tee -a "$report"
@@ -64,7 +71,7 @@ PY
   constitution_status=${PIPESTATUS[0]}
 fi
 
-echo "statuses apply=$apply_status syntax=$syntax_status focused=$focused_status full=$full_status policy=$policy_status constitution=$constitution_status" | tee -a "$report"
+echo "statuses fix=$fix_status apply=$apply_status syntax=$syntax_status focused=$focused_status full=$full_status policy=$policy_status constitution=$constitution_status" | tee -a "$report"
 
 git config user.name "Buildforme Governance Bot"
 git config user.email "actions@users.noreply.github.com"
@@ -100,8 +107,8 @@ jobs:
 YAML
 }
 
-if [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status" -eq 0 ] && [ "$full_status" -eq 0 ] && [ "$policy_status" -eq 0 ] && [ "$constitution_status" -eq 0 ]; then
-  rm -f "$report" scripts/apply_stage7_packet7b.py scripts/run_stage7_packet7b_gate.sh
+if [ "$fix_status" -eq 0 ] && [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status" -eq 0 ] && [ "$full_status" -eq 0 ] && [ "$policy_status" -eq 0 ] && [ "$constitution_status" -eq 0 ]; then
+  rm -f "$report" scripts/apply_stage7_packet7b.py scripts/fix_stage7_packet7b_patcher.py scripts/run_stage7_packet7b_gate.sh
   restore_original_ci
   git diff --check
   git add -A -- \
@@ -118,6 +125,7 @@ if [ "$apply_status" -eq 0 ] && [ "$syntax_status" -eq 0 ] && [ "$focused_status
     tests/test_stage7_review_execution.py \
     docs/STAGE_7_INDEPENDENT_MULTI_AGENT_REVIEW.md \
     scripts/apply_stage7_packet7b.py \
+    scripts/fix_stage7_packet7b_patcher.py \
     scripts/run_stage7_packet7b_gate.sh
   git diff --cached --check
   unexpected=$(git status --porcelain | grep '^??' || true)

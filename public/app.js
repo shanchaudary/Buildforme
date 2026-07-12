@@ -166,6 +166,11 @@ const PAGE_META = {
     title: "Execution control",
     desc: "Kill switch, locks, multi-provider discovery, dry-run and live supervised worktrees. No merge/deploy.",
   },
+  repairs: {
+    kicker: "Stage 7",
+    title: "Independent reviews & repairs",
+    desc: "Blind reviewer quorum, governed repair packets, exact seeds, fresh evidence, and mandatory re-review.",
+  },
   planner: {
     kicker: "Control plane",
     title: "Chief planner",
@@ -755,6 +760,9 @@ function showView(name) {
   }
   if (name === "execution" && serverOnline) {
     refreshExecutionPage();
+  }
+  if (name === "repairs" && serverOnline) {
+    refreshRepairsPage();
   }
   if (name === "constitution" && serverOnline) {
     refreshConstitutionPage();
@@ -2043,6 +2051,132 @@ document.querySelector("#truth-form")?.addEventListener("submit", async (event) 
   }
 });
 
+// —— Stage 7 independent reviews and repairs ——
+function repairMutationBody(extra = {}) {
+  return {
+    founder_token: document.querySelector("#rp-founder-token")?.value || "",
+    csrf_token: document.querySelector("#rp-csrf-token")?.value || "",
+    ...extra,
+  };
+}
+
+async function loadRepairDetail(repairPacketId) {
+  try {
+    const response = await fetch(`/api/repair-packets/${encodeURIComponent(repairPacketId)}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    setText("#rp-detail-title", `Repair ${repairPacketId}`);
+    document.querySelector("#rp-detail").textContent = JSON.stringify(data, null, 2);
+  } catch (error) {
+    showFeedback("#rp-feedback", error.message, "is-error");
+  }
+}
+
+async function repairMutation(url, body, message) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(repairMutationBody(body)),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  showFeedback("#rp-feedback", message, "is-ok");
+  document.querySelector("#rp-detail").textContent = JSON.stringify(data, null, 2);
+  await refreshRepairsPage();
+  return data;
+}
+
+async function refreshRepairsPage() {
+  const list = document.querySelector("#rp-list");
+  if (!list) return;
+  try {
+    const [packetsResponse, runsResponse] = await Promise.all([
+      fetch("/api/repair-packets"),
+      fetch("/api/runs"),
+    ]);
+    const packetsPayload = await packetsResponse.json();
+    const runsPayload = await runsResponse.json();
+    if (!packetsResponse.ok) throw new Error(packetsPayload.error || `HTTP ${packetsResponse.status}`);
+    if (!runsResponse.ok) throw new Error(runsPayload.error || `HTTP ${runsResponse.status}`);
+    const packets = packetsPayload.repair_packets || [];
+    const runs = runsPayload.runs || [];
+    const details = await Promise.all(
+      packets.map(async (packet) => {
+        try {
+          const response = await fetch(`/api/repair-packets/${encodeURIComponent(packet.repair_packet_id)}`);
+          return response.ok ? await response.json() : { repair_packet: packet };
+        } catch (_error) {
+          return { repair_packet: packet };
+        }
+      }),
+    );
+    setText("#rp-packets", packets.length);
+    setText("#rp-admitted", details.filter((item) => item.repair_admission).length);
+    setText("#rp-rereviews", details.filter((item) => item.repair_review_link).length);
+    setText("#rp-needs-review", runs.filter((run) => run.status === "needs_review").length);
+    list.innerHTML = details.length
+      ? details
+          .slice()
+          .reverse()
+          .map((item) => {
+            const packet = item.repair_packet || {};
+            const admission = item.repair_admission;
+            const link = item.repair_review_link;
+            const child = item.child_run;
+            const id = escapeHtml(packet.repair_packet_id || "");
+            return `<article class="queue-item">
+              <div class="queue-item-head"><h3 class="queue-item-title">${id}</h3><span class="chip">${escapeHtml(link ? "re-review" : admission ? "admitted" : "packet-ready")}</span></div>
+              <div class="queue-meta"><span>${escapeHtml(packet.repair_provider_id || "")}</span><span>source ${escapeHtml(packet.source_run_id || "")}</span><span>child ${escapeHtml(child?.id || "—")}</span></div>
+              <p class="queue-action">Blocking findings: ${escapeHtml(String((packet.source_blocking_findings || []).length))} · Allowed files: ${escapeHtml(String((packet.allowed_files || []).length))}</p>
+              <div class="queue-actions">
+                <button type="button" class="btn btn-secondary btn-sm" data-rp-view="${id}">Inspect</button>
+                ${admission ? "" : `<button type="button" class="btn btn-primary btn-sm" data-rp-admit="${id}">Admit child</button>`}
+                ${admission && !link ? `<button type="button" class="btn btn-secondary btn-sm" data-rp-cycle="${id}">Open fresh review</button><button type="button" class="btn btn-danger btn-sm" data-rp-execute="${id}">Execute approved repair</button>` : ""}
+              </div>
+            </article>`;
+          })
+          .join("")
+      : `<div class="empty-inline">No governed repair packets.</div>`;
+    list.querySelectorAll("[data-rp-view]").forEach((button) =>
+      button.addEventListener("click", () => loadRepairDetail(button.getAttribute("data-rp-view"))),
+    );
+    list.querySelectorAll("[data-rp-admit]").forEach((button) =>
+      button.addEventListener("click", async () => {
+        try {
+          const id = button.getAttribute("data-rp-admit");
+          await repairMutation(`/api/repair-packets/${encodeURIComponent(id)}/admit`, {}, `Repair child admitted for ${id}`);
+        } catch (error) {
+          showFeedback("#rp-feedback", error.message, "is-error");
+        }
+      }),
+    );
+    list.querySelectorAll("[data-rp-cycle]").forEach((button) =>
+      button.addEventListener("click", async () => {
+        try {
+          const id = button.getAttribute("data-rp-cycle");
+          await repairMutation(`/api/repair-packets/${encodeURIComponent(id)}/review-cycle`, {}, `Fresh review opened for ${id}`);
+        } catch (error) {
+          showFeedback("#rp-feedback", error.message, "is-error");
+        }
+      }),
+    );
+    list.querySelectorAll("[data-rp-execute]").forEach((button) =>
+      button.addEventListener("click", async () => {
+        if (!confirm("Execute the approved repair child, verify it, and open mandatory fresh review? No merge or deploy.")) return;
+        try {
+          const id = button.getAttribute("data-rp-execute");
+          await repairMutation(`/api/repair-packets/${encodeURIComponent(id)}/execute`, {}, `Repair execution completed for ${id}`);
+        } catch (error) {
+          showFeedback("#rp-feedback", error.message, "is-error");
+        }
+      }),
+    );
+  } catch (error) {
+    list.innerHTML = `<div class="empty-inline warning">${escapeHtml(error.message)}</div>`;
+    showFeedback("#rp-feedback", error.message, "is-error");
+  }
+}
+
 // —— Stage 5 execution control ——
 async function refreshExecutionPage() {
   try {
@@ -2267,6 +2401,22 @@ async function runAction(runId, action, body = {}) {
     showFeedback("#ex-feedback", error.message, "is-error");
   }
 }
+
+document.querySelector("#rp-refresh")?.addEventListener("click", refreshRepairsPage);
+document.querySelector("#rp-create")?.addEventListener("click", async () => {
+  try {
+    const cycleId = document.querySelector("#rp-cycle-id")?.value.trim();
+    const providerId = document.querySelector("#rp-provider-id")?.value.trim();
+    if (!cycleId || !providerId) throw new Error("Review cycle id and repair provider id are required.");
+    await repairMutation(
+      `/api/review-cycles/${encodeURIComponent(cycleId)}/repair-packet`,
+      { repair_provider_id: providerId },
+      `Governed repair packet created from ${cycleId}`,
+    );
+  } catch (error) {
+    showFeedback("#rp-feedback", error.message, "is-error");
+  }
+});
 
 document.querySelector("#ex-refresh")?.addEventListener("click", refreshExecutionPage);
 document.querySelector("#ex-kill-on")?.addEventListener("click", async () => {

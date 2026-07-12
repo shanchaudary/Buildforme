@@ -46,6 +46,12 @@
             </span>
             Execution control
           </button>
+          <button type="button" class="nav-item" data-view="repairs" role="tab" aria-selected="false">
+            <span class="nav-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M14.7 6.3a4 4 0 01-5 5L4 17v3h3l5.7-5.7a4 4 0 005-5l-2.3 2.3-3-3L14.7 6.3z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </span>
+            Reviews &amp; repairs
+          </button>
           <button type="button" class="nav-item" data-view="planner" role="tab" aria-selected="false">
             <span class="nav-icon" aria-hidden="true">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 2l3 7h7l-5.5 4.5L18 21l-6-4-6 4 1.5-7.5L2 9h7l3-7z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
@@ -278,6 +284,43 @@
           <div class="card" style="margin-top:16px">
             <div class="card-head"><div><h2>Run detail / events</h2><p class="card-sub" id="ex-detail-title">Select a run</p></div></div>
             <pre id="ex-detail" class="code-block packet-md">No run selected.</pre>
+          </div>
+        </section>
+
+        <!-- VIEW: Stage 7 reviews and repairs -->
+        <section id="view-repairs" class="view" data-view-panel="repairs" hidden>
+          <div class="local-only-banner">
+            Stage 7 independent review and repair control. All mutations require a founder session and CSRF token.
+            Commands, paths, scope, reviewer lists, seed refs, merge, and deployment authority are never accepted here.
+          </div>
+          <div class="metrics queue-metrics">
+            <article class="metric"><span class="metric-label">Repair packets</span><strong class="metric-value" id="rp-packets">—</strong></article>
+            <article class="metric"><span class="metric-label">Children admitted</span><strong class="metric-value" id="rp-admitted">—</strong></article>
+            <article class="metric"><span class="metric-label">Fresh reviews</span><strong class="metric-value" id="rp-rereviews">—</strong></article>
+            <article class="metric"><span class="metric-label">Runs needing review</span><strong class="metric-value" id="rp-needs-review">—</strong></article>
+          </div>
+          <div class="split packet-split">
+            <div class="card">
+              <div class="card-head"><div><h2>Founder authorization</h2><p class="card-sub">Paste the one-time local session values. They are not saved by the page.</p></div><span class="chip chip-accent">Stage 7</span></div>
+              <div class="field"><label for="rp-founder-token">Founder token</label><input id="rp-founder-token" type="password" autocomplete="off" /></div>
+              <div class="field"><label for="rp-csrf-token">CSRF token</label><input id="rp-csrf-token" type="password" autocomplete="off" /></div>
+              <div class="button-row"><button type="button" id="rp-refresh" class="btn btn-secondary">Refresh status</button></div>
+              <p id="rp-feedback" class="toast" hidden></p>
+            </div>
+            <div class="card">
+              <div class="card-head"><div><h2>Create repair packet</h2><p class="card-sub">Only a finalized repair_required cycle is accepted.</p></div></div>
+              <div class="field"><label for="rp-cycle-id">Review cycle id</label><input id="rp-cycle-id" placeholder="rc-..." /></div>
+              <div class="field"><label for="rp-provider-id">Repair provider id</label><input id="rp-provider-id" placeholder="glm" /></div>
+              <button type="button" id="rp-create" class="btn btn-primary btn-sm">Create governed repair packet</button>
+            </div>
+          </div>
+          <div class="card" style="margin-top:16px">
+            <div class="card-head"><div><h2>Repair packets</h2><p class="card-sub">Fixed actions only: inspect, admit child, execute approved child, or open mandatory fresh review.</p></div></div>
+            <div id="rp-list" class="queue-list"><div class="empty-inline">No repair packets.</div></div>
+          </div>
+          <div class="card" style="margin-top:16px">
+            <div class="card-head"><div><h2>Selected repair detail</h2><p class="card-sub" id="rp-detail-title">Select a repair packet</p></div></div>
+            <pre id="rp-detail" class="code-block packet-md">No repair packet selected.</pre>
           </div>
         </section>
 

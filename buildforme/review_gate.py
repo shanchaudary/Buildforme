@@ -79,6 +79,21 @@ def collect_hard_blocks(
     if evidence.get("process", {}).get("cleanup_ok") is False:
         blocks.append("incomplete process cleanup")
 
+    if str(run.get("execution_mode") or run.get("mode")) == "live_supervised" and run.get(
+        "stage7_review_required"
+    ):
+        independent = (
+            run.get("independent_review")
+            if isinstance(run.get("independent_review"), dict)
+            else {}
+        )
+        if independent.get("status") != "clear":
+            blocks.append("Stage 7 independent review is not clear")
+        if not independent.get("quorum_met"):
+            blocks.append("Stage 7 independent review quorum is not met")
+        if int(independent.get("blocking_finding_count") or 0) > 0:
+            blocks.append("Stage 7 independent review contains blocking findings")
+
     # Deduplicate preserve order
     seen: set[str] = set()
     out: list[str] = []

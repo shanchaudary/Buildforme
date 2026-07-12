@@ -129,6 +129,12 @@ def compute_run_scope_fingerprint(run: dict[str, Any], packet: dict[str, Any] | 
         "constitution_lease_fingerprint": str(
             run.get("constitution_lease_fingerprint") or ""
         ),
+        "repair_packet_id": str(run.get("repair_packet_id") or ""),
+        "repair_fingerprint": str(run.get("repair_fingerprint") or ""),
+        "repair_source_cycle_id": str(run.get("repair_source_cycle_id") or ""),
+        "repair_source_evidence_id": str(run.get("repair_source_evidence_id") or ""),
+        "execution_seed_commit": str(run.get("execution_seed_commit") or ""),
+        "execution_seed_ref": str(run.get("execution_seed_ref") or ""),
         "packet_constitution_version": str(packet.get("constitution_version") or ""),
         "packet_constitution_hash": str(packet.get("constitution_hash") or ""),
         "packet_objective": str(packet.get("objective") or ""),

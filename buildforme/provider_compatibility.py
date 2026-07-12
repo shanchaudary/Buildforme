@@ -37,11 +37,21 @@ PROVIDER_PROFILES: dict[str, dict[str, Any]] = {
         "cwd_flag": "-C",
     },
     "claude": {
-        "min_major": 1,
-        "required_help_tokens": ["--print", "-p", "--output-format"],
+        "min_major": 2,
+        "min_version": (2, 1, 205),
+        "required_help_tokens": [
+            "--print",
+            "--output-format",
+            "--json-schema",
+            "--permission-mode",
+            "--tools",
+            "--strict-mcp-config",
+            "--safe-mode",
+            "--no-session-persistence",
+        ],
         "help_argv": ["--help"],
         "version_argv": ["--version"],
-        "non_interactive_tokens": ["--print", "non-interactive"],
+        "non_interactive_tokens": ["--print"],
         "prompt_delivery": "arg",
         "cwd_flag": None,
     },
@@ -148,6 +158,24 @@ def verify_provider_compatibility(
             result["problems"].append(f"version probe failed: {ver.get('detail')}")
     else:
         result["version_verified"] = True
+
+    minimum = profile.get("min_version")
+    if minimum:
+        parsed_version = parse_version_tuple(version_text)
+        result["minimum_version"] = ".".join(str(part) for part in minimum)
+        result["parsed_version"] = (
+            ".".join(str(part) for part in parsed_version)
+            if parsed_version is not None
+            else None
+        )
+        if parsed_version is None:
+            result["version_verified"] = False
+            result["problems"].append("provider version could not be parsed")
+        elif parsed_version < tuple(int(part) for part in minimum):
+            result["version_verified"] = False
+            result["problems"].append(
+                f"provider version {result['parsed_version']} is below required {result['minimum_version']}"
+            )
 
     # Help / contract probe
     help_argv = [str(executable), *list(profile.get("help_argv") or ["--help"])]
@@ -291,10 +319,22 @@ def _run(argv: list[str], timeout_sec: float) -> dict[str, Any]:
     }
 
 
-def parse_major_version(text: str | None) -> int | None:
+def parse_version_tuple(text: str | None) -> tuple[int, int, int] | None:
     if not text:
         return None
-    m = re.search(r"(\d+)\.\d+", text)
-    if not m:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", text)
+    if not match:
         return None
-    return int(m.group(1))
+    return tuple(int(match.group(index)) for index in (1, 2, 3))
+
+
+def parse_major_version(text: str | None) -> int | None:
+    parsed = parse_version_tuple(text)
+    if parsed is not None:
+        return parsed[0]
+    if not text:
+        return None
+    match = re.search(r"(\d+)\.\d+", text)
+    if not match:
+        return None
+    return int(match.group(1))

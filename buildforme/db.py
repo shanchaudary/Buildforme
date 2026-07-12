@@ -17,7 +17,7 @@ from typing import Any, Iterator
 from buildforme.coordination_lock import CoordinationFileLock
 from buildforme.storage import utc_now_iso
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -231,6 +231,150 @@ CREATE TABLE IF NOT EXISTS provider_compat_cache (
   checked_at TEXT NOT NULL,
   expires_at_epoch INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS review_cycles (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(id),
+  evidence_id TEXT NOT NULL REFERENCES evidence(evidence_id),
+  evidence_fingerprint TEXT NOT NULL,
+  scope_fingerprint TEXT NOT NULL,
+  constitution_hash TEXT NOT NULL,
+  status TEXT NOT NULL,
+  required_reviewer_count INTEGER NOT NULL,
+  min_distinct_providers INTEGER NOT NULL,
+  policy_json TEXT NOT NULL,
+  aggregate_json TEXT,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  finalized_at TEXT,
+  row_version INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_review_cycles_run ON review_cycles(run_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_review_cycles_active_run
+  ON review_cycles(run_id) WHERE status IN ('open','collecting','ready_to_aggregate');
+
+CREATE TABLE IF NOT EXISTS review_assignments (
+  id TEXT PRIMARY KEY,
+  cycle_id TEXT NOT NULL REFERENCES review_cycles(id),
+  reviewer_id TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  status TEXT NOT NULL,
+  blind INTEGER NOT NULL DEFAULT 1,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  submitted_at TEXT,
+  UNIQUE(cycle_id, reviewer_id),
+  UNIQUE(cycle_id, provider_id)
+);
+
+CREATE TABLE IF NOT EXISTS review_reports (
+  report_id TEXT PRIMARY KEY,
+  cycle_id TEXT NOT NULL REFERENCES review_cycles(id),
+  assignment_id TEXT NOT NULL REFERENCES review_assignments(id),
+  verdict TEXT NOT NULL,
+  report_fingerprint TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  immutable INTEGER NOT NULL DEFAULT 1,
+  UNIQUE(assignment_id)
+);
+
+CREATE TABLE IF NOT EXISTS review_findings (
+  finding_id TEXT PRIMARY KEY,
+  report_id TEXT NOT NULL REFERENCES review_reports(report_id),
+  cycle_id TEXT NOT NULL REFERENCES review_cycles(id),
+  assignment_id TEXT NOT NULL REFERENCES review_assignments(id),
+  severity TEXT NOT NULL,
+  category TEXT NOT NULL,
+  blocking INTEGER NOT NULL DEFAULT 0,
+  finding_fingerprint TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  immutable INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_review_findings_cycle ON review_findings(cycle_id, created_at);
+
+CREATE TABLE IF NOT EXISTS review_events (
+  id TEXT PRIMARY KEY,
+  cycle_id TEXT NOT NULL REFERENCES review_cycles(id),
+  event_type TEXT NOT NULL,
+  summary TEXT,
+  actor TEXT,
+  metadata_json TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_review_events_cycle ON review_events(cycle_id, created_at);
+
+CREATE TABLE IF NOT EXISTS review_packets (
+  packet_id TEXT PRIMARY KEY,
+  cycle_id TEXT NOT NULL REFERENCES review_cycles(id),
+  assignment_id TEXT NOT NULL REFERENCES review_assignments(id),
+  packet_fingerprint TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  immutable INTEGER NOT NULL DEFAULT 1,
+  UNIQUE(assignment_id)
+);
+
+CREATE TABLE IF NOT EXISTS review_executions (
+  execution_id TEXT PRIMARY KEY,
+  cycle_id TEXT NOT NULL REFERENCES review_cycles(id),
+  assignment_id TEXT NOT NULL REFERENCES review_assignments(id),
+  packet_id TEXT NOT NULL REFERENCES review_packets(packet_id),
+  provider_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  execution_fingerprint TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  immutable INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_review_executions_assignment
+  ON review_executions(assignment_id, created_at);
+
+CREATE TABLE IF NOT EXISTS repair_packets (
+  repair_packet_id TEXT PRIMARY KEY,
+  source_cycle_id TEXT NOT NULL UNIQUE REFERENCES review_cycles(id),
+  source_run_id TEXT NOT NULL REFERENCES runs(id),
+  source_evidence_id TEXT NOT NULL REFERENCES evidence(evidence_id),
+  repair_provider_id TEXT NOT NULL,
+  aggregate_fingerprint TEXT NOT NULL,
+  repair_fingerprint TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  immutable INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_repair_packets_run
+  ON repair_packets(source_run_id, created_at);
+
+CREATE TABLE IF NOT EXISTS repair_admissions (
+  repair_admission_id TEXT PRIMARY KEY,
+  repair_packet_id TEXT NOT NULL UNIQUE REFERENCES repair_packets(repair_packet_id),
+  source_run_id TEXT NOT NULL REFERENCES runs(id),
+  child_run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+  seed_commit TEXT NOT NULL,
+  seed_ref TEXT NOT NULL,
+  seed_fingerprint TEXT NOT NULL,
+  child_scope_fingerprint TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  immutable INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_repair_admissions_source
+  ON repair_admissions(source_run_id, created_at);
+
+CREATE TABLE IF NOT EXISTS repair_review_links (
+  repair_packet_id TEXT PRIMARY KEY REFERENCES repair_packets(repair_packet_id),
+  repair_admission_id TEXT NOT NULL REFERENCES repair_admissions(repair_admission_id),
+  source_run_id TEXT NOT NULL REFERENCES runs(id),
+  child_run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+  fresh_evidence_id TEXT NOT NULL UNIQUE REFERENCES evidence(evidence_id),
+  review_cycle_id TEXT NOT NULL UNIQUE REFERENCES review_cycles(id),
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  immutable INTEGER NOT NULL DEFAULT 1
+);
 """
 
 
@@ -278,6 +422,16 @@ class ExecutionDB:
                         self._migrate_to_v2(conn)
                     if current < 3:
                         self._migrate_to_v3(conn)
+                    if current < 4:
+                        self._migrate_to_v4(conn)
+                    if current < 5:
+                        self._migrate_to_v5(conn)
+                    if current < 6:
+                        self._migrate_to_v6(conn)
+                    if current < 7:
+                        self._migrate_to_v7(conn)
+                    if current < 8:
+                        self._migrate_to_v8(conn)
                     if current < SCHEMA_VERSION:
                         conn.execute(
                             "UPDATE schema_meta SET value=? WHERE key='version'",
@@ -391,6 +545,175 @@ class ExecutionDB:
                     row[0],
                 ),
             )
+
+    def _migrate_to_v4(self, conn: sqlite3.Connection) -> None:
+        """Add Stage 7 immutable independent-review authority."""
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS review_cycles (
+              id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL REFERENCES runs(id),
+              evidence_id TEXT NOT NULL REFERENCES evidence(evidence_id),
+              evidence_fingerprint TEXT NOT NULL,
+              scope_fingerprint TEXT NOT NULL,
+              constitution_hash TEXT NOT NULL,
+              status TEXT NOT NULL,
+              required_reviewer_count INTEGER NOT NULL,
+              min_distinct_providers INTEGER NOT NULL,
+              policy_json TEXT NOT NULL,
+              aggregate_json TEXT,
+              payload_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              finalized_at TEXT,
+              row_version INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_review_cycles_run ON review_cycles(run_id, created_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_review_cycles_active_run
+              ON review_cycles(run_id) WHERE status IN ('open','collecting','ready_to_aggregate');
+            CREATE TABLE IF NOT EXISTS review_assignments (
+              id TEXT PRIMARY KEY,
+              cycle_id TEXT NOT NULL REFERENCES review_cycles(id),
+              reviewer_id TEXT NOT NULL,
+              provider_id TEXT NOT NULL,
+              role TEXT NOT NULL,
+              status TEXT NOT NULL,
+              blind INTEGER NOT NULL DEFAULT 1,
+              payload_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              submitted_at TEXT,
+              UNIQUE(cycle_id, reviewer_id),
+              UNIQUE(cycle_id, provider_id)
+            );
+            CREATE TABLE IF NOT EXISTS review_reports (
+              report_id TEXT PRIMARY KEY,
+              cycle_id TEXT NOT NULL REFERENCES review_cycles(id),
+              assignment_id TEXT NOT NULL REFERENCES review_assignments(id),
+              verdict TEXT NOT NULL,
+              report_fingerprint TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              immutable INTEGER NOT NULL DEFAULT 1,
+              UNIQUE(assignment_id)
+            );
+            CREATE TABLE IF NOT EXISTS review_findings (
+              finding_id TEXT PRIMARY KEY,
+              report_id TEXT NOT NULL REFERENCES review_reports(report_id),
+              cycle_id TEXT NOT NULL REFERENCES review_cycles(id),
+              assignment_id TEXT NOT NULL REFERENCES review_assignments(id),
+              severity TEXT NOT NULL,
+              category TEXT NOT NULL,
+              blocking INTEGER NOT NULL DEFAULT 0,
+              finding_fingerprint TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              immutable INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_review_findings_cycle ON review_findings(cycle_id, created_at);
+            CREATE TABLE IF NOT EXISTS review_events (
+              id TEXT PRIMARY KEY,
+              cycle_id TEXT NOT NULL REFERENCES review_cycles(id),
+              event_type TEXT NOT NULL,
+              summary TEXT,
+              actor TEXT,
+              metadata_json TEXT,
+              created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_review_events_cycle ON review_events(cycle_id, created_at);
+            """
+        )
+
+    def _migrate_to_v5(self, conn: sqlite3.Connection) -> None:
+        """Add immutable review packets and reviewer execution evidence."""
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS review_packets (
+              packet_id TEXT PRIMARY KEY,
+              cycle_id TEXT NOT NULL REFERENCES review_cycles(id),
+              assignment_id TEXT NOT NULL REFERENCES review_assignments(id),
+              packet_fingerprint TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              immutable INTEGER NOT NULL DEFAULT 1,
+              UNIQUE(assignment_id)
+            );
+            CREATE TABLE IF NOT EXISTS review_executions (
+              execution_id TEXT PRIMARY KEY,
+              cycle_id TEXT NOT NULL REFERENCES review_cycles(id),
+              assignment_id TEXT NOT NULL REFERENCES review_assignments(id),
+              packet_id TEXT NOT NULL REFERENCES review_packets(packet_id),
+              provider_id TEXT NOT NULL,
+              status TEXT NOT NULL,
+              execution_fingerprint TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              immutable INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_review_executions_assignment
+              ON review_executions(assignment_id, created_at);
+            """
+        )
+
+    def _migrate_to_v6(self, conn: sqlite3.Connection) -> None:
+        """Add immutable Stage 7 governed repair packets."""
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS repair_packets (
+              repair_packet_id TEXT PRIMARY KEY,
+              source_cycle_id TEXT NOT NULL UNIQUE REFERENCES review_cycles(id),
+              source_run_id TEXT NOT NULL REFERENCES runs(id),
+              source_evidence_id TEXT NOT NULL REFERENCES evidence(evidence_id),
+              repair_provider_id TEXT NOT NULL,
+              aggregate_fingerprint TEXT NOT NULL,
+              repair_fingerprint TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              immutable INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_repair_packets_run
+              ON repair_packets(source_run_id, created_at);
+            """
+        )
+
+    def _migrate_to_v7(self, conn: sqlite3.Connection) -> None:
+        """Add immutable governed repair-run admissions."""
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS repair_admissions (
+              repair_admission_id TEXT PRIMARY KEY,
+              repair_packet_id TEXT NOT NULL UNIQUE REFERENCES repair_packets(repair_packet_id),
+              source_run_id TEXT NOT NULL REFERENCES runs(id),
+              child_run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+              seed_commit TEXT NOT NULL,
+              seed_ref TEXT NOT NULL,
+              seed_fingerprint TEXT NOT NULL,
+              child_scope_fingerprint TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              immutable INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_repair_admissions_source
+              ON repair_admissions(source_run_id, created_at);
+            """
+        )
+
+    def _migrate_to_v8(self, conn: sqlite3.Connection) -> None:
+        """Bind repair child fresh evidence to the mandatory re-review cycle."""
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS repair_review_links (
+              repair_packet_id TEXT PRIMARY KEY REFERENCES repair_packets(repair_packet_id),
+              repair_admission_id TEXT NOT NULL REFERENCES repair_admissions(repair_admission_id),
+              source_run_id TEXT NOT NULL REFERENCES runs(id),
+              child_run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+              fresh_evidence_id TEXT NOT NULL UNIQUE REFERENCES evidence(evidence_id),
+              review_cycle_id TEXT NOT NULL UNIQUE REFERENCES review_cycles(id),
+              payload_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              immutable INTEGER NOT NULL DEFAULT 1
+            );
+            """
+        )
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:

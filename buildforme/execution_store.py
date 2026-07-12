@@ -42,6 +42,13 @@ PROTECTED_AUTHORITY_FIELDS: frozenset[str] = frozenset(
         "attempt",
         "max_attempts",
         "idempotency_key",
+        "repair_packet_id",
+        "repair_fingerprint",
+        "repair_source_cycle_id",
+        "repair_source_evidence_id",
+        "execution_seed_commit",
+        "execution_seed_ref",
+        "requires_independent_review_after_execution",
         "created_at",
     }
 )
@@ -1712,6 +1719,956 @@ class Stage6Store:
             "updated_at": row[5],
         }
 
+    # —— Stage 7 Packet 7B review packets/executions ——
+    def claim_review_assignment_execution_atomic(
+        self,
+        *,
+        cycle_id: str,
+        assignment_id: str,
+        packet_id: str,
+        claim_id: str,
+        actor: str,
+    ) -> dict[str, Any]:
+        """Atomically reserve one pending assignment for exactly one reviewer process."""
+        now = utc_now_iso()
+        with self.db.transaction() as conn:
+            cycle_row = conn.execute(
+                "SELECT payload_json, status FROM review_cycles WHERE id=?",
+                (str(cycle_id),),
+            ).fetchone()
+            assignment_row = conn.execute(
+                "SELECT payload_json, status, cycle_id FROM review_assignments WHERE id=?",
+                (str(assignment_id),),
+            ).fetchone()
+            packet_row = conn.execute(
+                "SELECT packet_id FROM review_packets WHERE packet_id=? AND assignment_id=?",
+                (str(packet_id), str(assignment_id)),
+            ).fetchone()
+            if not cycle_row or not assignment_row or not packet_row:
+                raise ValueError("review execution claim cycle, assignment, or packet not found")
+            if str(cycle_row[1]) not in {"open", "collecting"}:
+                raise ValueError("review cycle is not accepting reviewer execution")
+            if str(assignment_row[2]) != str(cycle_id):
+                raise ValueError("review execution claim assignment cycle mismatch")
+            if str(assignment_row[1]) != "pending":
+                raise ValueError("review assignment already claimed or unavailable")
+            assignment = loads(assignment_row[0], {})
+            assignment["status"] = "executing"
+            assignment["execution_claim_id"] = str(claim_id)
+            assignment["execution_packet_id"] = str(packet_id)
+            assignment["execution_started_at"] = now
+            assignment["execution_claim_actor"] = str(actor)
+            cur = conn.execute(
+                "UPDATE review_assignments SET status='executing', payload_json=? WHERE id=? AND status='pending'",
+                (dumps(assignment), str(assignment_id)),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("review assignment claim race rejected")
+            cycle = loads(cycle_row[0], {})
+            cycle["status"] = cycle_row[1]
+            conn.execute(
+                "INSERT INTO review_events(id, cycle_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (
+                    new_id("rve"),
+                    str(cycle_id),
+                    "review_execution_claimed",
+                    "Reviewer assignment claimed for one process",
+                    str(actor),
+                    dumps(
+                        {
+                            "assignment_id": assignment_id,
+                            "packet_id": packet_id,
+                            "claim_id": claim_id,
+                        }
+                    ),
+                    now,
+                ),
+            )
+        return {"cycle": cycle, "assignment": assignment}
+
+    def save_review_packet_atomic(self, *, packet: dict[str, Any], actor: str) -> dict[str, Any]:
+        from buildforme.review_execution import validate_review_packet_for_storage
+
+        record = dict(packet)
+        cycle_id = str(record.get("cycle_id") or "")
+        assignment_id = str(record.get("assignment_id") or "")
+        packet_id = str(record.get("packet_id") or "")
+        with self.db.transaction() as conn:
+            cycle_row = conn.execute(
+                "SELECT run_id, payload_json, status FROM review_cycles WHERE id=?",
+                (cycle_id,),
+            ).fetchone()
+            assignment_row = conn.execute(
+                "SELECT payload_json, status, cycle_id FROM review_assignments WHERE id=?",
+                (assignment_id,),
+            ).fetchone()
+            if not cycle_row or not assignment_row:
+                raise ValueError("review packet cycle or assignment not found")
+            if str(assignment_row[2]) != cycle_id:
+                raise ValueError("review packet assignment cycle mismatch")
+            if str(assignment_row[1]) != "pending":
+                raise ValueError("review packet requires pending assignment")
+            cycle = loads(cycle_row[1], {})
+            cycle["status"] = cycle_row[2]
+            assignment = loads(assignment_row[0], {})
+            assignment["status"] = assignment_row[1]
+            run_row = conn.execute(
+                "SELECT payload_json FROM runs WHERE id=?", (str(cycle_row[0]),)
+            ).fetchone()
+            evidence_row = conn.execute(
+                "SELECT payload_json FROM evidence WHERE evidence_id=?",
+                (str(cycle.get("evidence_id") or ""),),
+            ).fetchone()
+            if not run_row or not evidence_row:
+                raise ValueError("review packet run or evidence not found")
+            run = loads(run_row[0], {})
+            evidence = loads(evidence_row[0], {})
+            from buildforme.evidence import EVIDENCE_KIND_EXECUTION
+            from buildforme.governance import compute_run_scope_fingerprint
+
+            if str(cycle.get("status") or "") not in {"open", "collecting"}:
+                raise ValueError("review packet requires active cycle")
+            live_scope = compute_run_scope_fingerprint(
+                run, run.get("packet") if isinstance(run.get("packet"), dict) else None
+            )
+            if live_scope != str(run.get("scope_fingerprint") or "") or live_scope != str(
+                cycle.get("scope_fingerprint") or ""
+            ):
+                raise ValueError("review packet run/cycle scope is stale")
+            latest_execution = None
+            for row in conn.execute(
+                "SELECT payload_json FROM evidence WHERE run_id=? ORDER BY sequence DESC",
+                (str(run.get("id") or ""),),
+            ).fetchall():
+                candidate = loads(row[0], {})
+                kind = str(candidate.get("evidence_kind") or "")
+                if kind == EVIDENCE_KIND_EXECUTION or (
+                    not kind and isinstance(candidate.get("process"), dict)
+                ):
+                    latest_execution = candidate
+                    break
+            if not latest_execution or str(latest_execution.get("evidence_id") or "") != str(
+                evidence.get("evidence_id") or ""
+            ):
+                raise ValueError("review packet is not bound to latest execution evidence")
+            problems = validate_review_packet_for_storage(
+                record,
+                cycle=cycle,
+                assignment=assignment,
+                run=run,
+                evidence=evidence,
+            )
+            if problems:
+                raise ValueError("review packet rejected: " + "; ".join(problems))
+            existing = conn.execute(
+                "SELECT payload_json, packet_fingerprint FROM review_packets WHERE assignment_id=?",
+                (assignment_id,),
+            ).fetchone()
+            if existing:
+                prior = loads(existing[0], {})
+                if str(existing[1] or "") != str(record.get("packet_fingerprint") or ""):
+                    raise ValueError("review packet mutation forbidden")
+                return prior
+            conn.execute(
+                "INSERT INTO review_packets(packet_id, cycle_id, assignment_id, packet_fingerprint, payload_json, created_at, immutable) VALUES (?,?,?,?,?,?,1)",
+                (
+                    packet_id,
+                    cycle_id,
+                    assignment_id,
+                    record.get("packet_fingerprint"),
+                    dumps(record),
+                    record.get("created_at") or utc_now_iso(),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO review_events(id, cycle_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (
+                    new_id("rve"),
+                    cycle_id,
+                    "review_packet_bound",
+                    "Immutable blind-review packet bound to assignment",
+                    actor,
+                    dumps({"assignment_id": assignment_id, "packet_id": packet_id}),
+                    utc_now_iso(),
+                ),
+            )
+        return record
+
+    def get_review_packet_for_assignment(self, assignment_id: str) -> dict[str, Any]:
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM review_packets WHERE assignment_id=?",
+                (str(assignment_id),),
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Review packet not found for assignment: {assignment_id}")
+        return loads(row[0], {})
+
+    def list_review_execution_attempts(self, assignment_id: str) -> list[dict[str, Any]]:
+        with self.db.transaction() as conn:
+            rows = conn.execute(
+                "SELECT payload_json FROM review_executions WHERE assignment_id=? ORDER BY created_at, execution_id",
+                (str(assignment_id),),
+            ).fetchall()
+        return [loads(row[0], {}) for row in rows]
+
+    def record_review_execution_atomic(self, *, execution: dict[str, Any], actor: str) -> dict[str, Any]:
+        from buildforme.review_execution import validate_review_execution_record
+
+        record = dict(execution)
+        if str(record.get("status") or "") != "failed":
+            raise ValueError("only failed reviewer execution may commit without a report")
+        assignment_id = str(record.get("assignment_id") or "")
+        now = utc_now_iso()
+        with self.db.transaction() as conn:
+            assignment_row = conn.execute(
+                "SELECT payload_json, status, cycle_id FROM review_assignments WHERE id=?",
+                (assignment_id,),
+            ).fetchone()
+            packet_row = conn.execute(
+                "SELECT payload_json FROM review_packets WHERE packet_id=? AND assignment_id=?",
+                (str(record.get("packet_id") or ""), assignment_id),
+            ).fetchone()
+            if not assignment_row or not packet_row:
+                raise ValueError("review execution assignment or packet not found")
+            if str(assignment_row[1]) != "executing":
+                raise ValueError("failed review execution requires executing assignment")
+            assignment = loads(assignment_row[0], {})
+            assignment["status"] = assignment_row[1]
+            packet = loads(packet_row[0], {})
+            problems = validate_review_execution_record(
+                record, packet=packet, assignment=assignment, report=None
+            )
+            if problems:
+                raise ValueError("review execution rejected: " + "; ".join(problems))
+            if conn.execute(
+                "SELECT execution_id FROM review_executions WHERE execution_id=?",
+                (str(record.get("execution_id") or ""),),
+            ).fetchone():
+                raise ValueError("review execution evidence is append-only")
+            conn.execute(
+                "INSERT INTO review_executions(execution_id, cycle_id, assignment_id, packet_id, provider_id, status, execution_fingerprint, payload_json, created_at, immutable) VALUES (?,?,?,?,?,?,?,?,?,1)",
+                (
+                    record["execution_id"],
+                    record["cycle_id"],
+                    assignment_id,
+                    record["packet_id"],
+                    record["provider_id"],
+                    record["status"],
+                    record["execution_fingerprint"],
+                    dumps(record),
+                    record.get("created_at") or now,
+                ),
+            )
+
+            retry_safe = bool(record.get("retry_safe"))
+            cycle_id = str(assignment_row[2])
+            if retry_safe:
+                assignment["status"] = "pending"
+                assignment["last_execution_failure_id"] = record["execution_id"]
+                assignment["last_execution_failure_code"] = record.get("failure_code")
+                for key in (
+                    "execution_claim_id",
+                    "execution_packet_id",
+                    "execution_started_at",
+                    "execution_claim_actor",
+                ):
+                    assignment.pop(key, None)
+                conn.execute(
+                    "UPDATE review_assignments SET status='pending', payload_json=? WHERE id=? AND status='executing'",
+                    (dumps(assignment), assignment_id),
+                )
+                event_type = "review_execution_retry_safe_failure"
+                summary = "Reviewer execution failed with proven retry-safe state"
+            else:
+                assignment["status"] = "blocked"
+                assignment["blocked_execution_id"] = record["execution_id"]
+                assignment["blocked_failure_code"] = record.get("failure_code")
+                conn.execute(
+                    "UPDATE review_assignments SET status='blocked', payload_json=? WHERE id=? AND status='executing'",
+                    (dumps(assignment), assignment_id),
+                )
+                cycle_row = conn.execute(
+                    "SELECT run_id, payload_json, row_version FROM review_cycles WHERE id=?",
+                    (cycle_id,),
+                ).fetchone()
+                if not cycle_row:
+                    raise ValueError("review cycle missing while recording integrity failure")
+                cycle = loads(cycle_row[1], {})
+                cycle["status"] = "blocked"
+                cycle["integrity_failure_execution_id"] = record["execution_id"]
+                cycle["integrity_failure_code"] = record.get("failure_code")
+                cycle["updated_at"] = now
+                cycle_version = int(cycle_row[2] or 1) + 1
+                cycle["row_version"] = cycle_version
+                conn.execute(
+                    "UPDATE review_cycles SET status='blocked', payload_json=?, updated_at=?, row_version=? WHERE id=? AND row_version=?",
+                    (dumps(cycle), now, cycle_version, cycle_id, int(cycle_row[2] or 1)),
+                )
+                run_row = conn.execute(
+                    "SELECT payload_json, row_version FROM runs WHERE id=?",
+                    (str(cycle_row[0]),),
+                ).fetchone()
+                if not run_row:
+                    raise ValueError("review run missing while recording integrity failure")
+                run = loads(run_row[0], {})
+                run["independent_review"] = {
+                    **(run.get("independent_review") or {}),
+                    "cycle_id": cycle_id,
+                    "status": "blocked",
+                    "integrity_failure_execution_id": record["execution_id"],
+                    "integrity_failure_code": record.get("failure_code"),
+                }
+                run["updated_at"] = now
+                run_version = int(run_row[1] or 1) + 1
+                run["row_version"] = run_version
+                conn.execute(
+                    "UPDATE runs SET payload_json=?, updated_at=?, row_version=? WHERE id=? AND row_version=?",
+                    (dumps(run), now, run_version, str(cycle_row[0]), int(run_row[1] or 1)),
+                )
+                event_type = "review_execution_integrity_blocked"
+                summary = "Reviewer execution integrity failure blocked the cycle"
+
+            conn.execute(
+                "INSERT INTO review_events(id, cycle_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (
+                    new_id("rve"),
+                    cycle_id,
+                    event_type,
+                    summary,
+                    actor,
+                    dumps(
+                        {
+                            "assignment_id": assignment_id,
+                            "execution_id": record["execution_id"],
+                            "failure_code": record.get("failure_code"),
+                            "retry_safe": retry_safe,
+                        }
+                    ),
+                    now,
+                ),
+            )
+        return record
+
+    # —— Stage 7 independent reviews ——
+    def create_review_cycle_atomic(
+        self,
+        *,
+        cycle: dict[str, Any],
+        assignments: list[dict[str, Any]],
+        actor: str,
+    ) -> dict[str, Any]:
+        from buildforme.evidence import EVIDENCE_KIND_EXECUTION, validate_evidence_for_storage
+        from buildforme.review_contracts import validate_assignment_record, validate_cycle_record
+
+        cycle_record = dict(cycle)
+        problems = validate_cycle_record(cycle_record)
+        if problems:
+            raise ValueError("review cycle rejected: " + "; ".join(problems))
+        assignment_records = [dict(item) for item in assignments]
+        for item in assignment_records:
+            problems = validate_assignment_record(item, cycle_record)
+            if problems:
+                raise ValueError("review assignment rejected: " + "; ".join(problems))
+        declared_reviewers = {
+            (str(item.get("reviewer_id")), str(item.get("provider_id")), str(item.get("role")))
+            for item in (cycle_record.get("reviewers") or [])
+        }
+        assigned_reviewers = {
+            (str(item.get("reviewer_id")), str(item.get("provider_id")), str(item.get("role")))
+            for item in assignment_records
+        }
+        if declared_reviewers != assigned_reviewers or len(assignment_records) != len(
+            cycle_record.get("reviewers") or []
+        ):
+            raise ValueError("review assignments do not exactly match declared reviewers")
+        cycle_id = str(cycle_record["cycle_id"])
+        run_id = str(cycle_record["run_id"])
+        now = utc_now_iso()
+        with self.db.transaction() as conn:
+            run_row = conn.execute(
+                "SELECT row_version, payload_json FROM runs WHERE id=?", (run_id,)
+            ).fetchone()
+            if not run_row:
+                raise KeyError(f"Run not found: {run_id}")
+            run = loads(run_row[1], {})
+            if str(run.get("status") or "") != "needs_review":
+                raise ValueError("review cycle requires run status needs_review")
+            if str(cycle_record.get("scope_fingerprint") or "") != str(
+                run.get("scope_fingerprint") or ""
+            ):
+                raise ValueError("review cycle scope does not match canonical run")
+            if str(cycle_record.get("constitution_hash") or "") != str(
+                run.get("constitution_hash") or ""
+            ):
+                raise ValueError("review cycle Constitution does not match canonical run")
+            if str(cycle_record.get("constitution_lease_id") or "") != str(
+                run.get("constitution_lease_id") or ""
+            ):
+                raise ValueError("review cycle Constitution lease does not match canonical run")
+            if str(cycle_record.get("implementer_provider_id") or "") != str(
+                run.get("provider_id") or ""
+            ):
+                raise ValueError("review cycle implementer provider does not match canonical run")
+            evidence_rows = conn.execute(
+                "SELECT evidence_id, payload_json, evidence_fingerprint FROM evidence WHERE run_id=? ORDER BY sequence DESC",
+                (run_id,),
+            ).fetchall()
+            latest_execution = None
+            for candidate in evidence_rows:
+                payload = loads(candidate[1], {})
+                if str(payload.get("evidence_kind") or "") == EVIDENCE_KIND_EXECUTION:
+                    latest_execution = (candidate, payload)
+                    break
+            if latest_execution is None:
+                raise ValueError("latest execution evidence not found")
+            evidence_row, evidence_payload = latest_execution
+            if str(evidence_row[0]) != str(cycle_record["evidence_id"]):
+                raise ValueError("review cycle must bind the latest execution evidence")
+            evidence_problems = validate_evidence_for_storage(evidence_payload)
+            if evidence_problems:
+                raise ValueError("bound execution evidence invalid: " + "; ".join(evidence_problems))
+            actual_evidence_fp = str(
+                evidence_payload.get("evidence_fingerprint") or evidence_row[2] or ""
+            )
+            if actual_evidence_fp != str(cycle_record["evidence_fingerprint"]):
+                raise ValueError("bound execution evidence fingerprint mismatch")
+            evidence_constitution = (
+                evidence_payload.get("constitution")
+                if isinstance(evidence_payload.get("constitution"), dict)
+                else {}
+            )
+            if str(evidence_constitution.get("hash") or "") != str(run.get("constitution_hash") or ""):
+                raise ValueError("execution evidence Constitution is stale")
+            repair_context = None
+            repair_packet_id = str(run.get("repair_packet_id") or "")
+            if repair_packet_id:
+                if run.get("stage7_review_required") is not True or run.get(
+                    "requires_independent_review_after_execution"
+                ) is not True:
+                    raise ValueError("repair child is missing mandatory independent-review authority")
+                admission_row = conn.execute(
+                    "SELECT repair_admission_id, source_run_id, child_run_id, payload_json FROM repair_admissions WHERE repair_packet_id=?",
+                    (repair_packet_id,),
+                ).fetchone()
+                if not admission_row:
+                    raise ValueError("repair review cycle requires canonical repair admission")
+                if str(admission_row[2] or "") != run_id:
+                    raise ValueError("repair admission child run mismatch")
+                packet_row = conn.execute(
+                    "SELECT payload_json FROM repair_packets WHERE repair_packet_id=?",
+                    (repair_packet_id,),
+                ).fetchone()
+                if not packet_row:
+                    raise ValueError("repair review cycle requires canonical repair packet")
+                repair_packet = loads(packet_row[0], {})
+                if str(repair_packet.get("repair_provider_id") or "") != str(run.get("provider_id") or ""):
+                    raise ValueError("repair review implementer does not match repair packet")
+                if str(evidence_row[0]) == str(repair_packet.get("source_evidence_id") or ""):
+                    raise ValueError("repair review requires fresh child execution evidence")
+                actual_provider_ids = sorted(str(item.get("provider_id") or "") for item in assignment_records)
+                expected_provider_ids = sorted(
+                    str(item) for item in (repair_packet.get("source_reviewer_provider_ids") or [])
+                )
+                if actual_provider_ids != expected_provider_ids:
+                    raise ValueError("repair re-review assignments must exactly reuse source reviewer providers")
+                if str(run.get("provider_id") or "") in actual_provider_ids:
+                    raise ValueError("repair implementer cannot participate in repair re-review")
+                if conn.execute(
+                    "SELECT repair_packet_id FROM repair_review_links WHERE repair_packet_id=? OR child_run_id=? OR fresh_evidence_id=?",
+                    (repair_packet_id, run_id, str(evidence_row[0])),
+                ).fetchone():
+                    raise ValueError("repair re-review link already exists")
+                repair_context = {
+                    "repair_packet": repair_packet,
+                    "repair_admission_id": str(admission_row[0]),
+                    "source_run_id": str(admission_row[1]),
+                    "fresh_evidence_id": str(evidence_row[0]),
+                }
+            prior_same_evidence = conn.execute(
+                "SELECT id, status FROM review_cycles WHERE run_id=? AND evidence_id=? ORDER BY created_at DESC LIMIT 1",
+                (run_id, str(cycle_record["evidence_id"])),
+            ).fetchone()
+            if prior_same_evidence:
+                raise ValueError(
+                    "execution evidence has already been independently reviewed; "
+                    "a new cycle requires fresh repair and execution evidence"
+                )
+            if conn.execute(
+                "SELECT id FROM review_cycles WHERE run_id=? AND status IN ('open','collecting','ready_to_aggregate')",
+                (run_id,),
+            ).fetchone():
+                raise ValueError("an active independent review cycle already exists for this run")
+            conn.execute(
+                """INSERT INTO review_cycles(
+                   id, run_id, evidence_id, evidence_fingerprint, scope_fingerprint,
+                   constitution_hash, status, required_reviewer_count, min_distinct_providers,
+                   policy_json, aggregate_json, payload_json, created_at, updated_at,
+                   finalized_at, row_version)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,1)""",
+                (
+                    cycle_id,
+                    run_id,
+                    cycle_record["evidence_id"],
+                    cycle_record["evidence_fingerprint"],
+                    cycle_record["scope_fingerprint"],
+                    cycle_record["constitution_hash"],
+                    "open",
+                    int(cycle_record["required_reviewer_count"]),
+                    int(cycle_record["min_distinct_providers"]),
+                    dumps(cycle_record.get("policy") or {}),
+                    None,
+                    dumps(cycle_record),
+                    cycle_record.get("created_at") or now,
+                    now,
+                ),
+            )
+            for assignment in assignment_records:
+                conn.execute(
+                    """INSERT INTO review_assignments(
+                       id, cycle_id, reviewer_id, provider_id, role, status, blind,
+                       payload_json, created_at, submitted_at)
+                       VALUES (?,?,?,?,?,'pending',1,?,?,NULL)""",
+                    (
+                        assignment["assignment_id"],
+                        cycle_id,
+                        assignment["reviewer_id"],
+                        assignment["provider_id"],
+                        assignment["role"],
+                        dumps(assignment),
+                        assignment.get("created_at") or now,
+                    ),
+                )
+            run["stage7_review_required"] = True
+            run["stage7_review_cycle_id"] = cycle_id
+            run["independent_review"] = {
+                "cycle_id": cycle_id,
+                "status": "collecting",
+                "quorum_met": False,
+                "evidence_id": cycle_record["evidence_id"],
+                "evidence_fingerprint": cycle_record["evidence_fingerprint"],
+                "required_reviewer_count": cycle_record["required_reviewer_count"],
+            }
+            run["updated_at"] = now
+            new_run_version = int(run_row[0] or 1) + 1
+            run["row_version"] = new_run_version
+            cur = conn.execute(
+                "UPDATE runs SET payload_json=?, updated_at=?, row_version=? WHERE id=? AND row_version=?",
+                (dumps(run), now, new_run_version, run_id, int(run_row[0] or 1)),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("stale run race while binding review cycle")
+            if repair_context is not None:
+                repair_packet = repair_context["repair_packet"]
+                repair_link = {
+                    "schema": "buildforme.repair_review_link.v1",
+                    "repair_packet_id": repair_packet_id,
+                    "repair_admission_id": repair_context["repair_admission_id"],
+                    "source_run_id": repair_context["source_run_id"],
+                    "child_run_id": run_id,
+                    "fresh_evidence_id": repair_context["fresh_evidence_id"],
+                    "fresh_evidence_fingerprint": actual_evidence_fp,
+                    "review_cycle_id": cycle_id,
+                    "reviewer_provider_ids": sorted(
+                        str(item.get("provider_id") or "") for item in assignment_records
+                    ),
+                    "repair_provider_id": run.get("provider_id"),
+                    "created_at": now,
+                    "immutable": True,
+                }
+                conn.execute(
+                    "INSERT INTO repair_review_links(repair_packet_id, repair_admission_id, source_run_id, child_run_id, fresh_evidence_id, review_cycle_id, payload_json, created_at, immutable) VALUES (?,?,?,?,?,?,?,?,1)",
+                    (
+                        repair_packet_id,
+                        repair_context["repair_admission_id"],
+                        repair_context["source_run_id"],
+                        run_id,
+                        repair_context["fresh_evidence_id"],
+                        cycle_id,
+                        dumps(repair_link),
+                        now,
+                    ),
+                )
+                source_row = conn.execute(
+                    "SELECT row_version, payload_json FROM runs WHERE id=?",
+                    (repair_context["source_run_id"],),
+                ).fetchone()
+                if not source_row:
+                    raise ValueError("repair source run missing while linking re-review")
+                source_run = loads(source_row[1], {})
+                source_run["stage7_repair_status"] = "re_review_collecting"
+                source_run["stage7_repair_review_cycle_id"] = cycle_id
+                source_run["stage7_repair_fresh_evidence_id"] = repair_context["fresh_evidence_id"]
+                source_run["updated_at"] = now
+                source_version = int(source_row[0] or 1) + 1
+                source_run["row_version"] = source_version
+                source_cur = conn.execute(
+                    "UPDATE runs SET payload_json=?, updated_at=?, row_version=? WHERE id=? AND row_version=?",
+                    (
+                        dumps(source_run),
+                        now,
+                        source_version,
+                        repair_context["source_run_id"],
+                        int(source_row[0] or 1),
+                    ),
+                )
+                if source_cur.rowcount != 1:
+                    raise ValueError("stale repair source race while linking re-review")
+            conn.execute(
+                "INSERT INTO review_events(id, cycle_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (new_id("rve"), cycle_id, "review_cycle_created", "Blind independent review cycle created", actor, dumps({"assignment_count": len(assignment_records), "repair_packet_id": repair_packet_id or None}), now),
+            )
+            conn.execute(
+                "INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (new_id("re"), run_id, "stage7_review_cycle_created", "Stage 7 independent review required", actor, dumps({"cycle_id": cycle_id}), now),
+            )
+        return {"cycle": cycle_record, "assignments": assignment_records, "run": run}
+
+    def get_repair_review_link(self, repair_packet_id: str) -> dict[str, Any]:
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM repair_review_links WHERE repair_packet_id=?",
+                (str(repair_packet_id),),
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Repair review link not found: {repair_packet_id}")
+        return loads(row[0], {})
+
+    def get_review_cycle(self, cycle_id: str) -> dict[str, Any]:
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT payload_json, aggregate_json, status, row_version, finalized_at FROM review_cycles WHERE id=?",
+                (str(cycle_id),),
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Review cycle not found: {cycle_id}")
+        record = loads(row[0], {})
+        record["status"] = row[2]
+        record["row_version"] = int(row[3] or 1)
+        record["finalized_at"] = row[4]
+        record["aggregate"] = loads(row[1], None) if row[1] else record.get("aggregate")
+        return record
+
+    def list_review_cycles(self, run_id: str | None = None) -> list[dict[str, Any]]:
+        with self.db.transaction() as conn:
+            if run_id:
+                rows = conn.execute(
+                    "SELECT id FROM review_cycles WHERE run_id=? ORDER BY created_at DESC",
+                    (str(run_id),),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id FROM review_cycles ORDER BY created_at DESC"
+                ).fetchall()
+        return [self.get_review_cycle(str(row[0])) for row in rows]
+
+    def get_review_assignment(self, assignment_id: str) -> dict[str, Any]:
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT payload_json, status, submitted_at FROM review_assignments WHERE id=?",
+                (str(assignment_id),),
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Review assignment not found: {assignment_id}")
+        record = loads(row[0], {})
+        record["status"] = row[1]
+        record["submitted_at"] = row[2]
+        return record
+
+    def list_review_assignments(self, cycle_id: str) -> list[dict[str, Any]]:
+        with self.db.transaction() as conn:
+            rows = conn.execute(
+                "SELECT id FROM review_assignments WHERE cycle_id=? ORDER BY provider_id, reviewer_id",
+                (str(cycle_id),),
+            ).fetchall()
+        return [self.get_review_assignment(str(row[0])) for row in rows]
+
+    def list_review_reports(self, cycle_id: str) -> list[dict[str, Any]]:
+        with self.db.transaction() as conn:
+            rows = conn.execute(
+                "SELECT payload_json FROM review_reports WHERE cycle_id=? ORDER BY created_at, report_id",
+                (str(cycle_id),),
+            ).fetchall()
+        return [loads(row[0], {}) for row in rows]
+
+    def list_review_findings(self, cycle_id: str) -> list[dict[str, Any]]:
+        with self.db.transaction() as conn:
+            rows = conn.execute(
+                "SELECT payload_json FROM review_findings WHERE cycle_id=? ORDER BY created_at, finding_id",
+                (str(cycle_id),),
+            ).fetchall()
+        return [loads(row[0], {}) for row in rows]
+
+    def submit_review_report_atomic(
+        self,
+        *,
+        cycle_id: str,
+        assignment_id: str,
+        report: dict[str, Any],
+        findings: list[dict[str, Any]],
+        actor: str,
+        execution: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        from buildforme.review_contracts import (
+            validate_finding_for_storage,
+            validate_report_for_storage,
+        )
+        from buildforme.review_execution import validate_review_execution_record
+
+        if not isinstance(execution, dict):
+            raise ValueError("direct review report submission disabled; authenticated reviewer execution required")
+        execution_record = dict(execution)
+        now = utc_now_iso()
+        with self.db.transaction() as conn:
+            cycle_row = conn.execute(
+                "SELECT run_id, status, required_reviewer_count, payload_json, row_version FROM review_cycles WHERE id=?",
+                (str(cycle_id),),
+            ).fetchone()
+            if not cycle_row:
+                raise KeyError(f"Review cycle not found: {cycle_id}")
+            if str(cycle_row[1]) not in {"open", "collecting", "ready_to_aggregate"}:
+                raise ValueError("review cycle is not accepting reports")
+            cycle = loads(cycle_row[3], {})
+            cycle["status"] = cycle_row[1]
+            cycle["row_version"] = int(cycle_row[4] or 1)
+            assignment_row = conn.execute(
+                "SELECT cycle_id, status, payload_json FROM review_assignments WHERE id=?",
+                (str(assignment_id),),
+            ).fetchone()
+            if not assignment_row:
+                raise KeyError(f"Review assignment not found: {assignment_id}")
+            if str(assignment_row[0]) != str(cycle_id):
+                raise ValueError("review assignment cycle mismatch")
+            if str(assignment_row[1]) != "executing":
+                raise ValueError("review report requires an executing assignment claim")
+            assignment = loads(assignment_row[2], {})
+            assignment["status"] = assignment_row[1]
+            problems = validate_report_for_storage(report, cycle, assignment)
+            if problems:
+                raise ValueError("review report rejected: " + "; ".join(problems))
+            packet_row = conn.execute(
+                "SELECT payload_json FROM review_packets WHERE assignment_id=?",
+                (str(assignment_id),),
+            ).fetchone()
+            if not packet_row:
+                raise ValueError("authenticated reviewer execution requires immutable review packet")
+            review_packet = loads(packet_row[0], {})
+            execution_problems = validate_review_execution_record(
+                execution_record,
+                packet=review_packet,
+                assignment=assignment,
+                report=report,
+            )
+            if execution_problems:
+                raise ValueError("review execution rejected: " + "; ".join(execution_problems))
+            if str(execution_record.get("status") or "") != "succeeded":
+                raise ValueError("review report requires successful reviewer execution")
+            if conn.execute(
+                "SELECT execution_id FROM review_executions WHERE execution_id=?",
+                (str(execution_record.get("execution_id") or ""),),
+            ).fetchone():
+                raise ValueError("review execution evidence is append-only")
+            report_findings = report.get("findings") if isinstance(report.get("findings"), list) else []
+            if findings != report_findings:
+                raise ValueError("separate review findings diverge from report findings")
+            finding_ids: set[str] = set()
+            for finding in findings:
+                finding_problems = validate_finding_for_storage(
+                    finding,
+                    report=report,
+                    cycle=cycle,
+                    assignment=assignment,
+                )
+                if finding_problems:
+                    raise ValueError("review finding rejected: " + "; ".join(finding_problems))
+                finding_id = str(finding.get("finding_id") or "")
+                if finding_id in finding_ids:
+                    raise ValueError("duplicate finding id within review report")
+                finding_ids.add(finding_id)
+            report_id = str(report["report_id"])
+            if conn.execute(
+                "SELECT report_id FROM review_reports WHERE report_id=? OR assignment_id=?",
+                (report_id, str(assignment_id)),
+            ).fetchone():
+                raise ValueError("review report is append-only and assignment may submit only once")
+            conn.execute(
+                "INSERT INTO review_executions(execution_id, cycle_id, assignment_id, packet_id, provider_id, status, execution_fingerprint, payload_json, created_at, immutable) VALUES (?,?,?,?,?,?,?,?,?,1)",
+                (
+                    execution_record["execution_id"],
+                    execution_record["cycle_id"],
+                    execution_record["assignment_id"],
+                    execution_record["packet_id"],
+                    execution_record["provider_id"],
+                    execution_record["status"],
+                    execution_record["execution_fingerprint"],
+                    dumps(execution_record),
+                    execution_record.get("created_at") or now,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO review_reports(report_id, cycle_id, assignment_id, verdict, report_fingerprint, payload_json, created_at, immutable) VALUES (?,?,?,?,?,?,?,1)",
+                (report_id, cycle_id, assignment_id, report["verdict"], report["report_fingerprint"], dumps(report), report.get("created_at") or now),
+            )
+            for finding in findings:
+                finding_id = str(finding["finding_id"])
+                if conn.execute(
+                    "SELECT finding_id FROM review_findings WHERE finding_id=?", (finding_id,)
+                ).fetchone():
+                    raise ValueError(f"review finding mutation forbidden: {finding_id}")
+                conn.execute(
+                    "INSERT INTO review_findings(finding_id, report_id, cycle_id, assignment_id, severity, category, blocking, finding_fingerprint, payload_json, created_at, immutable) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+                    (finding_id, report_id, cycle_id, assignment_id, finding["severity"], finding["category"], 1 if finding.get("blocking") else 0, finding["finding_fingerprint"], dumps(finding), now),
+                )
+            assignment["status"] = "submitted"
+            assignment["submitted_at"] = now
+            assignment["report_id"] = report_id
+            assignment["report_fingerprint"] = report["report_fingerprint"]
+            for key in (
+                "execution_claim_id",
+                "execution_packet_id",
+                "execution_started_at",
+                "execution_claim_actor",
+            ):
+                assignment.pop(key, None)
+            assignment_cur = conn.execute(
+                "UPDATE review_assignments SET status='submitted', payload_json=?, submitted_at=? WHERE id=? AND status='executing'",
+                (dumps(assignment), now, assignment_id),
+            )
+            if assignment_cur.rowcount != 1:
+                raise ValueError("review assignment submission race rejected")
+            submitted = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM review_assignments WHERE cycle_id=? AND status='submitted'",
+                    (cycle_id,),
+                ).fetchone()[0]
+            )
+            required = int(cycle_row[2] or 0)
+            new_status = "ready_to_aggregate" if submitted >= required else "collecting"
+            cycle["status"] = new_status
+            cycle["submitted_reviewer_count"] = submitted
+            cycle["updated_at"] = now
+            new_cycle_version = int(cycle_row[4] or 1) + 1
+            cycle["row_version"] = new_cycle_version
+            cur = conn.execute(
+                "UPDATE review_cycles SET status=?, payload_json=?, updated_at=?, row_version=? WHERE id=? AND row_version=?",
+                (new_status, dumps(cycle), now, new_cycle_version, cycle_id, int(cycle_row[4] or 1)),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("stale review cycle race while submitting report")
+            conn.execute(
+                "INSERT INTO review_events(id, cycle_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (new_id("rve"), cycle_id, "review_report_submitted", "Blind reviewer report submitted", actor, dumps({"assignment_id": assignment_id, "report_id": report_id, "execution_id": execution_record.get("execution_id"), "submitted": submitted, "required": required}), now),
+            )
+            conn.execute(
+                "INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (new_id("re"), str(cycle_row[0]), "stage7_review_report_submitted", "Independent reviewer report submitted", actor, dumps({"cycle_id": cycle_id, "assignment_id": assignment_id, "report_id": report_id}), now),
+            )
+        return {"cycle": cycle, "assignment": assignment, "report": report, "findings": findings}
+
+    def finalize_review_cycle_atomic(
+        self,
+        *,
+        cycle_id: str,
+        expected_row_version: int,
+        aggregate: dict[str, Any],
+        actor: str,
+    ) -> dict[str, Any]:
+        from buildforme.review_contracts import aggregate_review_reports
+
+        now = utc_now_iso()
+        with self.db.transaction() as conn:
+            cycle_row = conn.execute(
+                "SELECT run_id, status, payload_json, row_version FROM review_cycles WHERE id=?",
+                (str(cycle_id),),
+            ).fetchone()
+            if not cycle_row:
+                raise KeyError(f"Review cycle not found: {cycle_id}")
+            current_version = int(cycle_row[3] or 1)
+            if current_version != int(expected_row_version):
+                raise ValueError("stale review cycle aggregation rejected")
+            if str(cycle_row[1]) != "ready_to_aggregate":
+                raise ValueError("review cycle is not ready to aggregate")
+            cycle = loads(cycle_row[2], {})
+            cycle["status"] = cycle_row[1]
+            cycle["row_version"] = current_version
+            assignment_rows = conn.execute(
+                "SELECT payload_json, status FROM review_assignments WHERE cycle_id=? ORDER BY provider_id, reviewer_id",
+                (cycle_id,),
+            ).fetchall()
+            assignments = []
+            for row in assignment_rows:
+                item = loads(row[0], {})
+                item["status"] = row[1]
+                assignments.append(item)
+            reports = [
+                loads(row[0], {})
+                for row in conn.execute(
+                    "SELECT payload_json FROM review_reports WHERE cycle_id=? ORDER BY created_at, report_id",
+                    (cycle_id,),
+                ).fetchall()
+            ]
+            canonical = aggregate_review_reports(cycle=cycle, assignments=assignments, reports=reports)
+            if canonical.get("aggregate_fingerprint") != aggregate.get("aggregate_fingerprint"):
+                raise ValueError("review aggregate fingerprint mismatch")
+            if canonical.get("status") != aggregate.get("status"):
+                raise ValueError("review aggregate status mismatch")
+            final_status = str(canonical["status"])
+            cycle["status"] = final_status
+            cycle["aggregate"] = canonical
+            cycle["updated_at"] = now
+            cycle["finalized_at"] = now
+            new_cycle_version = current_version + 1
+            cycle["row_version"] = new_cycle_version
+            cur = conn.execute(
+                "UPDATE review_cycles SET status=?, aggregate_json=?, payload_json=?, updated_at=?, finalized_at=?, row_version=? WHERE id=? AND row_version=?",
+                (final_status, dumps(canonical), dumps(cycle), now, now, new_cycle_version, cycle_id, current_version),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("stale review cycle finalization race")
+            run_id = str(cycle_row[0])
+            run_row = conn.execute(
+                "SELECT row_version, payload_json FROM runs WHERE id=?", (run_id,)
+            ).fetchone()
+            if not run_row:
+                raise KeyError(f"Run not found: {run_id}")
+            run = loads(run_row[1], {})
+            if str(run.get("status") or "") != "needs_review":
+                raise ValueError("review cycle can finalize only while run needs_review")
+            if str(run.get("stage7_review_cycle_id") or "") != str(cycle_id):
+                raise ValueError("run is not bound to this review cycle")
+            run["independent_review"] = {
+                "cycle_id": cycle_id,
+                "status": final_status,
+                "quorum_met": canonical.get("quorum_met"),
+                "evidence_id": cycle.get("evidence_id"),
+                "evidence_fingerprint": cycle.get("evidence_fingerprint"),
+                "aggregate_fingerprint": canonical.get("aggregate_fingerprint"),
+                "required_reviewer_count": canonical.get("required_reviewer_count"),
+                "submitted_reviewer_count": canonical.get("submitted_reviewer_count"),
+                "distinct_provider_count": canonical.get("distinct_provider_count"),
+                "blocking_finding_count": canonical.get("blocking_finding_count"),
+                "finding_count": canonical.get("finding_count"),
+                "disagreement": canonical.get("disagreement"),
+            }
+            run["updated_at"] = now
+            run_version = int(run_row[0] or 1)
+            run["row_version"] = run_version + 1
+            run_cur = conn.execute(
+                "UPDATE runs SET payload_json=?, updated_at=?, row_version=? WHERE id=? AND row_version=?",
+                (dumps(run), now, run_version + 1, run_id, run_version),
+            )
+            if run_cur.rowcount != 1:
+                raise ValueError("stale run race while binding review aggregate")
+            conn.execute(
+                "INSERT INTO review_events(id, cycle_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (new_id("rve"), cycle_id, "review_cycle_finalized", f"Independent review verdict: {final_status}", actor, dumps({"aggregate_fingerprint": canonical.get("aggregate_fingerprint")}), now),
+            )
+            conn.execute(
+                "INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (new_id("re"), run_id, "stage7_review_finalized", f"Independent review verdict: {final_status}", actor, dumps({"cycle_id": cycle_id, "aggregate_fingerprint": canonical.get("aggregate_fingerprint")}), now),
+            )
+        return {"cycle": cycle, "aggregate": canonical, "run": run}
+
     # —— Evidence ——
     def save_run_evidence(self, evidence: dict[str, Any]) -> dict[str, Any]:
         """Append-only evidence persistence with independent fingerprint validation.
@@ -2139,6 +3096,401 @@ class Stage6Store:
                 "SELECT payload_json FROM provider_acks WHERE provider_id=?", (provider_id,)
             ).fetchone()
         return loads(row[0], {}) if row else None
+
+    # —— Stage 7 governed repair packets ——
+    def create_repair_packet_atomic(
+        self,
+        *,
+        packet: dict[str, Any],
+        actor: str,
+    ) -> dict[str, Any]:
+        from buildforme.repair_contracts import validate_repair_packet_for_storage
+
+        record = dict(packet)
+        packet_id = str(record.get("repair_packet_id") or "")
+        cycle_id = str(record.get("source_cycle_id") or "")
+        if not packet_id or not cycle_id:
+            raise ValueError("repair_packet_id and source_cycle_id required")
+        now = utc_now_iso()
+        with self.db.transaction() as conn:
+            cycle_row = conn.execute(
+                "SELECT run_id, evidence_id, evidence_fingerprint, scope_fingerprint, constitution_hash, status, aggregate_json, payload_json FROM review_cycles WHERE id=?",
+                (cycle_id,),
+            ).fetchone()
+            if not cycle_row:
+                raise KeyError(f"Review cycle not found: {cycle_id}")
+            cycle = loads(cycle_row[7], {})
+            cycle["status"] = cycle_row[5]
+            cycle["aggregate"] = loads(cycle_row[6], {}) if cycle_row[6] else cycle.get("aggregate")
+            if str(cycle_row[5]) != "repair_required":
+                raise ValueError("repair packet requires finalized repair_required cycle")
+            run_id = str(cycle_row[0])
+            run_row = conn.execute(
+                "SELECT row_version, status, payload_json FROM runs WHERE id=?", (run_id,)
+            ).fetchone()
+            if not run_row:
+                raise KeyError(f"Run not found: {run_id}")
+            run = loads(run_row[2], {})
+            run["status"] = run_row[1]
+            run["row_version"] = int(run_row[0] or 1)
+            if str(run_row[1]) != "needs_review":
+                raise ValueError("repair packet requires source run status needs_review")
+            if str(run.get("stage7_review_cycle_id") or "") != cycle_id:
+                raise ValueError("source run is not bound to repair review cycle")
+            evidence_row = conn.execute(
+                "SELECT payload_json FROM evidence WHERE evidence_id=? AND run_id=?",
+                (str(cycle_row[1]), run_id),
+            ).fetchone()
+            if not evidence_row:
+                raise ValueError("repair packet source evidence not found")
+            evidence = loads(evidence_row[0], {})
+            reports = [
+                loads(row[0], {})
+                for row in conn.execute(
+                    "SELECT payload_json FROM review_reports WHERE cycle_id=? ORDER BY created_at, report_id",
+                    (cycle_id,),
+                ).fetchall()
+            ]
+            findings = [
+                loads(row[0], {})
+                for row in conn.execute(
+                    "SELECT payload_json FROM review_findings WHERE cycle_id=? ORDER BY created_at, finding_id",
+                    (cycle_id,),
+                ).fetchall()
+            ]
+            provider_id = str(record.get("repair_provider_id") or "")
+            ack_row = conn.execute(
+                "SELECT payload_json, constitution_acknowledged, constitution_hash FROM provider_acks WHERE provider_id=?",
+                (provider_id,),
+            ).fetchone()
+            if not ack_row:
+                raise ValueError("repair provider Constitution acknowledgement missing")
+            provider_ack = loads(ack_row[0], {})
+            provider_ack["constitution_acknowledged"] = bool(ack_row[1])
+            provider_ack["constitution_hash"] = ack_row[2]
+            problems = validate_repair_packet_for_storage(
+                record,
+                cycle=cycle,
+                run=run,
+                evidence=evidence,
+                reports=reports,
+                findings=findings,
+                provider_ack=provider_ack,
+            )
+            if problems:
+                raise ValueError("repair packet rejected: " + "; ".join(problems))
+            existing = conn.execute(
+                "SELECT payload_json, repair_fingerprint FROM repair_packets WHERE source_cycle_id=? OR repair_packet_id=?",
+                (cycle_id, packet_id),
+            ).fetchone()
+            if existing:
+                prior = loads(existing[0], {})
+                if str(existing[1] or "") == str(record.get("repair_fingerprint") or "") and prior == record:
+                    return prior
+                raise ValueError("repair packet is append-only and source cycle may create only one")
+            aggregate = cycle.get("aggregate") if isinstance(cycle.get("aggregate"), dict) else {}
+            conn.execute(
+                "INSERT INTO repair_packets(repair_packet_id, source_cycle_id, source_run_id, source_evidence_id, repair_provider_id, aggregate_fingerprint, repair_fingerprint, payload_json, created_at, immutable) VALUES (?,?,?,?,?,?,?,?,?,1)",
+                (
+                    packet_id,
+                    cycle_id,
+                    run_id,
+                    str(record.get("source_evidence_id") or ""),
+                    provider_id,
+                    str(aggregate.get("aggregate_fingerprint") or ""),
+                    str(record.get("repair_fingerprint") or ""),
+                    dumps(record),
+                    record.get("created_at") or now,
+                ),
+            )
+            run["stage7_repair_packet_id"] = packet_id
+            run["stage7_repair_status"] = "packet_ready"
+            run["stage7_repair_provider_id"] = provider_id
+            run["updated_at"] = now
+            new_version = int(run_row[0] or 1) + 1
+            run["row_version"] = new_version
+            cur = conn.execute(
+                "UPDATE runs SET payload_json=?, updated_at=?, row_version=? WHERE id=? AND row_version=?",
+                (dumps(run), now, new_version, run_id, int(run_row[0] or 1)),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("stale run race while binding repair packet")
+            metadata = {
+                "repair_packet_id": packet_id,
+                "source_cycle_id": cycle_id,
+                "repair_provider_id": provider_id,
+                "repair_fingerprint": record.get("repair_fingerprint"),
+            }
+            conn.execute(
+                "INSERT INTO review_events(id, cycle_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (new_id("rve"), cycle_id, "repair_packet_created", "Governed repair packet created", actor, dumps(metadata), now),
+            )
+            conn.execute(
+                "INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (new_id("re"), run_id, "stage7_repair_packet_created", "Governed repair packet bound to source run", actor, dumps(metadata), now),
+            )
+        return record
+
+    def get_repair_packet(self, repair_packet_id: str) -> dict[str, Any]:
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM repair_packets WHERE repair_packet_id=?",
+                (str(repair_packet_id),),
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Repair packet not found: {repair_packet_id}")
+        return loads(row[0], {})
+
+    def get_repair_packet_for_cycle(self, cycle_id: str) -> dict[str, Any]:
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM repair_packets WHERE source_cycle_id=?",
+                (str(cycle_id),),
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Repair packet not found for cycle: {cycle_id}")
+        return loads(row[0], {})
+
+    def list_repair_packets(self, source_run_id: str | None = None) -> list[dict[str, Any]]:
+        with self.db.transaction() as conn:
+            if source_run_id:
+                rows = conn.execute(
+                    "SELECT payload_json FROM repair_packets WHERE source_run_id=? ORDER BY created_at DESC",
+                    (str(source_run_id),),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT payload_json FROM repair_packets ORDER BY created_at DESC"
+                ).fetchall()
+        return [loads(row[0], {}) for row in rows]
+
+    def admit_repair_run_atomic(
+        self,
+        *,
+        repair_packet_id: str,
+        child_run: dict[str, Any],
+        lease: dict[str, Any],
+        seed_proof: dict[str, Any],
+        actor: str,
+    ) -> dict[str, Any]:
+        from buildforme.governance import compute_run_scope_fingerprint
+        from buildforme.repair_seed import validate_repair_seed_for_storage
+        from governance.constitution_lease import validate_lease_integrity
+
+        packet_id = str(repair_packet_id or "")
+        child = dict(child_run)
+        child_id = str(child.get("id") or "")
+        if not packet_id or not child_id:
+            raise ValueError("repair packet and child run id required")
+        packet = self.get_repair_packet(packet_id)
+        seed_problems = validate_repair_seed_for_storage(seed_proof, repair_packet=packet)
+        if seed_problems:
+            raise ValueError("repair seed rejected: " + "; ".join(seed_problems))
+        scope = compute_run_scope_fingerprint(
+            child, child.get("packet") if isinstance(child.get("packet"), dict) else None
+        )
+        if not scope or scope != str(child.get("scope_fingerprint") or ""):
+            raise ValueError("repair child scope fingerprint mismatch")
+        lease_problems = validate_lease_integrity(
+            lease,
+            expected_run_id=child_id,
+            expected_provider_id=str(child.get("provider_id") or ""),
+            expected_packet_id=str(child.get("packet_id") or ""),
+        )
+        if lease_problems:
+            raise ValueError("repair child lease invalid: " + "; ".join(lease_problems))
+        now = utc_now_iso()
+        admission_id = f"radm-{uuid.uuid5(uuid.NAMESPACE_URL, packet_id).hex[:18]}"
+        with self.db.transaction() as conn:
+            existing = conn.execute(
+                "SELECT payload_json FROM repair_admissions WHERE repair_packet_id=?",
+                (packet_id,),
+            ).fetchone()
+            if existing:
+                admission = loads(existing[0], {})
+                saved_child = conn.execute(
+                    "SELECT payload_json FROM runs WHERE id=?", (str(admission.get("child_run_id") or ""),)
+                ).fetchone()
+                if not saved_child:
+                    raise ValueError("repair admission child run is missing")
+                return {"admission": admission, "run": loads(saved_child[0], {}), "replayed": True}
+
+            packet_row = conn.execute(
+                "SELECT source_cycle_id, source_run_id, source_evidence_id, repair_provider_id, repair_fingerprint, payload_json FROM repair_packets WHERE repair_packet_id=?",
+                (packet_id,),
+            ).fetchone()
+            if not packet_row:
+                raise KeyError(f"Repair packet not found: {packet_id}")
+            canonical_packet = loads(packet_row[5], {})
+            if canonical_packet != packet:
+                raise ValueError("repair packet storage payload mismatch")
+            source_run_id = str(packet_row[1])
+            source_row = conn.execute(
+                "SELECT row_version, status, payload_json FROM runs WHERE id=?", (source_run_id,)
+            ).fetchone()
+            if not source_row:
+                raise KeyError(f"Source run not found: {source_run_id}")
+            source = loads(source_row[2], {})
+            source["status"] = source_row[1]
+            source["row_version"] = int(source_row[0] or 1)
+            if str(source_row[1]) != "needs_review":
+                raise ValueError("repair admission requires source run status needs_review")
+            if str(source.get("stage7_repair_packet_id") or "") != packet_id:
+                raise ValueError("source run is not bound to repair packet")
+            if str(child.get("parent_run_id") or "") != source_run_id:
+                raise ValueError("repair child parent_run_id mismatch")
+            if str(child.get("repair_packet_id") or "") != packet_id:
+                raise ValueError("repair child packet authority mismatch")
+            if str(child.get("repair_fingerprint") or "") != str(packet_row[4] or ""):
+                raise ValueError("repair child fingerprint mismatch")
+            if str(child.get("provider_id") or "") != str(packet_row[3] or ""):
+                raise ValueError("repair child provider mismatch")
+            if str(child.get("baseline_commit") or "") != str(packet.get("approved_baseline_commit") or ""):
+                raise ValueError("repair child approved baseline mismatch")
+            if str(child.get("execution_seed_commit") or "") != str(seed_proof.get("seed_commit") or ""):
+                raise ValueError("repair child execution seed mismatch")
+            if str(child.get("execution_seed_ref") or "") != str(seed_proof.get("seed_ref") or ""):
+                raise ValueError("repair child execution seed ref mismatch")
+            child_packet = child.get("packet") if isinstance(child.get("packet"), dict) else {}
+            if sorted(str(x) for x in (child_packet.get("allowed_files") or [])) != list(packet.get("allowed_files") or []):
+                raise ValueError("repair child allowed files differ from repair packet")
+            if sorted(str(x) for x in (child_packet.get("forbidden_files") or [])) != list(packet.get("forbidden_files") or []):
+                raise ValueError("repair child forbidden files differ from repair packet")
+            if str(child.get("constitution_hash") or "") != str(packet.get("source_constitution_hash") or ""):
+                raise ValueError("repair child Constitution hash mismatch")
+            ack = conn.execute(
+                "SELECT constitution_acknowledged, constitution_hash FROM provider_acks WHERE provider_id=?",
+                (str(child.get("provider_id") or ""),),
+            ).fetchone()
+            if not ack or not bool(ack[0]) or str(ack[1] or "") != str(child.get("constitution_hash") or ""):
+                raise ValueError("repair child provider acknowledgement invalid")
+            if conn.execute("SELECT id FROM runs WHERE id=?", (child_id,)).fetchone():
+                raise ValueError(f"repair child run already exists without admission: {child_id}")
+
+            lock_id = str(source.get("task_lock_id") or "")
+            if lock_id:
+                lock_row = conn.execute(
+                    "SELECT run_id, active FROM task_locks WHERE id=?", (lock_id,)
+                ).fetchone()
+                if not lock_row or not bool(lock_row[1]) or str(lock_row[0] or "") != source_run_id:
+                    raise ValueError("source task lock cannot be transferred to repair child")
+                conn.execute(
+                    "UPDATE task_locks SET run_id=?, reason=? WHERE id=? AND run_id=? AND active=1",
+                    (child_id, f"Stage 7 repair child for {source_run_id}", lock_id, source_run_id),
+                )
+            else:
+                lock_id = new_id("tlock")
+                task_key = str(source.get("task_id") or source.get("packet_id") or source_run_id)
+                conn.execute(
+                    "INSERT INTO task_locks(id, task_key, project_id, run_id, reason, active, created_at, released_at) VALUES (?,?,?,?,?,1,?,NULL)",
+                    (lock_id, task_key, source.get("project_id"), child_id, "Stage 7 governed repair run", now),
+                )
+            child["task_lock_id"] = lock_id
+            child["created_at"] = child.get("created_at") or now
+            child["updated_at"] = now
+            child["row_version"] = 1
+
+            lease_record = dict(lease)
+            lease_record["stored_at"] = now
+            if conn.execute(
+                "SELECT lease_id FROM constitution_leases WHERE lease_id=?", (str(lease["lease_id"]),)
+            ).fetchone():
+                raise ValueError("repair child lease id already exists")
+            conn.execute(
+                "INSERT INTO constitution_leases(lease_id, run_id, provider_id, packet_id, constitution_version, constitution_hash, lease_fingerprint, payload_json, stored_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    lease["lease_id"], child_id, child.get("provider_id"), child.get("packet_id"),
+                    lease.get("constitution_version"), lease.get("constitution_hash"),
+                    lease.get("lease_fingerprint"), dumps(lease_record), now,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO runs(
+                id, project_id, task_id, packet_id, provider_id, repository, repository_local_path,
+                baseline_ref, baseline_commit, requested_target_branch, execution_branch, operating_mode,
+                risk, status, execution_mode, scope_fingerprint, constitution_version, constitution_hash,
+                constitution_lease_id, constitution_lease_fingerprint, task_lock_id, payload_json,
+                created_at, updated_at, started_at, finished_at, idempotency_key, row_version
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    child_id, child.get("project_id"), child.get("task_id"), child.get("packet_id"),
+                    child.get("provider_id"), child.get("repository"), child.get("repository_local_path"),
+                    child.get("baseline_ref"), child.get("baseline_commit"), child.get("requested_target_branch"),
+                    child.get("execution_branch"), child.get("operating_mode"), child.get("risk"),
+                    child.get("status") or "draft", child.get("execution_mode") or "live_supervised",
+                    child.get("scope_fingerprint"), child.get("constitution_version"), child.get("constitution_hash"),
+                    child.get("constitution_lease_id"), child.get("constitution_lease_fingerprint"), lock_id,
+                    dumps(child), child["created_at"], now, child.get("started_at"), child.get("finished_at"),
+                    child.get("idempotency_key"), 1,
+                ),
+            )
+            admission = {
+                "schema": "buildforme.repair_admission.v1",
+                "repair_admission_id": admission_id,
+                "repair_packet_id": packet_id,
+                "repair_fingerprint": packet.get("repair_fingerprint"),
+                "source_run_id": source_run_id,
+                "source_cycle_id": packet.get("source_cycle_id"),
+                "source_evidence_id": packet.get("source_evidence_id"),
+                "child_run_id": child_id,
+                "repair_provider_id": child.get("provider_id"),
+                "seed_commit": seed_proof.get("seed_commit"),
+                "seed_ref": seed_proof.get("seed_ref"),
+                "seed_tree": seed_proof.get("seed_tree"),
+                "seed_fingerprint": seed_proof.get("seed_fingerprint"),
+                "child_scope_fingerprint": child.get("scope_fingerprint"),
+                "original_approved_baseline": child.get("baseline_commit"),
+                "execution_seed_commit": child.get("execution_seed_commit"),
+                "task_lock_id": lock_id,
+                "created_at": now,
+                "immutable": True,
+            }
+            conn.execute(
+                "INSERT INTO repair_admissions(repair_admission_id, repair_packet_id, source_run_id, child_run_id, seed_commit, seed_ref, seed_fingerprint, child_scope_fingerprint, payload_json, created_at, immutable) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+                (
+                    admission_id, packet_id, source_run_id, child_id, admission["seed_commit"],
+                    admission["seed_ref"], admission["seed_fingerprint"], admission["child_scope_fingerprint"],
+                    dumps(admission), now,
+                ),
+            )
+            source["task_lock_id"] = None
+            source["stage7_repair_status"] = "child_admitted"
+            source["stage7_repair_child_run_id"] = child_id
+            source["stage7_repair_admission_id"] = admission_id
+            source["updated_at"] = now
+            source["row_version"] = int(source_row[0] or 1) + 1
+            cur = conn.execute(
+                "UPDATE runs SET task_lock_id=NULL, payload_json=?, updated_at=?, row_version=? WHERE id=? AND row_version=?",
+                (dumps(source), now, source["row_version"], source_run_id, int(source_row[0] or 1)),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("stale source run race during repair admission")
+            metadata = {
+                "repair_packet_id": packet_id,
+                "repair_admission_id": admission_id,
+                "child_run_id": child_id,
+                "seed_commit": admission["seed_commit"],
+                "seed_fingerprint": admission["seed_fingerprint"],
+            }
+            conn.execute(
+                "INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (new_id("re"), source_run_id, "stage7_repair_child_admitted", "Governed repair child admitted", actor, dumps(metadata), now),
+            )
+            conn.execute(
+                "INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
+                (new_id("re"), child_id, "repair_run_created", "Repair run admitted from exact reviewed seed", actor, dumps(metadata), now),
+            )
+        return {"admission": admission, "run": child, "source_run": source, "replayed": False}
+
+    def get_repair_admission(self, repair_packet_id: str) -> dict[str, Any]:
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM repair_admissions WHERE repair_packet_id=?",
+                (str(repair_packet_id),),
+            ).fetchone()
+        if not row:
+            raise KeyError(f"Repair admission not found: {repair_packet_id}")
+        return loads(row[0], {})
 
     # —— Execution control ——
     def get_execution_control(self) -> dict[str, Any]:

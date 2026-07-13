@@ -1213,7 +1213,9 @@ class BuildformeRequestHandler(BaseHTTPRequestHandler):
                     self._store(),
                     cycle_id,
                     assignment_id,
-                    actor=actor,
+                    # Founder authentication authorizes the launch. The governed
+                    # operation itself is performed by the assigned reviewer.
+                    actor="reviewer",
                     timeout_seconds=max(30, min(1800, int(payload.get("timeout_seconds") or 900))),
                 )
             else:

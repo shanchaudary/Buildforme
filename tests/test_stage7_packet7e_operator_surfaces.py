@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import unittest
 from pathlib import Path
 
@@ -77,6 +78,40 @@ class Stage7OperatorSurfaceTests(unittest.TestCase):
             "persisted_report_count": 2,
             "persisted_report_fingerprints": ["r1", "r2"],
             "aggregate_report_fingerprints": ["r1", "r2"],
+            "review_events": [
+                {
+                    "event_type": "review_cycle_created",
+                    "actor": "system",
+                    "metadata": {},
+                },
+                {
+                    "event_type": "review_report_submitted",
+                    "actor": "reviewer",
+                    "metadata": {"assignment_id": "ra-1", "report_id": "rr-1"},
+                },
+                {
+                    "event_type": "review_report_submitted",
+                    "actor": "reviewer",
+                    "metadata": {"assignment_id": "ra-2", "report_id": "rr-2"},
+                },
+            ],
+            "run_review_events": [
+                {
+                    "event_type": "stage7_review_cycle_created",
+                    "actor": "system",
+                    "metadata": {},
+                },
+                {
+                    "event_type": "stage7_review_report_submitted",
+                    "actor": "reviewer",
+                    "metadata": {"assignment_id": "ra-1", "report_id": "rr-1"},
+                },
+                {
+                    "event_type": "stage7_review_report_submitted",
+                    "actor": "reviewer",
+                    "metadata": {"assignment_id": "ra-2", "report_id": "rr-2"},
+                },
+            ],
             "cycle_id": "rc-1",
             "cycle_evidence_id": "ev-1",
             "cycle_evidence_fingerprint": "efp-1",
@@ -97,6 +132,43 @@ class Stage7OperatorSurfaceTests(unittest.TestCase):
         }
         result = evaluate_stage7_smoke(observed)
         self.assertTrue(result["passed"], result)
+
+        for actor in (
+            "codex-real-reviewer",
+            "claude-real-reviewer",
+            "arbitrary-reviewer",
+        ):
+            with self.subTest(actor=actor):
+                invalid = copy.deepcopy(observed)
+                invalid["review_events"][1]["actor"] = actor
+                result = evaluate_stage7_smoke(invalid)
+                self.assertFalse(result["passed"])
+                self.assertIn(
+                    "persisted_review_event_actors_canonical", result["failed_checks"]
+                )
+
+        missing = copy.deepcopy(observed)
+        missing["review_events"] = []
+        result = evaluate_stage7_smoke(missing)
+        self.assertFalse(result["passed"])
+        self.assertIn("persisted_review_event_actors_canonical", result["failed_checks"])
+
+        wrong_authority = copy.deepcopy(observed)
+        wrong_authority["run_review_events"][1]["actor"] = "system"
+        result = evaluate_stage7_smoke(wrong_authority)
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "persisted_review_report_submission_actor", result["failed_checks"]
+        )
+
+        contradictory = copy.deepcopy(observed)
+        contradictory["run_review_events"][1]["metadata"]["report_id"] = "rr-other"
+        result = evaluate_stage7_smoke(contradictory)
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "persisted_review_run_event_pair_consistent", result["failed_checks"]
+        )
+
         observed["review_execution_attempts"] = [attempt("codex")]
         result = evaluate_stage7_smoke(observed)
         self.assertFalse(result["passed"])

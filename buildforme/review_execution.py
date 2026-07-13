@@ -23,6 +23,7 @@ from buildforme.governance import (
     canonicalize_repository,
     compute_run_scope_fingerprint,
     normalize_repo_for_compare,
+    validate_actor,
     validate_safe_id,
 )
 from buildforme.process_supervisor import get_process_supervisor
@@ -1061,21 +1062,22 @@ def execute_independent_review_assignment(
     cycle_id: str,
     assignment_id: str,
     *,
-    actor: str = "system",
+    actor: str = "reviewer",
     timeout_seconds: int = 900,
 ) -> dict[str, Any]:
+    canonical_actor = validate_actor(actor)
     packet, source_pre_snapshot, authoritative_root = build_verified_blind_review_packet(
         store, cycle_id, assignment_id
     )
     pre_snapshot = dict(source_pre_snapshot)
-    packet = store.save_review_packet_atomic(packet=packet, actor=actor)
+    packet = store.save_review_packet_atomic(packet=packet, actor=canonical_actor)
     claim_id = f"rclaim-{uuid.uuid4().hex[:18]}"
     claimed = store.claim_review_assignment_execution_atomic(
         cycle_id=cycle_id,
         assignment_id=assignment_id,
         packet_id=str(packet.get("packet_id") or ""),
         claim_id=claim_id,
-        actor=actor,
+        actor=canonical_actor,
     )
     cycle = claimed["cycle"]
     assignment = claimed["assignment"]
@@ -1111,7 +1113,7 @@ def execute_independent_review_assignment(
             retry_safe=retry_safe,
             process_started=process_started,
         )
-        store.record_review_execution_atomic(execution=execution, actor=actor)
+        store.record_review_execution_atomic(execution=execution, actor=canonical_actor)
         if workspace_holder is not None:
             workspace_holder.cleanup()
         raise ValueError(error)
@@ -1285,7 +1287,7 @@ def execute_independent_review_assignment(
             assignment_id=assignment_id,
             report=report,
             findings=findings,
-            actor=str(assignment.get("reviewer_id") or actor),
+            actor=canonical_actor,
             execution=execution,
         )
     finally:

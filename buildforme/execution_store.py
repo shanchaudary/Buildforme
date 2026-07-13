@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from buildforme.db import ExecutionDB, dumps, loads, new_id, row_to_dict
+from buildforme.governance import validate_actor
 from buildforme.storage import utc_now_iso
 
 # Bound at admission / scope / lease / worktree — never rewritten by generic mutation.
@@ -1730,6 +1731,7 @@ class Stage6Store:
         actor: str,
     ) -> dict[str, Any]:
         """Atomically reserve one pending assignment for exactly one reviewer process."""
+        canonical_actor = validate_actor(actor)
         now = utc_now_iso()
         with self.db.transaction() as conn:
             cycle_row = conn.execute(
@@ -1757,7 +1759,7 @@ class Stage6Store:
             assignment["execution_claim_id"] = str(claim_id)
             assignment["execution_packet_id"] = str(packet_id)
             assignment["execution_started_at"] = now
-            assignment["execution_claim_actor"] = str(actor)
+            assignment["execution_claim_actor"] = canonical_actor
             cur = conn.execute(
                 "UPDATE review_assignments SET status='executing', payload_json=? WHERE id=? AND status='pending'",
                 (dumps(assignment), str(assignment_id)),
@@ -1773,7 +1775,7 @@ class Stage6Store:
                     str(cycle_id),
                     "review_execution_claimed",
                     "Reviewer assignment claimed for one process",
-                    str(actor),
+                    canonical_actor,
                     dumps(
                         {
                             "assignment_id": assignment_id,
@@ -1789,6 +1791,7 @@ class Stage6Store:
     def save_review_packet_atomic(self, *, packet: dict[str, Any], actor: str) -> dict[str, Any]:
         from buildforme.review_execution import validate_review_packet_for_storage
 
+        canonical_actor = validate_actor(actor)
         record = dict(packet)
         cycle_id = str(record.get("cycle_id") or "")
         assignment_id = str(record.get("assignment_id") or "")
@@ -1887,7 +1890,7 @@ class Stage6Store:
                     cycle_id,
                     "review_packet_bound",
                     "Immutable blind-review packet bound to assignment",
-                    actor,
+                    canonical_actor,
                     dumps({"assignment_id": assignment_id, "packet_id": packet_id}),
                     utc_now_iso(),
                 ),
@@ -1915,6 +1918,7 @@ class Stage6Store:
     def record_review_execution_atomic(self, *, execution: dict[str, Any], actor: str) -> dict[str, Any]:
         from buildforme.review_execution import validate_review_execution_record
 
+        canonical_actor = validate_actor(actor)
         record = dict(execution)
         if str(record.get("status") or "") != "failed":
             raise ValueError("only failed reviewer execution may commit without a report")
@@ -2036,7 +2040,7 @@ class Stage6Store:
                     cycle_id,
                     event_type,
                     summary,
-                    actor,
+                    canonical_actor,
                     dumps(
                         {
                             "assignment_id": assignment_id,
@@ -2399,6 +2403,26 @@ class Stage6Store:
             ).fetchall()
         return [loads(row[0], {}) for row in rows]
 
+    def list_review_events(self, cycle_id: str) -> list[dict[str, Any]]:
+        with self.db.transaction() as conn:
+            rows = conn.execute(
+                "SELECT id, cycle_id, event_type, summary, actor, metadata_json, created_at "
+                "FROM review_events WHERE cycle_id=? ORDER BY created_at, id",
+                (str(cycle_id),),
+            ).fetchall()
+        return [
+            {
+                "id": row[0],
+                "cycle_id": row[1],
+                "event_type": row[2],
+                "summary": row[3],
+                "actor": row[4],
+                "metadata": loads(row[5], {}),
+                "created_at": row[6],
+            }
+            for row in rows
+        ]
+
     def submit_review_report_atomic(
         self,
         *,
@@ -2415,6 +2439,7 @@ class Stage6Store:
         )
         from buildforme.review_execution import validate_review_execution_record
 
+        canonical_actor = validate_actor(actor)
         if not isinstance(execution, dict):
             raise ValueError("direct review report submission disabled; authenticated reviewer execution required")
         execution_record = dict(execution)
@@ -2557,11 +2582,11 @@ class Stage6Store:
                 raise ValueError("stale review cycle race while submitting report")
             conn.execute(
                 "INSERT INTO review_events(id, cycle_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
-                (new_id("rve"), cycle_id, "review_report_submitted", "Blind reviewer report submitted", actor, dumps({"assignment_id": assignment_id, "report_id": report_id, "execution_id": execution_record.get("execution_id"), "submitted": submitted, "required": required}), now),
+                (new_id("rve"), cycle_id, "review_report_submitted", "Blind reviewer report submitted", canonical_actor, dumps({"assignment_id": assignment_id, "report_id": report_id, "execution_id": execution_record.get("execution_id"), "submitted": submitted, "required": required}), now),
             )
             conn.execute(
                 "INSERT INTO run_events(id, run_id, event_type, summary, actor, metadata_json, created_at) VALUES (?,?,?,?,?,?,?)",
-                (new_id("re"), str(cycle_row[0]), "stage7_review_report_submitted", "Independent reviewer report submitted", actor, dumps({"cycle_id": cycle_id, "assignment_id": assignment_id, "report_id": report_id}), now),
+                (new_id("re"), str(cycle_row[0]), "stage7_review_report_submitted", "Independent reviewer report submitted", canonical_actor, dumps({"cycle_id": cycle_id, "assignment_id": assignment_id, "report_id": report_id}), now),
             )
         return {"cycle": cycle, "assignment": assignment, "report": report, "findings": findings}
 

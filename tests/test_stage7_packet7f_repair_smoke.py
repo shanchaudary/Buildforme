@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import ast
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from buildforme.governance import ALLOWED_ACTORS, compute_run_scope_fingerprint, validate_actor
+from buildforme.review_service import create_independent_review_cycle
 from buildforme.stage7_smoke import evaluate_stage7_repair_smoke
+from scripts import stage7_full_acceptance as full_acceptance
+from scripts import stage7_real_repair_loop_smoke as repair_smoke
+from scripts import stage7_real_two_provider_smoke as two_provider_smoke
 
 
 class Stage7RepairSmokeTests(unittest.TestCase):
@@ -20,7 +27,45 @@ class Stage7RepairSmokeTests(unittest.TestCase):
             "process": {"pid": 10, "exit_code": 0, "cleanup_ok": True},
         }
 
+    def _event_evidence(self, prefix):
+        review_events = [
+            {
+                "event_type": "review_cycle_created",
+                "actor": "system",
+                "metadata": {},
+            }
+        ]
+        run_events = [
+            {
+                "event_type": "stage7_review_cycle_created",
+                "actor": "system",
+                "metadata": {},
+            }
+        ]
+        for index in (1, 2):
+            metadata = {
+                "assignment_id": f"{prefix}-assignment-{index}",
+                "report_id": f"{prefix}-report-{index}",
+            }
+            review_events.append(
+                {
+                    "event_type": "review_report_submitted",
+                    "actor": "reviewer",
+                    "metadata": dict(metadata),
+                }
+            )
+            run_events.append(
+                {
+                    "event_type": "stage7_review_report_submitted",
+                    "actor": "reviewer",
+                    "metadata": dict(metadata),
+                }
+            )
+        return review_events, run_events
+
     def _observed(self):
+        initial_review_events, initial_run_review_events = self._event_evidence("initial")
+        final_review_events, final_run_review_events = self._event_evidence("final")
         return {
             "controlled_source_fixture": True,
             "controlled_repair_execution_fixture": True,
@@ -28,6 +73,8 @@ class Stage7RepairSmokeTests(unittest.TestCase):
             "initial_report_fingerprints": ["i1", "i2"],
             "initial_aggregate_report_fingerprints": ["i1", "i2"],
             "initial_aggregate_status": "repair_required",
+            "initial_review_events": initial_review_events,
+            "initial_run_review_events": initial_run_review_events,
             "blocking_finding_count": 1,
             "initial_cycle_id": "rc-initial",
             "source_evidence_id": "ev-source",
@@ -53,6 +100,8 @@ class Stage7RepairSmokeTests(unittest.TestCase):
             "final_report_fingerprints": ["f1", "f2"],
             "final_aggregate_report_fingerprints": ["f1", "f2"],
             "final_aggregate_status": "clear",
+            "final_review_events": final_review_events,
+            "final_run_review_events": final_run_review_events,
             "repair_provider_id": "glm",
             "source_head_before": "head",
             "source_head_after": "head",
@@ -74,6 +123,52 @@ class Stage7RepairSmokeTests(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertIn("final_real_codex_claude_review", result["failed_checks"])
 
+    def test_acceptance_requires_canonical_persisted_actors_for_both_cycles(self):
+        for phase in ("initial", "final"):
+            for actor in (
+                "codex-real-reviewer",
+                "claude-real-reviewer",
+                "arbitrary-reviewer",
+            ):
+                with self.subTest(phase=phase, actor=actor):
+                    observed = self._observed()
+                    observed[f"{phase}_review_events"][1]["actor"] = actor
+                    result = evaluate_stage7_repair_smoke(observed)
+                    self.assertFalse(result["passed"])
+                    self.assertIn(
+                        f"{phase}_persisted_review_event_actors_canonical",
+                        result["failed_checks"],
+                    )
+
+            missing = self._observed()
+            missing[f"{phase}_run_review_events"] = []
+            result = evaluate_stage7_repair_smoke(missing)
+            self.assertFalse(result["passed"])
+            self.assertIn(
+                f"{phase}_persisted_review_event_actors_canonical",
+                result["failed_checks"],
+            )
+
+            wrong_authority = self._observed()
+            wrong_authority[f"{phase}_review_events"][1]["actor"] = "system"
+            result = evaluate_stage7_repair_smoke(wrong_authority)
+            self.assertFalse(result["passed"])
+            self.assertIn(
+                f"{phase}_persisted_review_report_submission_actor",
+                result["failed_checks"],
+            )
+
+            contradictory = self._observed()
+            contradictory[f"{phase}_run_review_events"][1]["metadata"][
+                "report_id"
+            ] = "contradictory-report"
+            result = evaluate_stage7_repair_smoke(contradictory)
+            self.assertFalse(result["passed"])
+            self.assertIn(
+                f"{phase}_persisted_review_run_event_pair_consistent",
+                result["failed_checks"],
+            )
+
     def test_script_uses_real_review_execution_and_no_direct_report_submission(self):
         source = Path("scripts/stage7_real_repair_loop_smoke.py").read_text(encoding="utf-8")
         self.assertGreaterEqual(source.count("execute_independent_review_assignment"), 2)
@@ -90,6 +185,156 @@ class Stage7RepairSmokeTests(unittest.TestCase):
             and node.func.attr == "submit_review_report_atomic"
         ]
         self.assertEqual(forbidden, [])
+
+    def test_initial_source_fixture_passes_tests_but_retains_authorization_bypass(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repair_smoke.write_source_fixture(root)
+            verification = repair_smoke.run_tests(root)
+        self.assertTrue(verification["passed"], verification)
+
+        namespace = {}
+        exec(repair_smoke.SOURCE_AUTH_IMPLEMENTATION, namespace)
+        self.assertTrue(namespace["is_authorized"]("admin"))
+        self.assertTrue(namespace["is_authorized"]("guest"))
+
+        tree = ast.parse(repair_smoke.SOURCE_TEST_SUITE)
+        test_names = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        self.assertIn("test_admin_allowed", test_names)
+        self.assertNotIn("test_guest_rejected", test_names)
+        self.assertIn("guest is rejected", repair_smoke.SOURCE_ACCEPTANCE_CRITERIA)
+
+    def test_repaired_fixture_has_complete_passing_authorization_tests(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repair_smoke.write_repaired_fixture(root)
+            verification = repair_smoke.run_tests(root)
+        self.assertTrue(verification["passed"], verification)
+        tree = ast.parse(repair_smoke.REPAIRED_TEST_SUITE)
+        test_names = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        self.assertIn("test_admin_allowed", test_names)
+        self.assertIn("test_guest_rejected", test_names)
+
+    def test_all_harness_actor_arguments_are_canonical(self):
+        modules = {
+            "scripts/stage7_full_acceptance.py": full_acceptance,
+            "scripts/stage7_real_two_provider_smoke.py": two_provider_smoke,
+            "scripts/stage7_real_repair_loop_smoke.py": repair_smoke,
+        }
+        for path, module in modules.items():
+            source = Path(path).read_text(encoding="utf-8")
+            tree = ast.parse(source)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    for keyword in node.keywords:
+                        if keyword.arg != "actor":
+                            continue
+                        if isinstance(keyword.value, ast.Constant):
+                            actor = keyword.value.value
+                        elif isinstance(keyword.value, ast.Name):
+                            actor = getattr(module, keyword.value.id)
+                        else:
+                            self.fail(f"{path}:{node.lineno} has non-canonical actor authority")
+                        self.assertIn(actor, ALLOWED_ACTORS, f"{path}:{node.lineno}")
+                if isinstance(node, ast.Dict):
+                    for key, value in zip(node.keys, node.values):
+                        if not isinstance(key, ast.Constant) or key.value != "constitution_ack_actor":
+                            continue
+                        actor = value.value if isinstance(value, ast.Constant) else getattr(module, value.id)
+                        self.assertIn(actor, ALLOWED_ACTORS, f"{path}:{node.lineno}")
+
+        for actor in two_provider_smoke.HARNESS_ACTORS | repair_smoke.HARNESS_ACTORS:
+            self.assertEqual(validate_actor(actor), actor)
+
+    def test_failed_verification_evidence_remains_rejected_for_review(self):
+        packet = {"id": "pkt-failed-verification"}
+        run = {
+            "id": "run-failed-verification",
+            "execution_mode": "live_supervised",
+            "status": "needs_review",
+            "packet": packet,
+            "constitution_hash": "constitution-hash",
+        }
+        run["scope_fingerprint"] = compute_run_scope_fingerprint(run, packet)
+        evidence = {
+            "run_id": run["id"],
+            "constitution": {"hash": run["constitution_hash"]},
+            "verification": {"passed": False},
+        }
+        store = mock.Mock()
+        store.get_run.return_value = run
+        store.get_latest_execution_evidence.return_value = evidence
+        with mock.patch(
+            "buildforme.review_service.validate_evidence_for_storage",
+            return_value=[],
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "deterministic verification must pass before independent review",
+            ):
+                create_independent_review_cycle(
+                    store,
+                    run["id"],
+                    reviewers=[],
+                    actor=two_provider_smoke.AUTOMATION_ACTOR,
+                )
+
+    def test_smokes_contain_no_synthetic_reports_or_aggregates(self):
+        for path in (
+            "scripts/stage7_real_two_provider_smoke.py",
+            "scripts/stage7_real_repair_loop_smoke.py",
+        ):
+            source = Path(path).read_text(encoding="utf-8")
+            tree = ast.parse(source)
+            direct_submit = [
+                node.lineno
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and (
+                    (
+                        isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "submit_review_report_atomic"
+                    )
+                    or (
+                        isinstance(node.func, ast.Name)
+                        and node.func.id == "submit_review_report_atomic"
+                    )
+                )
+            ]
+            self.assertEqual(direct_submit, [], path)
+
+            synthetic = []
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Dict):
+                    continue
+                pairs = {
+                    key.value: value
+                    for key, value in zip(node.keys, node.values)
+                    if isinstance(key, ast.Constant) and isinstance(key.value, str)
+                }
+                report_literals = [
+                    pairs.get(key)
+                    for key in ("verdict", "findings", "blocking")
+                    if key in pairs
+                ]
+                if any(
+                    isinstance(value, (ast.Constant, ast.List, ast.Dict, ast.Tuple))
+                    for value in report_literals
+                ):
+                    synthetic.append(node.lineno)
+                status = pairs.get("status")
+                if isinstance(status, ast.Constant) and status.value in {"clear", "repair_required"}:
+                    synthetic.append(node.lineno)
+            self.assertEqual(synthetic, [], path)
+            self.assertIn('print("MERGE no")', source)
 
 
 if __name__ == "__main__":

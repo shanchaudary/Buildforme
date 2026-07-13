@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -8,6 +9,12 @@ from pathlib import Path
 from buildforme.stage7_full_acceptance import evaluate_stage7_full_acceptance
 
 ROOT = Path(__file__).resolve().parent.parent
+CHILD_SMOKE_SCRIPTS = frozenset(
+    {
+        "stage7_real_two_provider_smoke.py",
+        "stage7_real_repair_loop_smoke.py",
+    }
+)
 
 
 def git(*args: str) -> str:
@@ -19,10 +26,23 @@ def git(*args: str) -> str:
     return (proc.stdout or "").strip()
 
 
+def build_child_command(script_name: str) -> list[str]:
+    if script_name not in CHILD_SMOKE_SCRIPTS:
+        raise ValueError(f"unsupported Stage 7 child smoke: {script_name}")
+    return [sys.executable, "-m", f"scripts.{Path(script_name).stem}"]
+
+
+def build_child_environment() -> dict[str, str]:
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    return env
+
+
 def run_smoke(script_name: str, json_prefix: str) -> dict:
     proc = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / script_name)],
+        build_child_command(script_name),
         cwd=ROOT,
+        env=build_child_environment(),
         capture_output=True,
         text=True,
         timeout=7_200,

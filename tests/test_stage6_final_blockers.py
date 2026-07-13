@@ -201,11 +201,17 @@ class ProviderAuthenticationProbeTests(unittest.TestCase):
     def test_successful_executable_probe_can_verify_cached_login_without_env_marker(self):
         td, executable = self._fake_cli(0, "logged in")
         self.addCleanup(td.cleanup)
-        with mock.patch.dict(os.environ, {}, clear=True):
+        # Preserve the platform runtime environment needed to launch a controlled
+        # executable, while proving that provider auth markers are absent.
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OPENAI_API_KEY", None)
+            os.environ.pop("CODEX_API_KEY", None)
             result = probe_authentication("codex", executable)
         self.assertEqual(result["status"], "ready")
         self.assertTrue(result["probe_verified"])
         self.assertFalse(result["output_persisted"])
+        self.assertNotIn("OPENAI_API_KEY", result["env_names"])
+        self.assertNotIn("CODEX_API_KEY", result["env_names"])
 
     def test_provider_without_probe_contract_fails_closed(self):
         td, executable = self._fake_cli(0, "ok")

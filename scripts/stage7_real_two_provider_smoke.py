@@ -14,6 +14,10 @@ from buildforme.stage7_smoke import evaluate_stage7_smoke
 from buildforme.storage import LocalStore
 from governance.constitution_engine import get_engine
 
+AUTOMATION_ACTOR = "system"
+REVIEWER_ACTOR = "reviewer"
+HARNESS_ACTORS = frozenset({AUTOMATION_ACTOR, REVIEWER_ACTOR})
+
 
 def git(root: Path, *args: str) -> str:
     proc = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=False)
@@ -100,7 +104,7 @@ def main() -> int:
         run_id="run-stage7-real-smoke",
         provider_id="glm",
         packet_id=packet["id"],
-        actor="stage7-smoke",
+        actor=AUTOMATION_ACTOR,
     )
     store.save_constitution_lease(lease)
     run = {
@@ -133,7 +137,7 @@ def main() -> int:
         "evidence_ids": [],
         "controlled_implementation_fixture": True,
     }
-    run = engine.attach_to_run(run, lease=lease, actor="stage7-smoke")
+    run = engine.attach_to_run(run, lease=lease, actor=AUTOMATION_ACTOR)
     run["scope_fingerprint"] = compute_run_scope_fingerprint(run, packet)
     run = store.save_run_for_setup(run)
     manifest = collect_changed_file_manifest(repo, baseline_commit=baseline)
@@ -178,7 +182,7 @@ def main() -> int:
                 "constitution_hash": engine.content_hash(),
                 "constitution_last_refresh": "stage7-smoke",
                 "constitution_acknowledged_at": "stage7-smoke",
-                "constitution_ack_actor": "stage7-smoke",
+                "constitution_ack_actor": AUTOMATION_ACTOR,
             },
         )
     created = create_independent_review_cycle(
@@ -188,7 +192,7 @@ def main() -> int:
             {"reviewer_id": "codex-real-reviewer", "provider_id": "codex", "role": "correctness"},
             {"reviewer_id": "claude-real-reviewer", "provider_id": "claude", "role": "security"},
         ],
-        actor="stage7-smoke",
+        actor=AUTOMATION_ACTOR,
     )
     attempts = []
     for assignment in created["assignments"]:
@@ -196,12 +200,12 @@ def main() -> int:
             store,
             created["cycle"]["cycle_id"],
             assignment["assignment_id"],
-            actor=assignment["reviewer_id"],
+            actor=REVIEWER_ACTOR,
             timeout_seconds=900,
         )
         attempts.extend(store.list_review_execution_attempts(assignment["assignment_id"]))
     finalized = aggregate_independent_review_cycle(
-        store, created["cycle"]["cycle_id"], actor="stage7-smoke"
+        store, created["cycle"]["cycle_id"], actor=AUTOMATION_ACTOR
     )
     aggregate = finalized.get("aggregate") or {}
     finalized_cycle = store.get_review_cycle(created["cycle"]["cycle_id"])

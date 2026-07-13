@@ -19,6 +19,40 @@ from buildforme.stage7_smoke import evaluate_stage7_repair_smoke
 from buildforme.storage import LocalStore
 from governance.constitution_engine import get_engine
 
+AUTOMATION_ACTOR = "system"
+REVIEWER_ACTOR = "reviewer"
+HARNESS_ACTORS = frozenset({AUTOMATION_ACTOR, REVIEWER_ACTOR})
+
+SOURCE_AUTH_IMPLEMENTATION = (
+    "def is_authorized(role):\n"
+    "    return True  # BUG: guests receive admin authority\n"
+)
+SOURCE_TEST_SUITE = (
+    "import unittest\n"
+    "import auth\n\n"
+    "class AuthTests(unittest.TestCase):\n"
+    "    def test_admin_allowed(self): self.assertTrue(auth.is_authorized('admin'))\n\n"
+    "if __name__ == '__main__': unittest.main()\n"
+)
+REPAIRED_AUTH_IMPLEMENTATION = (
+    "def is_authorized(role):\n"
+    "    return role == 'admin'\n"
+)
+REPAIRED_TEST_SUITE = (
+    "import unittest\n"
+    "import auth\n\n"
+    "class AuthTests(unittest.TestCase):\n"
+    "    def test_admin_allowed(self): self.assertTrue(auth.is_authorized('admin'))\n"
+    "    def test_guest_rejected(self): self.assertFalse(auth.is_authorized('guest'))\n\n"
+    "if __name__ == '__main__': unittest.main()\n"
+)
+SOURCE_ACCEPTANCE_CRITERIA = (
+    "admin is authorized",
+    "guest is rejected",
+    "the provided deterministic unit tests pass",
+    "guest authorization must be reported as high-severity blocking",
+)
+
 
 def git(root: Path, *args: str) -> str:
     proc = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=False)
@@ -38,6 +72,16 @@ def run_tests(root: Path) -> dict:
     return {"passed": proc.returncode == 0, "stdout": proc.stdout, "stderr": proc.stderr}
 
 
+def write_source_fixture(root: Path) -> None:
+    (root / "auth.py").write_text(SOURCE_AUTH_IMPLEMENTATION, encoding="utf-8")
+    (root / "test_auth.py").write_text(SOURCE_TEST_SUITE, encoding="utf-8")
+
+
+def write_repaired_fixture(root: Path) -> None:
+    (root / "auth.py").write_text(REPAIRED_AUTH_IMPLEMENTATION, encoding="utf-8")
+    (root / "test_auth.py").write_text(REPAIRED_TEST_SUITE, encoding="utf-8")
+
+
 def provider_ack(store: LocalStore, engine, provider_id: str) -> None:
     store.set_provider_constitution_ack(
         provider_id,
@@ -48,14 +92,14 @@ def provider_ack(store: LocalStore, engine, provider_id: str) -> None:
             "constitution_hash": engine.content_hash(),
             "constitution_last_refresh": "stage7-repair-smoke",
             "constitution_acknowledged_at": "stage7-repair-smoke",
-            "constitution_ack_actor": "stage7-repair-smoke",
+            "constitution_ack_actor": AUTOMATION_ACTOR,
         },
     )
 
 
 def real_review_cycle(store: LocalStore, run_id: str, reviewers: list[dict]) -> dict:
     created = create_independent_review_cycle(
-        store, run_id, reviewers=reviewers, actor="stage7-repair-smoke"
+        store, run_id, reviewers=reviewers, actor=AUTOMATION_ACTOR
     )
     attempts = []
     for assignment in created["assignments"]:
@@ -63,12 +107,12 @@ def real_review_cycle(store: LocalStore, run_id: str, reviewers: list[dict]) -> 
             store,
             created["cycle"]["cycle_id"],
             assignment["assignment_id"],
-            actor=assignment["reviewer_id"],
+            actor=REVIEWER_ACTOR,
             timeout_seconds=900,
         )
         attempts.extend(store.list_review_execution_attempts(assignment["assignment_id"]))
     finalized = aggregate_independent_review_cycle(
-        store, created["cycle"]["cycle_id"], actor="stage7-repair-smoke"
+        store, created["cycle"]["cycle_id"], actor=AUTOMATION_ACTOR
     )
     reports = store.list_review_reports(created["cycle"]["cycle_id"])
     findings = store.list_review_findings(created["cycle"]["cycle_id"])
@@ -97,21 +141,14 @@ def main() -> int:
     git(repo, "commit", "-m", "baseline")
     baseline = git(repo, "rev-parse", "HEAD")
     git(repo, "checkout", "-b", "feature/stage7-repair-source")
-    # Deliberate high-severity authorization bypass and failing required test.
-    (repo / "auth.py").write_text(
-        "def is_authorized(role):\n    return True  # BUG: guests receive admin authority\n",
-        encoding="utf-8",
-    )
-    (repo / "test_auth.py").write_text(
-        "import unittest\nimport auth\n\nclass AuthTests(unittest.TestCase):\n"
-        "    def test_admin_allowed(self): self.assertTrue(auth.is_authorized('admin'))\n"
-        "    def test_guest_rejected(self): self.assertFalse(auth.is_authorized('guest'))\n\n"
-        "if __name__ == '__main__': unittest.main()\n",
-        encoding="utf-8",
-    )
+    # Deliberate high-severity authorization bypass with limited tests that miss guests.
+    write_source_fixture(repo)
     source_verification = run_tests(repo)
-    if source_verification["passed"]:
-        raise RuntimeError("deliberate source defect did not fail its required test")
+    if not source_verification["passed"]:
+        raise RuntimeError(
+            "controlled vulnerable source verification failed unexpectedly: "
+            f"{source_verification['stdout']}\n{source_verification['stderr']}"
+        )
 
     source_head_before = git(repo, "rev-parse", "HEAD")
     source_branch_before = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
@@ -139,8 +176,9 @@ def main() -> int:
         {
             "id": "pkt-stage7-repair-source",
             "objective": (
-                "Review an authorization implementation. A guest receiving authorization is a "
-                "high-severity blocking security defect and the failing required test is decisive evidence."
+                "Review an authorization implementation. Only administrators may be authorized. "
+                "A guest receiving authorization is a high-severity blocking security defect even "
+                "when the limited provided tests pass."
             ),
             "target_repository": "shanchaudary/Buildforme",
             "target_branch": "feature/stage7-repair-source",
@@ -148,12 +186,7 @@ def main() -> int:
             "risk": "YELLOW",
             "allowed_files": ["README.md", "auth.py", "test_auth.py"],
             "forbidden_files": [".env", "secrets/**"],
-            "acceptance_criteria": [
-                "admin is authorized",
-                "guest is rejected",
-                "all required unit tests pass",
-                "guest authorization must be reported as high-severity blocking",
-            ],
+            "acceptance_criteria": list(SOURCE_ACCEPTANCE_CRITERIA),
             "required_tests": ["python -m unittest discover -s . -p test_*.py"],
         }
     )
@@ -162,7 +195,7 @@ def main() -> int:
         run_id=source_run_id,
         provider_id="glm",
         packet_id=packet["id"],
-        actor="stage7-repair-smoke",
+        actor=AUTOMATION_ACTOR,
     )
     store.save_constitution_lease(lease)
     source_run = {
@@ -195,7 +228,7 @@ def main() -> int:
         "evidence_ids": [],
         "controlled_source_fixture": True,
     }
-    source_run = engine.attach_to_run(source_run, lease=lease, actor="stage7-repair-smoke")
+    source_run = engine.attach_to_run(source_run, lease=lease, actor=AUTOMATION_ACTOR)
     source_run["scope_fingerprint"] = compute_run_scope_fingerprint(source_run, packet)
     source_run = store.save_run_for_setup(source_run)
     manifest = collect_changed_file_manifest(repo, baseline_commit=baseline)
@@ -207,8 +240,8 @@ def main() -> int:
             "ok": True,
             "exit_code": 0,
             "pid": 1,
-            "stdout": "controlled defective fixture",
-            "stderr": "",
+            "stdout": source_verification["stdout"],
+            "stderr": source_verification["stderr"],
             "cleanup_ok": True,
             "process_group_isolated": True,
             "argv": ["controlled-source-fixture"],
@@ -222,9 +255,15 @@ def main() -> int:
         diff={"manifest": manifest, "patch_fingerprint": patch["patch_fingerprint"]},
         provider_health={"version": "controlled-fixture", "executable": "controlled-fixture"},
         verification={
-            "passed": False,
-            "blocking_reasons": ["required guest rejection test fails"],
-            "checks": [{"name": "unittest", "status": "fail", "detail": source_verification["stdout"] + source_verification["stderr"]}],
+            "passed": True,
+            "blocking_reasons": [],
+            "checks": [
+                {
+                    "name": "unittest",
+                    "status": "pass",
+                    "detail": source_verification["stdout"] + source_verification["stderr"],
+                }
+            ],
         },
         constitution_result={"passed": True},
         approved_baseline_sha=baseline,
@@ -254,10 +293,10 @@ def main() -> int:
         store,
         initial["created"]["cycle"]["cycle_id"],
         repair_provider_id="glm",
-        actor="stage7-repair-smoke",
+        actor=AUTOMATION_ACTOR,
     )
     admitted = admit_governed_repair_run(
-        store, repair_packet["repair_packet_id"], actor="stage7-repair-smoke"
+        store, repair_packet["repair_packet_id"], actor=AUTOMATION_ACTOR
     )
     child = admitted["run"]
     admission = admitted["admission"]
@@ -272,9 +311,7 @@ def main() -> int:
         child["execution_seed_commit"],
     )
     # Disclosed controlled repair execution fixture.
-    (repair_worktree / "auth.py").write_text(
-        "def is_authorized(role):\n    return role == 'admin'\n", encoding="utf-8"
-    )
+    write_repaired_fixture(repair_worktree)
     repair_verification = run_tests(repair_worktree)
     if not repair_verification["passed"]:
         raise RuntimeError(
@@ -342,7 +379,7 @@ def main() -> int:
     child["controlled_repair_execution_fixture"] = True
     store.save_run_for_setup(child)
     final_created = create_repair_review_cycle(
-        store, repair_packet["repair_packet_id"], actor="stage7-repair-smoke"
+        store, repair_packet["repair_packet_id"], actor=AUTOMATION_ACTOR
     )
     final_attempts = []
     for assignment in final_created["assignments"]:
@@ -350,12 +387,12 @@ def main() -> int:
             store,
             final_created["cycle"]["cycle_id"],
             assignment["assignment_id"],
-            actor=assignment["reviewer_id"],
+            actor=REVIEWER_ACTOR,
             timeout_seconds=900,
         )
         final_attempts.extend(store.list_review_execution_attempts(assignment["assignment_id"]))
     final = aggregate_independent_review_cycle(
-        store, final_created["cycle"]["cycle_id"], actor="stage7-repair-smoke"
+        store, final_created["cycle"]["cycle_id"], actor=AUTOMATION_ACTOR
     )
     final_aggregate = final.get("aggregate") or {}
     final_reports = store.list_review_reports(final_created["cycle"]["cycle_id"])

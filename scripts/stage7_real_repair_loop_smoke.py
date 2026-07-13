@@ -122,6 +122,8 @@ def real_review_cycle(store: LocalStore, run_id: str, reviewers: list[dict]) -> 
         "attempts": attempts,
         "reports": reports,
         "findings": findings,
+        "review_events": store.list_review_events(created["cycle"]["cycle_id"]),
+        "run_review_events": store.list_run_events(run_id),
     }
 
 
@@ -414,6 +416,8 @@ def main() -> int:
         "initial_report_fingerprints": [item.get("report_fingerprint") for item in initial["reports"]],
         "initial_aggregate_report_fingerprints": initial_aggregate.get("report_fingerprints") or [],
         "initial_aggregate_status": initial_aggregate.get("status"),
+        "initial_review_events": initial["review_events"],
+        "initial_run_review_events": initial["run_review_events"],
         "blocking_finding_count": len(blocking),
         "initial_cycle_id": initial["created"]["cycle"]["cycle_id"],
         "source_evidence_id": source_evidence["evidence_id"],
@@ -439,6 +443,8 @@ def main() -> int:
         "final_report_fingerprints": [item.get("report_fingerprint") for item in final_reports],
         "final_aggregate_report_fingerprints": final_aggregate.get("report_fingerprints") or [],
         "final_aggregate_status": final_aggregate.get("status"),
+        "final_review_events": store.list_review_events(final_created["cycle"]["cycle_id"]),
+        "final_run_review_events": store.list_run_events(child["id"]),
         "repair_provider_id": repair_packet["repair_provider_id"],
         "source_head_before": source_head_before,
         "source_head_after": source_head_after,

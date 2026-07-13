@@ -219,6 +219,8 @@ def main() -> int:
         "persisted_report_count": len(reports),
         "persisted_report_fingerprints": [item.get("report_fingerprint") for item in reports],
         "aggregate_report_fingerprints": aggregate.get("report_fingerprints") or [],
+        "review_events": store.list_review_events(created["cycle"]["cycle_id"]),
+        "run_review_events": store.list_run_events(run["id"]),
         "cycle_id": finalized_cycle.get("cycle_id"),
         "cycle_evidence_id": finalized_cycle.get("evidence_id"),
         "cycle_evidence_fingerprint": finalized_cycle.get("evidence_fingerprint"),

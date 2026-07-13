@@ -9,11 +9,11 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from buildforme.db import SCHEMA_VERSION
 from buildforme.evidence import build_evidence_bundle
-from buildforme.governance import compute_run_scope_fingerprint
+from buildforme.governance import ALLOWED_ACTORS, compute_run_scope_fingerprint
 from governance.constitution_engine import get_engine
 from buildforme.review_contracts import build_review_report_record
 from buildforme.review_execution import (
@@ -157,8 +157,8 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
             self.store,
             self.run["id"],
             reviewers=[
-                {"reviewer_id": "codex-reviewer", "provider_id": "codex", "role": "correctness"},
-                {"reviewer_id": "claude-reviewer", "provider_id": "claude", "role": "security"},
+                {"reviewer_id": "codex-real-reviewer", "provider_id": "codex", "role": "correctness"},
+                {"reviewer_id": "claude-real-reviewer", "provider_id": "claude", "role": "security"},
             ],
             actor="shan",
         )
@@ -234,6 +234,258 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
             "unsupported_reasons": [],
             "auth": {"status": "ready", "probe_verified": True},
         }
+
+    def _successful_process_result(self, provider_id, argv):
+        payload = {"verdict": "pass", "summary": "clear", "findings": []}
+        if provider_id == "codex":
+            stdout = json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": json.dumps(payload),
+                    },
+                }
+            )
+        else:
+            stdout = json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "structured_output": payload,
+                }
+            )
+        return {
+            "ok": True,
+            "exit_code": 0,
+            "pid": 321,
+            "stdout": stdout,
+            "stderr": "",
+            "cleanup_ok": True,
+            "process_group_isolated": True,
+            "argv": list(argv),
+        }
+
+    def _build_claimed_success(self, assignment=None):
+        assignment = assignment or self.assignment
+        packet, snapshot, _root = build_verified_blind_review_packet(
+            self.store, self.cycle["cycle_id"], assignment["assignment_id"]
+        )
+        packet = self.store.save_review_packet_atomic(packet=packet, actor="reviewer")
+        claim_id = f"claim-{assignment['provider_id']}-storage"
+        claimed = self.store.claim_review_assignment_execution_atomic(
+            cycle_id=self.cycle["cycle_id"],
+            assignment_id=assignment["assignment_id"],
+            packet_id=packet["packet_id"],
+            claim_id=claim_id,
+            actor="reviewer",
+        )
+        claimed_assignment = claimed["assignment"]
+        command = build_review_command(assignment["provider_id"], "test-reviewer")
+        report, findings = build_review_report_record(
+            cycle=claimed["cycle"],
+            assignment=claimed_assignment,
+            payload={"verdict": "pass", "summary": "clear", "findings": []},
+        )
+        execution = build_review_execution_record(
+            packet=packet,
+            assignment=claimed_assignment,
+            command=command,
+            health={
+                "version": "test",
+                "executable": "test-reviewer",
+                "live_ready": True,
+                "auth": {"probe_verified": True},
+            },
+            process_result=self._successful_process_result(
+                assignment["provider_id"], command["argv"]
+            ),
+            pre_snapshot=snapshot,
+            post_snapshot=snapshot,
+            status="succeeded",
+            claim_id=claim_id,
+            report_fingerprint=report["report_fingerprint"],
+            post_snapshot_proven=True,
+            process_started=True,
+        )
+        return {
+            "cycle": claimed["cycle"],
+            "assignment": claimed_assignment,
+            "packet": packet,
+            "report": report,
+            "findings": findings,
+            "execution": execution,
+        }
+
+    def test_canonical_actor_allowlist_is_unchanged(self):
+        self.assertEqual(ALLOWED_ACTORS, {"shan", "system", "cli", "reviewer"})
+
+    def test_executor_preserves_canonical_actor_and_reviewer_identity(self):
+        supervisor = Mock()
+
+        def run(**kwargs):
+            return self._successful_process_result(kwargs["provider_id"], kwargs["argv"])
+
+        supervisor.run.side_effect = run
+
+        def health(provider_id, _provider, force_compat=True):
+            del force_compat
+            executable = f"{provider_id}-test"
+            if provider_id == "codex":
+                return self._health(executable)
+            if provider_id == "claude":
+                return self._claude_health(executable)
+            raise AssertionError(provider_id)
+
+        assignments = (self.assignment, self.claude_assignment)
+        with patch(
+            "buildforme.review_execution.health_check_provider", side_effect=health
+        ), patch(
+            "buildforme.review_execution.get_process_supervisor", return_value=supervisor
+        ), patch.object(
+            self.store,
+            "save_review_packet_atomic",
+            wraps=self.store.save_review_packet_atomic,
+        ) as save_packet, patch.object(
+            self.store,
+            "claim_review_assignment_execution_atomic",
+            wraps=self.store.claim_review_assignment_execution_atomic,
+        ) as claim_assignment, patch.object(
+            self.store,
+            "submit_review_report_atomic",
+            wraps=self.store.submit_review_report_atomic,
+        ) as submit_report:
+            for assignment in assignments:
+                execute_independent_review_assignment(
+                    self.store,
+                    self.cycle["cycle_id"],
+                    assignment["assignment_id"],
+                    actor="reviewer",
+                )
+
+        for call in save_packet.call_args_list + claim_assignment.call_args_list + submit_report.call_args_list:
+            self.assertEqual(call.kwargs["actor"], "reviewer")
+        self.assertEqual(len(submit_report.call_args_list), 2)
+
+        reports = {
+            item["assignment_id"]: item
+            for item in self.store.list_review_reports(self.cycle["cycle_id"])
+        }
+        for original in assignments:
+            assignment_id = original["assignment_id"]
+            stored_assignment = self.store.get_review_assignment(assignment_id)
+            packet = self.store.get_review_packet_for_assignment(assignment_id)
+            execution = self.store.list_review_execution_attempts(assignment_id)[0]
+            report = reports[assignment_id]
+            for record, provider_field in (
+                (stored_assignment, "provider_id"),
+                (execution, "provider_id"),
+                (report, "provider_id"),
+            ):
+                self.assertEqual(record["reviewer_id"], original["reviewer_id"])
+                self.assertEqual(record[provider_field], original["provider_id"])
+            self.assertEqual(packet["reviewer_id"], original["reviewer_id"])
+            self.assertEqual(packet["reviewer_provider_id"], original["provider_id"])
+
+    def test_invalid_executor_actor_is_rejected_before_governed_work(self):
+        review_events_before = self.store.list_review_events(self.cycle["cycle_id"])
+        run_events_before = self.store.list_run_events(self.run["id"])
+        with patch("buildforme.review_execution.build_verified_blind_review_packet") as build_packet:
+            with self.assertRaisesRegex(ValueError, "actor must be one of"):
+                execute_independent_review_assignment(
+                    self.store,
+                    self.cycle["cycle_id"],
+                    self.assignment["assignment_id"],
+                    actor="codex-real-reviewer",
+                )
+        build_packet.assert_not_called()
+        self.assertEqual(
+            self.store.get_review_assignment(self.assignment["assignment_id"])["status"],
+            "pending",
+        )
+        self.assertEqual(
+            self.store.list_review_events(self.cycle["cycle_id"]), review_events_before
+        )
+        self.assertEqual(self.store.list_run_events(self.run["id"]), run_events_before)
+
+    def test_storage_rejects_noncanonical_actor_without_partial_submission(self):
+        prepared = self._build_claimed_success()
+        assignment_before = self.store.get_review_assignment(
+            prepared["assignment"]["assignment_id"]
+        )
+        cycle_before = self.store.get_review_cycle(self.cycle["cycle_id"])
+        review_events_before = self.store.list_review_events(self.cycle["cycle_id"])
+        run_events_before = self.store.list_run_events(self.run["id"])
+
+        for actor in (
+            "codex-real-reviewer",
+            "claude-real-reviewer",
+            "arbitrary-reviewer",
+        ):
+            with self.subTest(actor=actor):
+                with self.assertRaisesRegex(ValueError, "actor must be one of"):
+                    self.store.submit_review_report_atomic(
+                        cycle_id=self.cycle["cycle_id"],
+                        assignment_id=prepared["assignment"]["assignment_id"],
+                        report=prepared["report"],
+                        findings=prepared["findings"],
+                        actor=actor,
+                        execution=prepared["execution"],
+                    )
+
+        self.assertEqual(
+            self.store.list_review_execution_attempts(
+                prepared["assignment"]["assignment_id"]
+            ),
+            [],
+        )
+        self.assertEqual(self.store.list_review_reports(self.cycle["cycle_id"]), [])
+        self.assertEqual(self.store.list_review_findings(self.cycle["cycle_id"]), [])
+        self.assertEqual(
+            self.store.get_review_assignment(prepared["assignment"]["assignment_id"]),
+            assignment_before,
+        )
+        self.assertEqual(self.store.get_review_cycle(self.cycle["cycle_id"]), cycle_before)
+        self.assertEqual(
+            self.store.list_review_events(self.cycle["cycle_id"]), review_events_before
+        )
+        self.assertEqual(self.store.list_run_events(self.run["id"]), run_events_before)
+
+    def test_storage_persists_reviewer_actor_in_review_and_run_events(self):
+        prepared = self._build_claimed_success()
+        self.store.submit_review_report_atomic(
+            cycle_id=self.cycle["cycle_id"],
+            assignment_id=prepared["assignment"]["assignment_id"],
+            report=prepared["report"],
+            findings=prepared["findings"],
+            actor="reviewer",
+            execution=prepared["execution"],
+        )
+        review_events = [
+            event
+            for event in self.store.list_review_events(self.cycle["cycle_id"])
+            if event["event_type"] == "review_report_submitted"
+        ]
+        run_events = [
+            event
+            for event in self.store.list_run_events(self.run["id"])
+            if event["event_type"] == "stage7_review_report_submitted"
+        ]
+        self.assertEqual(len(review_events), 1)
+        self.assertEqual(len(run_events), 1)
+        self.assertEqual(review_events[0]["actor"], "reviewer")
+        self.assertEqual(run_events[0]["actor"], "reviewer")
+        self.assertEqual(
+            (
+                review_events[0]["metadata"]["assignment_id"],
+                review_events[0]["metadata"]["report_id"],
+            ),
+            (
+                run_events[0]["metadata"]["assignment_id"],
+                run_events[0]["metadata"]["report_id"],
+            ),
+        )
 
     def test_schema_v5(self):
         self.assertEqual(SCHEMA_VERSION, 8)
@@ -344,7 +596,10 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
         with patch("buildforme.review_execution.health_check_provider", return_value=self._health(executable)):
             with self.assertRaisesRegex(ValueError, "mutated"):
                 execute_independent_review_assignment(
-                    self.store, self.cycle["cycle_id"], self.assignment["assignment_id"]
+                    self.store,
+                    self.cycle["cycle_id"],
+                    self.assignment["assignment_id"],
+                    actor="reviewer",
                 )
         self.assertEqual(self.store.list_review_reports(self.cycle["cycle_id"]), [])
         attempts = self.store.list_review_execution_attempts(self.assignment["assignment_id"])
@@ -360,13 +615,23 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
         with patch("buildforme.review_execution.health_check_provider", return_value=self._health(executable)):
             with self.assertRaisesRegex(ValueError, "output rejected"):
                 execute_independent_review_assignment(
-                    self.store, self.cycle["cycle_id"], self.assignment["assignment_id"]
+                    self.store,
+                    self.cycle["cycle_id"],
+                    self.assignment["assignment_id"],
+                    actor="reviewer",
                 )
         self.assertEqual(self.store.list_review_reports(self.cycle["cycle_id"]), [])
         attempt = self.store.list_review_execution_attempts(self.assignment["assignment_id"])[-1]
         self.assertEqual(attempt["status"], "failed")
         self.assertTrue(attempt["retry_safe"])
         self.assertEqual(self.store.get_review_assignment(self.assignment["assignment_id"])["status"], "pending")
+        failure_events = [
+            event
+            for event in self.store.list_review_events(self.cycle["cycle_id"])
+            if event["event_type"] == "review_execution_retry_safe_failure"
+        ]
+        self.assertEqual(len(failure_events), 1)
+        self.assertEqual(failure_events[0]["actor"], "reviewer")
 
     def test_unavailable_provider_records_failure_and_no_report(self):
         health = {
@@ -380,26 +645,36 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
         with patch("buildforme.review_execution.health_check_provider", return_value=health):
             with self.assertRaisesRegex(ValueError, "not live-ready"):
                 execute_independent_review_assignment(
-                    self.store, self.cycle["cycle_id"], self.assignment["assignment_id"]
+                    self.store,
+                    self.cycle["cycle_id"],
+                    self.assignment["assignment_id"],
+                    actor="reviewer",
                 )
         self.assertEqual(self.store.list_review_reports(self.cycle["cycle_id"]), [])
         attempt = self.store.list_review_execution_attempts(self.assignment["assignment_id"])[-1]
         self.assertEqual(attempt["status"], "failed")
         self.assertTrue(attempt["retry_safe"])
         self.assertEqual(self.store.get_review_assignment(self.assignment["assignment_id"])["status"], "pending")
+        failure_events = [
+            event
+            for event in self.store.list_review_events(self.cycle["cycle_id"])
+            if event["event_type"] == "review_execution_retry_safe_failure"
+        ]
+        self.assertEqual(len(failure_events), 1)
+        self.assertEqual(failure_events[0]["actor"], "reviewer")
 
     def test_authenticated_storage_rejects_divergent_findings(self):
         packet, snapshot, _root = build_verified_blind_review_packet(
             self.store, self.cycle["cycle_id"], self.assignment["assignment_id"]
         )
-        packet = self.store.save_review_packet_atomic(packet=packet, actor="test")
+        packet = self.store.save_review_packet_atomic(packet=packet, actor="reviewer")
         claim_id = "claim-divergence"
         claimed = self.store.claim_review_assignment_execution_atomic(
             cycle_id=self.cycle["cycle_id"],
             assignment_id=self.assignment["assignment_id"],
             packet_id=packet["packet_id"],
             claim_id=claim_id,
-            actor="test",
+            actor="reviewer",
         )
         cycle = claimed["cycle"]
         assignment = claimed["assignment"]
@@ -470,13 +745,13 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
         packet, _snapshot, _root = build_verified_blind_review_packet(
             self.store, self.cycle["cycle_id"], self.assignment["assignment_id"]
         )
-        packet = self.store.save_review_packet_atomic(packet=packet, actor="test")
+        packet = self.store.save_review_packet_atomic(packet=packet, actor="reviewer")
         self.store.claim_review_assignment_execution_atomic(
             cycle_id=self.cycle["cycle_id"],
             assignment_id=self.assignment["assignment_id"],
             packet_id=packet["packet_id"],
             claim_id="claim-one",
-            actor="test",
+            actor="reviewer",
         )
         with self.assertRaisesRegex(ValueError, "already claimed|unavailable"):
             self.store.claim_review_assignment_execution_atomic(
@@ -484,7 +759,7 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
                 assignment_id=self.assignment["assignment_id"],
                 packet_id=packet["packet_id"],
                 claim_id="claim-two",
-                actor="test",
+                actor="reviewer",
             )
 
     def test_repository_remote_mismatch_blocks_packet(self):
@@ -539,14 +814,14 @@ class Stage7ReviewExecutionTests(unittest.TestCase):
         packet, snapshot, _root = build_verified_blind_review_packet(
             self.store, self.cycle["cycle_id"], self.assignment["assignment_id"]
         )
-        packet = self.store.save_review_packet_atomic(packet=packet, actor="test")
+        packet = self.store.save_review_packet_atomic(packet=packet, actor="reviewer")
         claim_id = "claim-forged"
         claimed = self.store.claim_review_assignment_execution_atomic(
             cycle_id=self.cycle["cycle_id"],
             assignment_id=self.assignment["assignment_id"],
             packet_id=packet["packet_id"],
             claim_id=claim_id,
-            actor="test",
+            actor="reviewer",
         )
         assignment = claimed["assignment"]
         cycle = claimed["cycle"]

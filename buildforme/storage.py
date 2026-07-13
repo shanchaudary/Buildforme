@@ -1273,6 +1273,9 @@ class LocalStore:
     def list_review_findings(self, cycle_id: str) -> list[dict[str, Any]]:
         return self.s6.list_review_findings(cycle_id)
 
+    def list_review_events(self, cycle_id: str) -> list[dict[str, Any]]:
+        return self.s6.list_review_events(cycle_id)
+
     def submit_review_report_atomic(self, **kwargs: Any) -> dict[str, Any]:
         return self.s6.submit_review_report_atomic(**kwargs)
 

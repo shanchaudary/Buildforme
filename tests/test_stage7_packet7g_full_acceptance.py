@@ -9,7 +9,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from buildforme.stage7_full_acceptance import evaluate_stage7_full_acceptance
+from buildforme.stage7_full_acceptance import (
+    REPAIR_ACTOR_EVIDENCE_CHECKS,
+    REVIEW_ACTOR_EVIDENCE_CHECKS,
+    evaluate_stage7_full_acceptance,
+)
 from scripts.stage7_full_acceptance import ROOT, build_child_command, run_smoke
 
 
@@ -17,10 +21,20 @@ class Stage7FullAcceptanceTests(unittest.TestCase):
     def _observed(self):
         return {
             "review_exit_code": 0,
-            "review_smoke": {"schema": "review", "passed": True, "failed_checks": []},
+            "review_smoke": {
+                "schema": "review",
+                "passed": True,
+                "checks": {name: True for name in REVIEW_ACTOR_EVIDENCE_CHECKS},
+                "failed_checks": [],
+            },
             "review_merge_marker": "MERGE no",
             "repair_exit_code": 0,
-            "repair_smoke": {"schema": "repair", "passed": True, "failed_checks": []},
+            "repair_smoke": {
+                "schema": "repair",
+                "passed": True,
+                "checks": {name: True for name in REPAIR_ACTOR_EVIDENCE_CHECKS},
+                "failed_checks": [],
+            },
             "repair_merge_marker": "MERGE no",
             "source_head_before": "a",
             "source_head_after": "a",
@@ -60,6 +74,26 @@ class Stage7FullAcceptanceTests(unittest.TestCase):
         result = evaluate_stage7_full_acceptance(review_failed)
         self.assertFalse(result["passed"])
         self.assertIn("review_smoke_passed", result["failed_checks"])
+
+    def test_combined_acceptance_fails_closed_without_child_actor_evidence(self):
+        for child, check_name, expected_failure in (
+            (
+                "review_smoke",
+                REVIEW_ACTOR_EVIDENCE_CHECKS[0],
+                "review_smoke_canonical_actor_evidence",
+            ),
+            (
+                "repair_smoke",
+                REPAIR_ACTOR_EVIDENCE_CHECKS[-1],
+                "repair_smoke_canonical_actor_evidence",
+            ),
+        ):
+            with self.subTest(child=child, check_name=check_name):
+                observed = self._observed()
+                observed[child]["checks"].pop(check_name)
+                result = evaluate_stage7_full_acceptance(observed)
+                self.assertFalse(result["passed"])
+                self.assertIn(expected_failure, result["failed_checks"])
 
     def test_wrapper_invokes_children_as_modules_without_pythonpath(self):
         payload = {"schema": "test", "passed": True, "failed_checks": []}

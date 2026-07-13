@@ -27,7 +27,45 @@ class Stage7RepairSmokeTests(unittest.TestCase):
             "process": {"pid": 10, "exit_code": 0, "cleanup_ok": True},
         }
 
+    def _event_evidence(self, prefix):
+        review_events = [
+            {
+                "event_type": "review_cycle_created",
+                "actor": "system",
+                "metadata": {},
+            }
+        ]
+        run_events = [
+            {
+                "event_type": "stage7_review_cycle_created",
+                "actor": "system",
+                "metadata": {},
+            }
+        ]
+        for index in (1, 2):
+            metadata = {
+                "assignment_id": f"{prefix}-assignment-{index}",
+                "report_id": f"{prefix}-report-{index}",
+            }
+            review_events.append(
+                {
+                    "event_type": "review_report_submitted",
+                    "actor": "reviewer",
+                    "metadata": dict(metadata),
+                }
+            )
+            run_events.append(
+                {
+                    "event_type": "stage7_review_report_submitted",
+                    "actor": "reviewer",
+                    "metadata": dict(metadata),
+                }
+            )
+        return review_events, run_events
+
     def _observed(self):
+        initial_review_events, initial_run_review_events = self._event_evidence("initial")
+        final_review_events, final_run_review_events = self._event_evidence("final")
         return {
             "controlled_source_fixture": True,
             "controlled_repair_execution_fixture": True,
@@ -35,6 +73,8 @@ class Stage7RepairSmokeTests(unittest.TestCase):
             "initial_report_fingerprints": ["i1", "i2"],
             "initial_aggregate_report_fingerprints": ["i1", "i2"],
             "initial_aggregate_status": "repair_required",
+            "initial_review_events": initial_review_events,
+            "initial_run_review_events": initial_run_review_events,
             "blocking_finding_count": 1,
             "initial_cycle_id": "rc-initial",
             "source_evidence_id": "ev-source",
@@ -60,6 +100,8 @@ class Stage7RepairSmokeTests(unittest.TestCase):
             "final_report_fingerprints": ["f1", "f2"],
             "final_aggregate_report_fingerprints": ["f1", "f2"],
             "final_aggregate_status": "clear",
+            "final_review_events": final_review_events,
+            "final_run_review_events": final_run_review_events,
             "repair_provider_id": "glm",
             "source_head_before": "head",
             "source_head_after": "head",
@@ -80,6 +122,52 @@ class Stage7RepairSmokeTests(unittest.TestCase):
         result = evaluate_stage7_repair_smoke(observed)
         self.assertFalse(result["passed"])
         self.assertIn("final_real_codex_claude_review", result["failed_checks"])
+
+    def test_acceptance_requires_canonical_persisted_actors_for_both_cycles(self):
+        for phase in ("initial", "final"):
+            for actor in (
+                "codex-real-reviewer",
+                "claude-real-reviewer",
+                "arbitrary-reviewer",
+            ):
+                with self.subTest(phase=phase, actor=actor):
+                    observed = self._observed()
+                    observed[f"{phase}_review_events"][1]["actor"] = actor
+                    result = evaluate_stage7_repair_smoke(observed)
+                    self.assertFalse(result["passed"])
+                    self.assertIn(
+                        f"{phase}_persisted_review_event_actors_canonical",
+                        result["failed_checks"],
+                    )
+
+            missing = self._observed()
+            missing[f"{phase}_run_review_events"] = []
+            result = evaluate_stage7_repair_smoke(missing)
+            self.assertFalse(result["passed"])
+            self.assertIn(
+                f"{phase}_persisted_review_event_actors_canonical",
+                result["failed_checks"],
+            )
+
+            wrong_authority = self._observed()
+            wrong_authority[f"{phase}_review_events"][1]["actor"] = "system"
+            result = evaluate_stage7_repair_smoke(wrong_authority)
+            self.assertFalse(result["passed"])
+            self.assertIn(
+                f"{phase}_persisted_review_report_submission_actor",
+                result["failed_checks"],
+            )
+
+            contradictory = self._observed()
+            contradictory[f"{phase}_run_review_events"][1]["metadata"][
+                "report_id"
+            ] = "contradictory-report"
+            result = evaluate_stage7_repair_smoke(contradictory)
+            self.assertFalse(result["passed"])
+            self.assertIn(
+                f"{phase}_persisted_review_run_event_pair_consistent",
+                result["failed_checks"],
+            )
 
     def test_script_uses_real_review_execution_and_no_direct_report_submission(self):
         source = Path("scripts/stage7_real_repair_loop_smoke.py").read_text(encoding="utf-8")

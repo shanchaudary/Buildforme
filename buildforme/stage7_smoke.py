@@ -4,7 +4,64 @@ from __future__ import annotations
 
 from typing import Any
 
+from buildforme.governance import ALLOWED_ACTORS
+
 STAGE7_SMOKE_SCHEMA = "buildforme.stage7_real_two_provider_smoke.v1"
+
+
+def _review_actor_proof(
+    review_events: list[dict[str, Any]],
+    run_events: list[dict[str, Any]],
+    *,
+    expected_report_count: int,
+) -> dict[str, bool]:
+    governed_review_events = [
+        event
+        for event in review_events
+        if str(event.get("event_type") or "").startswith("review_")
+    ]
+    governed_run_events = [
+        event
+        for event in run_events
+        if str(event.get("event_type") or "").startswith("stage7_review_")
+    ]
+    review_submissions = [
+        event
+        for event in governed_review_events
+        if event.get("event_type") == "review_report_submitted"
+    ]
+    run_submissions = [
+        event
+        for event in governed_run_events
+        if event.get("event_type") == "stage7_review_report_submitted"
+    ]
+
+    def submission_key(event: dict[str, Any]) -> tuple[str, str, str] | None:
+        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        assignment_id = str(metadata.get("assignment_id") or "")
+        report_id = str(metadata.get("report_id") or "")
+        actor = str(event.get("actor") or "")
+        if not assignment_id or not report_id or not actor:
+            return None
+        return assignment_id, report_id, actor
+
+    review_keys = [submission_key(event) for event in review_submissions]
+    run_keys = [submission_key(event) for event in run_submissions]
+    required_submissions = (
+        len(review_submissions) == expected_report_count
+        and len(run_submissions) == expected_report_count
+    )
+    all_governed = governed_review_events + governed_run_events
+    return {
+        "canonical": bool(governed_review_events)
+        and bool(governed_run_events)
+        and all(str(event.get("actor") or "") in ALLOWED_ACTORS for event in all_governed),
+        "report_actor_reviewer": required_submissions
+        and all(event.get("actor") == "reviewer" for event in review_submissions + run_submissions),
+        "submission_pairs_consistent": required_submissions
+        and all(key is not None for key in review_keys + run_keys)
+        and sorted(review_keys) == sorted(run_keys),
+    }
 
 
 def evaluate_stage7_smoke(observed: dict[str, Any]) -> dict[str, Any]:
@@ -18,6 +75,11 @@ def evaluate_stage7_smoke(observed: dict[str, Any]) -> dict[str, Any]:
     )
     persisted_report_fingerprints = sorted(str(item) for item in (observed.get("persisted_report_fingerprints") or []))
     aggregate_report_fingerprints = sorted(str(item) for item in (observed.get("aggregate_report_fingerprints") or []))
+    actor_proof = _review_actor_proof(
+        observed.get("review_events") or [],
+        observed.get("run_review_events") or [],
+        expected_report_count=2,
+    )
     checks = {
         "controlled_implementation_fixture_disclosed": observed.get("controlled_implementation_fixture") is True,
         "real_reviewer_processes_only": bool(attempts)
@@ -55,6 +117,11 @@ def evaluate_stage7_smoke(observed: dict[str, Any]) -> dict[str, Any]:
         "merge_not_performed": int(observed.get("merge_commit_count") or 0) == 0,
         "no_synthetic_report_submission": execution_report_fingerprints
         == persisted_report_fingerprints,
+        "persisted_review_event_actors_canonical": actor_proof["canonical"],
+        "persisted_review_report_submission_actor": actor_proof["report_actor_reviewer"],
+        "persisted_review_run_event_pair_consistent": actor_proof[
+            "submission_pairs_consistent"
+        ],
     }
     failed = sorted(name for name, passed in checks.items() if not passed)
     return {
@@ -116,6 +183,16 @@ def evaluate_stage7_repair_smoke(observed: dict[str, Any]) -> dict[str, Any]:
     final_aggregate_reports = sorted(
         str(item) for item in (observed.get("final_aggregate_report_fingerprints") or [])
     )
+    initial_actor_proof = _review_actor_proof(
+        observed.get("initial_review_events") or [],
+        observed.get("initial_run_review_events") or [],
+        expected_report_count=2,
+    )
+    final_actor_proof = _review_actor_proof(
+        observed.get("final_review_events") or [],
+        observed.get("final_run_review_events") or [],
+        expected_report_count=2,
+    )
     checks = {
         "controlled_source_fixture_disclosed": observed.get("controlled_source_fixture") is True,
         "controlled_repair_execution_disclosed": observed.get("controlled_repair_execution_fixture") is True,
@@ -129,6 +206,13 @@ def evaluate_stage7_repair_smoke(observed: dict[str, Any]) -> dict[str, Any]:
         "initial_reports_bound_to_execution_and_aggregate": len(initial_reports) == 2
         and initial["report_fingerprints"] == initial_reports == initial_aggregate_reports,
         "initial_cycle_repair_required": observed.get("initial_aggregate_status") == "repair_required",
+        "initial_persisted_review_event_actors_canonical": initial_actor_proof["canonical"],
+        "initial_persisted_review_report_submission_actor": initial_actor_proof[
+            "report_actor_reviewer"
+        ],
+        "initial_persisted_review_run_event_pair_consistent": initial_actor_proof[
+            "submission_pairs_consistent"
+        ],
         "blocking_findings_persisted": int(observed.get("blocking_finding_count") or 0) >= 1,
         "repair_packet_bound": bool(observed.get("repair_packet_id"))
         and observed.get("repair_packet_source_cycle_id") == observed.get("initial_cycle_id")
@@ -157,6 +241,13 @@ def evaluate_stage7_repair_smoke(observed: dict[str, Any]) -> dict[str, Any]:
         "final_reports_bound_to_execution_and_aggregate": len(final_reports) == 2
         and final["report_fingerprints"] == final_reports == final_aggregate_reports,
         "final_cycle_clear": observed.get("final_aggregate_status") == "clear",
+        "final_persisted_review_event_actors_canonical": final_actor_proof["canonical"],
+        "final_persisted_review_report_submission_actor": final_actor_proof[
+            "report_actor_reviewer"
+        ],
+        "final_persisted_review_run_event_pair_consistent": final_actor_proof[
+            "submission_pairs_consistent"
+        ],
         "repair_implementer_excluded": str(observed.get("repair_provider_id") or "")
         not in final["providers"],
         "source_repository_unchanged": observed.get("source_head_before")
